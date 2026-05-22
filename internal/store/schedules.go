@@ -17,16 +17,16 @@ const (
 )
 
 type Schedule struct {
-	ID        int64
-	Channel   string
-	ServiceID uint16
-	EventID   sql.NullInt64
-	Start     time.Time
-	End       time.Time
-	Lead      time.Duration
-	Trail     time.Duration
-	State     ScheduleState
-	CreatedAt time.Time
+	ID        int64         `json:"id"`
+	Channel   string        `json:"channel"`
+	ServiceID uint16        `json:"service_id"`
+	EventID   sql.NullInt64 `json:"event_id,omitempty"`
+	Start     time.Time     `json:"start"`
+	End       time.Time     `json:"end"`
+	Lead      time.Duration `json:"lead_ns"`
+	Trail     time.Duration `json:"trail_ns"`
+	State     ScheduleState `json:"state"`
+	CreatedAt time.Time     `json:"created_at"`
 }
 
 func (s *Store) CreateSchedule(ctx context.Context, sch Schedule) (int64, error) {

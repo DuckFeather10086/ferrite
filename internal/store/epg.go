@@ -8,14 +8,14 @@ import (
 
 // EPGEvent is one EIT event row, decoded into Go types.
 type EPGEvent struct {
-	ServiceID  uint16
-	EventID    uint16
-	Start      time.Time
-	Duration   time.Duration
-	Title      string
-	Synopsis   string
-	Raw        string
-	IngestedAt time.Time
+	ServiceID   uint16        `json:"service_id"`
+	EventID     uint16        `json:"event_id"`
+	Start       time.Time     `json:"start"`
+	Duration    time.Duration `json:"duration_ns"`
+	Title       string        `json:"title"`
+	Synopsis    string        `json:"synopsis,omitempty"`
+	Raw         string        `json:"-"`
+	IngestedAt  time.Time     `json:"ingested_at"`
 }
 
 // UpsertEPGEvents writes events transactionally, replacing existing

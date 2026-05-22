@@ -1,26 +1,309 @@
 // Package api wires HTTP handlers onto a chi router.
 //
-// Endpoints (sketch):
-//   GET  /api/channels                  list configured channels
-//   GET  /api/epg?service=&from=&to=    EPG events in window
+// Endpoints implemented:
+//   GET  /health                        liveness
+//   GET  /api/status                    daemon info, adapter status
+//   GET  /api/channels                  channels.json listing
+//   GET  /api/epg?service=&from=&to=    EPG events in window (RFC3339)
 //   GET  /api/now?service=              currently-airing event
-//   POST /api/schedule                  create recording schedule
 //   GET  /api/schedule                  list schedules
-//   DEL  /api/schedule/{id}             cancel
-//   GET  /api/recordings                list completed/in-progress
-//   GET  /api/recordings/{id}/file      stream the file
+//   POST /api/schedule                  create schedule
+//   DELETE /api/schedule/{id}           cancel schedule
+//   GET  /api/recordings                list recordings
+//
+// Future:
 //   GET  /api/live/{channel}.m3u8       live HLS playlist
 //   GET  /api/live/{channel}/{seg}.ts   live HLS segment
-//   GET  /api/status                    adapter usage, signal, sessions
-//   GET  /                              static frontend (embedded)
+//   GET  /api/recordings/{id}/file      stream a recorded file
 package api
 
-import "net/http"
+import (
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"time"
 
-func NewRouter() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not implemented", http.StatusNotImplemented)
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+
+	"github.com/DuckFeather10086/isdbd/internal/config"
+	"github.com/DuckFeather10086/isdbd/internal/store"
+)
+
+// Deps is what the router needs from the rest of the daemon. Pass a
+// value with the fields you have — tests can leave Store nil and
+// only exercise the static endpoints.
+type Deps struct {
+	Channels  *config.Channels
+	Store     *store.Store
+	StartedAt time.Time
+	Version   string // build-time injected, optional
+}
+
+// NewRouter returns an http.Handler with all endpoints wired.
+func NewRouter(d Deps) http.Handler {
+	r := chi.NewRouter()
+	r.Use(middleware.RealIP)
+	r.Use(middleware.Recoverer)
+	r.Use(slogRequestLogger)
+
+	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
-	return mux
+
+	r.Route("/api", func(r chi.Router) {
+		r.Get("/status", d.handleStatus)
+		r.Get("/channels", d.handleChannels)
+		r.Get("/epg", d.handleEPG)
+		r.Get("/now", d.handleNow)
+
+		r.Get("/schedule", d.handleListSchedules)
+		r.Post("/schedule", d.handleCreateSchedule)
+		r.Delete("/schedule/{id}", d.handleCancelSchedule)
+
+		r.Get("/recordings", d.handleListRecordings)
+	})
+
+	return r
+}
+
+func (d Deps) handleStatus(w http.ResponseWriter, r *http.Request) {
+	resp := map[string]any{
+		"version": d.Version,
+		"started": d.StartedAt.Format(time.RFC3339),
+		"uptime":  time.Since(d.StartedAt).Round(time.Second).String(),
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (d Deps) handleChannels(w http.ResponseWriter, r *http.Request) {
+	if d.Channels == nil {
+		writeJSON(w, http.StatusOK, []any{})
+		return
+	}
+	type out struct {
+		Name      string   `json:"name"`
+		Aliases   []string `json:"aliases,omitempty"`
+		ServiceID uint16   `json:"service_id"`
+	}
+	rows := make([]out, 0, len(d.Channels.Channels))
+	for i := range d.Channels.Channels {
+		c := &d.Channels.Channels[i]
+		rows = append(rows, out{
+			Name:      c.Name,
+			Aliases:   c.Aliases,
+			ServiceID: c.ServiceID(),
+		})
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
+func (d Deps) handleEPG(w http.ResponseWriter, r *http.Request) {
+	if d.Store == nil {
+		writeErr(w, http.StatusServiceUnavailable, "store not ready")
+		return
+	}
+	serviceID, err := parseService(r.URL.Query().Get("service"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	from, to, err := parseWindow(r.URL.Query().Get("from"), r.URL.Query().Get("to"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	events, err := d.Store.EPGBetween(r.Context(), serviceID, from, to)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, events)
+}
+
+func (d Deps) handleNow(w http.ResponseWriter, r *http.Request) {
+	if d.Store == nil {
+		writeErr(w, http.StatusServiceUnavailable, "store not ready")
+		return
+	}
+	serviceID, err := parseService(r.URL.Query().Get("service"))
+	if err != nil || serviceID == 0 {
+		writeErr(w, http.StatusBadRequest, "service query parameter is required")
+		return
+	}
+	e, err := d.Store.NowPlaying(r.Context(), serviceID, time.Now())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if e == nil {
+		writeJSON(w, http.StatusOK, nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, e)
+}
+
+func (d Deps) handleListSchedules(w http.ResponseWriter, r *http.Request) {
+	if d.Store == nil {
+		writeErr(w, http.StatusServiceUnavailable, "store not ready")
+		return
+	}
+	list, err := d.Store.ListSchedules(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+type scheduleCreateReq struct {
+	Channel   string `json:"channel"`
+	ServiceID uint16 `json:"service_id"`
+	Start     string `json:"start"`  // RFC3339
+	End       string `json:"end"`    // RFC3339
+	LeadS     int64  `json:"lead_s"`
+	TrailS    int64  `json:"trail_s"`
+}
+
+func (d Deps) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
+	if d.Store == nil {
+		writeErr(w, http.StatusServiceUnavailable, "store not ready")
+		return
+	}
+	var req scheduleCreateReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	start, err := time.Parse(time.RFC3339, req.Start)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "start: "+err.Error())
+		return
+	}
+	end, err := time.Parse(time.RFC3339, req.End)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "end: "+err.Error())
+		return
+	}
+	if !end.After(start) {
+		writeErr(w, http.StatusBadRequest, "end must be after start")
+		return
+	}
+	if req.Channel == "" {
+		writeErr(w, http.StatusBadRequest, "channel required")
+		return
+	}
+	lead := time.Duration(req.LeadS) * time.Second
+	if lead == 0 {
+		lead = 30 * time.Second
+	}
+	trail := time.Duration(req.TrailS) * time.Second
+	if trail == 0 {
+		trail = time.Minute
+	}
+	id, err := d.Store.CreateSchedule(r.Context(), store.Schedule{
+		Channel:   req.Channel,
+		ServiceID: req.ServiceID,
+		Start:     start,
+		End:       end,
+		Lead:      lead,
+		Trail:     trail,
+	})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]int64{"id": id})
+}
+
+func (d Deps) handleCancelSchedule(w http.ResponseWriter, r *http.Request) {
+	if d.Store == nil {
+		writeErr(w, http.StatusServiceUnavailable, "store not ready")
+		return
+	}
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	if err := d.Store.UpdateScheduleState(r.Context(), id, store.ScheduleStateCanceled); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (d Deps) handleListRecordings(w http.ResponseWriter, r *http.Request) {
+	if d.Store == nil {
+		writeErr(w, http.StatusServiceUnavailable, "store not ready")
+		return
+	}
+	list, err := d.Store.ListRecordings(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// ── helpers ────────────────────────────────────────────────────────
+
+func parseService(s string) (uint16, error) {
+	if s == "" {
+		return 0, nil
+	}
+	n, err := strconv.ParseUint(s, 10, 16)
+	if err != nil {
+		return 0, errors.New("service must be uint16")
+	}
+	return uint16(n), nil
+}
+
+func parseWindow(fromS, toS string) (time.Time, time.Time, error) {
+	now := time.Now().UTC()
+	from := now.Add(-time.Hour)
+	to := now.Add(12 * time.Hour)
+	if fromS != "" {
+		t, err := time.Parse(time.RFC3339, fromS)
+		if err != nil {
+			return from, to, errors.New("from: " + err.Error())
+		}
+		from = t
+	}
+	if toS != "" {
+		t, err := time.Parse(time.RFC3339, toS)
+		if err != nil {
+			return from, to, errors.New("to: " + err.Error())
+		}
+		to = t
+	}
+	return from, to, nil
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeErr(w http.ResponseWriter, code int, msg string) {
+	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+func slogRequestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		next.ServeHTTP(ww, r)
+		slog.Debug("http",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", ww.Status(),
+			"bytes", ww.BytesWritten(),
+			"dur", time.Since(start).String(),
+		)
+	})
 }

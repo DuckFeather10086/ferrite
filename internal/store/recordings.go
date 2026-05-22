@@ -15,16 +15,16 @@ const (
 )
 
 type Recording struct {
-	ID         int64
-	ScheduleID sql.NullInt64
-	Channel    string
-	Title      string
-	Start      time.Time
-	End        sql.NullTime
-	Path       string
-	SizeBytes  sql.NullInt64
-	State      RecordingState
-	Error      string
+	ID         int64          `json:"id"`
+	ScheduleID sql.NullInt64  `json:"schedule_id,omitempty"`
+	Channel    string         `json:"channel"`
+	Title      string         `json:"title"`
+	Start      time.Time      `json:"start"`
+	End        sql.NullTime   `json:"end,omitempty"`
+	Path       string         `json:"path"`
+	SizeBytes  sql.NullInt64  `json:"size_bytes,omitempty"`
+	State      RecordingState `json:"state"`
+	Error      string         `json:"error,omitempty"`
 }
 
 func (s *Store) CreateRecording(ctx context.Context, r Recording) (int64, error) {
