@@ -1,0 +1,12 @@
+/bin/
+/dist/
+/tmp/
+*.db
+*.db-wal
+*.db-shm
+hls/
+recordings/
+web/node_modules/
+web/.next/
+.env
+*.log

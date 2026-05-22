@@ -1,0 +1,17 @@
+[Unit]
+Description=isdbd ISDB-T TV daemon
+After=network.target pcscd.service
+Wants=pcscd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/isdbd -config /etc/isdbd/isdbd.toml
+Restart=on-failure
+RestartSec=5
+User=duckfeather
+Group=duckfeather
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
