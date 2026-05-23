@@ -101,6 +101,32 @@ func TestSpawn_BinaryNotFound(t *testing.T) {
 	}
 }
 
+func TestSpawnOpt_StdinPipesToChild(t *testing.T) {
+	ctx := context.Background()
+	// `cat` echoes stdin to stdout.
+	p, err := SpawnOpt(ctx, SpawnOpts{Stdin: true}, "/bin/cat")
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	defer p.Close()
+	if p.Stdin == nil {
+		t.Fatal("Stdin should be set when SpawnOpts.Stdin=true")
+	}
+
+	go func() {
+		_, _ = p.Stdin.Write([]byte("ping"))
+		p.Stdin.Close()
+	}()
+
+	b, err := io.ReadAll(p.Stdout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "ping" {
+		t.Fatalf("got %q", string(b))
+	}
+}
+
 func TestSpawn_NonZeroExitSurfacesViaWait(t *testing.T) {
 	ctx := context.Background()
 	p, err := Spawn(ctx, "/bin/sh", "-c", "exit 7")

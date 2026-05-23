@@ -45,29 +45,68 @@ type Process struct {
 	// child exits and the pipe drains.
 	Stdout io.Reader
 
-	name     string
-	cmd      *exec.Cmd
-	pgid     int
-	stdoutR  *os.File      // owned; closed in Close
-	waited   chan struct{} // closed once cmd.Wait returns
-	waitErr  error         // result of cmd.Wait; only valid after <-waited
-	closed   bool          // guarded by closing logic; idempotent Close
+	// Stdin is non-nil only when the process was spawned with
+	// SpawnPiped(... WithStdin). Close it (or Process.Close) to send
+	// EOF to the child.
+	Stdin io.WriteCloser
+
+	name    string
+	cmd     *exec.Cmd
+	pgid    int
+	stdoutR *os.File      // owned; closed in Close
+	stdinW  *os.File      // owned when Stdin != nil
+	waited  chan struct{} // closed once cmd.Wait returns
+	waitErr error         // result of cmd.Wait; only valid after <-waited
+	closed  bool          // guarded by closing logic; idempotent Close
 }
 
 // Spawn starts name with args in its own process group. Stderr is
 // piped line-by-line into slog at warn level (tagged with the command
 // name). The returned Process can be cancelled via ctx, Close, or
 // will clean up naturally if the child exits on its own.
+// SpawnOpts customizes Spawn.
+type SpawnOpts struct {
+	// Stdin: if true, Process.Stdin is wired to an os.Pipe whose
+	// read end is the child's stdin. The caller writes bytes the
+	// child will receive.
+	Stdin bool
+}
+
 func Spawn(ctx context.Context, name string, args ...string) (*Process, error) {
+	return SpawnOpt(ctx, SpawnOpts{}, name, args...)
+}
+
+// SpawnOpt is Spawn with extra options. Use SpawnOpts{Stdin: true}
+// for pipelines that need to feed the child (e.g. ffmpeg reading TS
+// from our fanout).
+func SpawnOpt(ctx context.Context, opts SpawnOpts, name string, args ...string) (*Process, error) {
 	cmd := exec.Command(name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
+	var stdinR, stdinW *os.File
+	if opts.Stdin {
+		var err error
+		stdinR, stdinW, err = os.Pipe()
+		if err != nil {
+			return nil, fmt.Errorf("proc.Spawn(%s): stdin pipe: %w", name, err)
+		}
+		cmd.Stdin = stdinR
+	}
+
 	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
+		if stdinR != nil {
+			stdinR.Close()
+			stdinW.Close()
+		}
 		return nil, fmt.Errorf("proc.Spawn(%s): stdout pipe: %w", name, err)
 	}
 	stderrR, stderrW, err := os.Pipe()
 	if err != nil {
+		if stdinR != nil {
+			stdinR.Close()
+			stdinW.Close()
+		}
 		stdoutR.Close()
 		stdoutW.Close()
 		return nil, fmt.Errorf("proc.Spawn(%s): stderr pipe: %w", name, err)
@@ -76,6 +115,10 @@ func Spawn(ctx context.Context, name string, args ...string) (*Process, error) {
 	cmd.Stderr = stderrW
 
 	if err := cmd.Start(); err != nil {
+		if stdinR != nil {
+			stdinR.Close()
+			stdinW.Close()
+		}
 		stdoutR.Close()
 		stdoutW.Close()
 		stderrR.Close()
@@ -88,6 +131,11 @@ func Spawn(ctx context.Context, name string, args ...string) (*Process, error) {
 	// the readers will see EOF naturally when the child exits.
 	stdoutW.Close()
 	stderrW.Close()
+	if stdinR != nil {
+		// Symmetric: drop parent's read ref so child is the only
+		// reader. Parent keeps stdinW for writing.
+		stdinR.Close()
+	}
 
 	// Because Setpgid is set, the new pgid equals the child's pid.
 	pgid := cmd.Process.Pid
@@ -98,7 +146,11 @@ func Spawn(ctx context.Context, name string, args ...string) (*Process, error) {
 		cmd:     cmd,
 		pgid:    pgid,
 		stdoutR: stdoutR,
+		stdinW:  stdinW,
 		waited:  make(chan struct{}),
+	}
+	if stdinW != nil {
+		p.Stdin = stdinW
 	}
 
 	// Drain stderr into slog. Long-line safe up to 1 MiB.
@@ -141,6 +193,11 @@ func (p *Process) Close() error {
 		return p.exitError()
 	}
 	p.closed = true
+	// Close stdin first if any, so the child sees EOF and may exit
+	// cleanly without us having to SIGTERM.
+	if p.stdinW != nil {
+		p.stdinW.Close()
+	}
 	p.killGroup()
 	<-p.waited
 	p.stdoutR.Close()

@@ -22,13 +22,16 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/DuckFeather10086/isdbd/internal/config"
+	"github.com/DuckFeather10086/isdbd/internal/hls"
 	"github.com/DuckFeather10086/isdbd/internal/store"
 	"github.com/DuckFeather10086/isdbd/internal/tuner"
 )
@@ -40,6 +43,7 @@ type Deps struct {
 	Channels  *config.Channels
 	Store     *store.Store
 	Tuners    *tuner.Pool
+	HLS       *hls.Manager
 	StartedAt time.Time
 	Version   string // build-time injected, optional
 }
@@ -66,6 +70,10 @@ func NewRouter(d Deps) http.Handler {
 		r.Delete("/schedule/{id}", d.handleCancelSchedule)
 
 		r.Get("/recordings", d.handleListRecordings)
+
+		r.Get("/live/{channel}.m3u8", d.handleLivePlaylist)
+		r.Get("/live/{channel}/{segment}", d.handleLiveSegment)
+		r.Post("/live/{channel}/stop", d.handleLiveStop)
 	})
 
 	return r
@@ -252,6 +260,58 @@ func (d Deps) handleListRecordings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, list)
+}
+
+func (d Deps) handleLivePlaylist(w http.ResponseWriter, r *http.Request) {
+	if d.HLS == nil {
+		writeErr(w, http.StatusServiceUnavailable, "hls not ready")
+		return
+	}
+	channel := chi.URLParam(r, "channel")
+	s, err := d.HLS.Open(r.Context(), channel)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeFile(w, r, s.PlaylistPath)
+}
+
+func (d Deps) handleLiveSegment(w http.ResponseWriter, r *http.Request) {
+	if d.HLS == nil {
+		writeErr(w, http.StatusServiceUnavailable, "hls not ready")
+		return
+	}
+	channel := chi.URLParam(r, "channel")
+	segment := chi.URLParam(r, "segment")
+	// Touch keeps the session alive while segments are still being
+	// pulled; Open is unnecessary here because a viewer that's
+	// requesting segments must have already hit .m3u8 to learn their
+	// names. If they bypass that, return 404 rather than auto-tuning.
+	s := d.HLS.Touch(channel)
+	if s == nil {
+		http.NotFound(w, r)
+		return
+	}
+	// Crude path traversal guard: segments must be flat filenames.
+	if strings.ContainsAny(segment, "/\\") || strings.HasPrefix(segment, ".") {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "video/mp2t")
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeFile(w, r, filepath.Join(s.Dir, segment))
+}
+
+func (d Deps) handleLiveStop(w http.ResponseWriter, r *http.Request) {
+	if d.HLS == nil {
+		writeErr(w, http.StatusServiceUnavailable, "hls not ready")
+		return
+	}
+	channel := chi.URLParam(r, "channel")
+	d.HLS.Close(channel)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ── helpers ────────────────────────────────────────────────────────

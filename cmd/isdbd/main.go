@@ -28,6 +28,7 @@ import (
 	"github.com/DuckFeather10086/isdbd/internal/api"
 	"github.com/DuckFeather10086/isdbd/internal/config"
 	"github.com/DuckFeather10086/isdbd/internal/epg"
+	"github.com/DuckFeather10086/isdbd/internal/hls"
 	"github.com/DuckFeather10086/isdbd/internal/recorder"
 	"github.com/DuckFeather10086/isdbd/internal/scheduler"
 	"github.com/DuckFeather10086/isdbd/internal/store"
@@ -93,10 +94,18 @@ func run(cfgPath, logLevel string) error {
 		Runner: recRunner,
 	}
 
+	hlsRoot, _ := cfg.StoragePath("hls")
+	hlsMgr := &hls.Manager{
+		Tuners:     tunerPool,
+		OutputRoot: hlsRoot,
+		FFmpegBin:  cfg.FFmpegBin,
+	}
+
 	handler := api.NewRouter(api.Deps{
 		Channels:  channels,
 		Store:     st,
 		Tuners:    tunerPool,
+		HLS:       hlsMgr,
 		StartedAt: time.Now(),
 		Version:   version,
 	})
@@ -111,6 +120,13 @@ func run(cfgPath, logLevel string) error {
 		}
 	}()
 	slog.Info("scheduler started")
+
+	go func() {
+		if err := hlsMgr.Run(ctx); err != nil && ctx.Err() == nil {
+			slog.Warn("hls manager exited", "err", err)
+		}
+	}()
+	slog.Info("hls manager started", "dir", hlsRoot)
 
 	// EPG refresher (best-effort: missing dvbr binary or no
 	// epg_channels just means no ingest, not a fatal).
