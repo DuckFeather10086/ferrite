@@ -27,6 +27,7 @@ import (
 
 	"github.com/DuckFeather10086/isdbd/internal/api"
 	"github.com/DuckFeather10086/isdbd/internal/config"
+	"github.com/DuckFeather10086/isdbd/internal/epg"
 	"github.com/DuckFeather10086/isdbd/internal/store"
 )
 
@@ -79,6 +80,32 @@ func run(cfgPath, logLevel string) error {
 		Version:   version,
 	})
 
+	ctx, stop := signal.NotifyContext(context.Background(),
+		syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// EPG refresher (best-effort: missing dvbr binary or no
+	// epg_channels just means no ingest, not a fatal).
+	if len(cfg.EPGChannels) > 0 && cfg.DvbrBin != "" {
+		refresher := &epg.Refresher{
+			DvbrBin:      cfg.DvbrBin,
+			ChannelsFile: cfg.ChannelsFile,
+			Adapter:      cfg.Adapters[0],
+			Channels:     channels,
+			ChannelNames: cfg.EPGChannels,
+			Store:        st,
+		}
+		go func() {
+			if err := refresher.Run(ctx); err != nil && ctx.Err() == nil {
+				slog.Warn("epg refresher exited", "err", err)
+			}
+		}()
+		slog.Info("epg refresher started",
+			"channels", cfg.EPGChannels, "adapter", cfg.Adapters[0])
+	} else {
+		slog.Info("epg refresher disabled (no epg_channels or no dvbr_bin)")
+	}
+
 	srv := &http.Server{
 		Addr:         ":" + strconv.Itoa(cfg.HTTPPort),
 		Handler:      handler,
@@ -86,10 +113,6 @@ func run(cfgPath, logLevel string) error {
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(),
-		syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	serveErr := make(chan error, 1)
 	go func() {
