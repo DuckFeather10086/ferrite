@@ -3,19 +3,41 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"time"
 )
 
 // EPGEvent is one EIT event row, decoded into Go types.
 type EPGEvent struct {
-	ServiceID   uint16        `json:"service_id"`
-	EventID     uint16        `json:"event_id"`
-	Start       time.Time     `json:"start"`
-	Duration    time.Duration `json:"duration_ns"`
-	Title       string        `json:"title"`
-	Synopsis    string        `json:"synopsis,omitempty"`
-	Raw         string        `json:"-"`
-	IngestedAt  time.Time     `json:"ingested_at"`
+	ServiceID  uint16
+	EventID    uint16
+	Start      time.Time
+	Duration   time.Duration
+	Title      string
+	Synopsis   string
+	Raw        string
+	IngestedAt time.Time
+}
+
+func (e EPGEvent) MarshalJSON() ([]byte, error) {
+	type out struct {
+		ServiceID  uint16    `json:"service_id"`
+		EventID    uint16    `json:"event_id"`
+		Start      time.Time `json:"start"`
+		DurationS  int64     `json:"duration_s"`
+		Title      string    `json:"title"`
+		Synopsis   string    `json:"synopsis,omitempty"`
+		IngestedAt time.Time `json:"ingested_at"`
+	}
+	return json.Marshal(out{
+		ServiceID:  e.ServiceID,
+		EventID:    e.EventID,
+		Start:      e.Start,
+		DurationS:  int64(e.Duration.Seconds()),
+		Title:      e.Title,
+		Synopsis:   e.Synopsis,
+		IngestedAt: e.IngestedAt,
+	})
 }
 
 // UpsertEPGEvents writes events transactionally, replacing existing

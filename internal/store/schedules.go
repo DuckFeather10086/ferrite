@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"time"
 )
 
@@ -17,16 +18,51 @@ const (
 )
 
 type Schedule struct {
-	ID        int64         `json:"id"`
-	Channel   string        `json:"channel"`
-	ServiceID uint16        `json:"service_id"`
-	EventID   sql.NullInt64 `json:"event_id,omitempty"`
-	Start     time.Time     `json:"start"`
-	End       time.Time     `json:"end"`
-	Lead      time.Duration `json:"lead_ns"`
-	Trail     time.Duration `json:"trail_ns"`
-	State     ScheduleState `json:"state"`
-	CreatedAt time.Time     `json:"created_at"`
+	ID        int64
+	Channel   string
+	ServiceID uint16
+	EventID   sql.NullInt64
+	Start     time.Time
+	End       time.Time
+	Lead      time.Duration
+	Trail     time.Duration
+	State     ScheduleState
+	CreatedAt time.Time
+}
+
+// MarshalJSON renders durations as integer seconds and nullable
+// EventID as either int64 or JSON null. Keeps the API surface
+// language-neutral (Lead's underlying time.Duration would otherwise
+// marshal to nanoseconds, which is awkward for callers).
+func (s Schedule) MarshalJSON() ([]byte, error) {
+	type out struct {
+		ID        int64         `json:"id"`
+		Channel   string        `json:"channel"`
+		ServiceID uint16        `json:"service_id"`
+		EventID   *int64        `json:"event_id"`
+		Start     time.Time     `json:"start"`
+		End       time.Time     `json:"end"`
+		LeadS     int64         `json:"lead_s"`
+		TrailS    int64         `json:"trail_s"`
+		State     ScheduleState `json:"state"`
+		CreatedAt time.Time     `json:"created_at"`
+	}
+	o := out{
+		ID:        s.ID,
+		Channel:   s.Channel,
+		ServiceID: s.ServiceID,
+		Start:     s.Start,
+		End:       s.End,
+		LeadS:     int64(s.Lead.Seconds()),
+		TrailS:    int64(s.Trail.Seconds()),
+		State:     s.State,
+		CreatedAt: s.CreatedAt,
+	}
+	if s.EventID.Valid {
+		v := s.EventID.Int64
+		o.EventID = &v
+	}
+	return json.Marshal(o)
 }
 
 func (s *Store) CreateSchedule(ctx context.Context, sch Schedule) (int64, error) {

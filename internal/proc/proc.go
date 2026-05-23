@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"syscall"
 	"time"
@@ -32,17 +33,25 @@ const killGracePeriod = 2 * time.Second
 //
 // Always defer Close, even after Stdout returns EOF — the underlying
 // os/exec.Cmd.Wait must run to reap the zombie and release stderr.
+//
+// Implementation note: we hand the child its own os.Pipe write ends
+// for stdout/stderr (instead of cmd.StdoutPipe()) so that cmd.Wait
+// does not close the reader under our consumer. Wait's auto-close is
+// racy when the child writes data then exits immediately — see
+// https://pkg.go.dev/os/exec#Cmd.StdoutPipe ("incorrect to call Wait
+// before all reads have completed").
 type Process struct {
 	// Stdout is the child's stdout. Reads return io.EOF when the
-	// child exits or its stdout is closed.
+	// child exits and the pipe drains.
 	Stdout io.Reader
 
-	name   string
-	cmd    *exec.Cmd
-	pgid   int
-	waited chan struct{} // closed once cmd.Wait returns
-	waitErr error        // result of cmd.Wait; only valid after <-waited
-	closed bool          // guarded by closing logic; idempotent Close
+	name     string
+	cmd      *exec.Cmd
+	pgid     int
+	stdoutR  *os.File      // owned; closed in Close
+	waited   chan struct{} // closed once cmd.Wait returns
+	waitErr  error         // result of cmd.Wait; only valid after <-waited
+	closed   bool          // guarded by closing logic; idempotent Close
 }
 
 // Spawn starts name with args in its own process group. Stderr is
@@ -53,33 +62,49 @@ func Spawn(ctx context.Context, name string, args ...string) (*Process, error) {
 	cmd := exec.Command(name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	stdout, err := cmd.StdoutPipe()
+	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
 		return nil, fmt.Errorf("proc.Spawn(%s): stdout pipe: %w", name, err)
 	}
-	stderr, err := cmd.StderrPipe()
+	stderrR, stderrW, err := os.Pipe()
 	if err != nil {
+		stdoutR.Close()
+		stdoutW.Close()
 		return nil, fmt.Errorf("proc.Spawn(%s): stderr pipe: %w", name, err)
 	}
+	cmd.Stdout = stdoutW
+	cmd.Stderr = stderrW
 
 	if err := cmd.Start(); err != nil {
+		stdoutR.Close()
+		stdoutW.Close()
+		stderrR.Close()
+		stderrW.Close()
 		return nil, fmt.Errorf("proc.Spawn(%s): start: %w", name, err)
 	}
+
+	// Drop the parent's references to the write ends; the only
+	// remaining writers are the inherited fds inside the child, so
+	// the readers will see EOF naturally when the child exits.
+	stdoutW.Close()
+	stderrW.Close()
 
 	// Because Setpgid is set, the new pgid equals the child's pid.
 	pgid := cmd.Process.Pid
 
 	p := &Process{
-		Stdout: stdout,
-		name:   name,
-		cmd:    cmd,
-		pgid:   pgid,
-		waited: make(chan struct{}),
+		Stdout:  stdoutR,
+		name:    name,
+		cmd:     cmd,
+		pgid:    pgid,
+		stdoutR: stdoutR,
+		waited:  make(chan struct{}),
 	}
 
 	// Drain stderr into slog. Long-line safe up to 1 MiB.
 	go func() {
-		scanner := bufio.NewScanner(stderr)
+		defer stderrR.Close()
+		scanner := bufio.NewScanner(stderrR)
 		scanner.Buffer(make([]byte, 0, 4096), 1<<20)
 		for scanner.Scan() {
 			slog.Warn("subprocess stderr", "cmd", name, "line", scanner.Text())
@@ -118,6 +143,7 @@ func (p *Process) Close() error {
 	p.closed = true
 	p.killGroup()
 	<-p.waited
+	p.stdoutR.Close()
 	return p.exitError()
 }
 

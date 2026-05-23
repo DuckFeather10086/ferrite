@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"time"
 )
 
@@ -15,16 +16,53 @@ const (
 )
 
 type Recording struct {
-	ID         int64          `json:"id"`
-	ScheduleID sql.NullInt64  `json:"schedule_id,omitempty"`
-	Channel    string         `json:"channel"`
-	Title      string         `json:"title"`
-	Start      time.Time      `json:"start"`
-	End        sql.NullTime   `json:"end,omitempty"`
-	Path       string         `json:"path"`
-	SizeBytes  sql.NullInt64  `json:"size_bytes,omitempty"`
-	State      RecordingState `json:"state"`
-	Error      string         `json:"error,omitempty"`
+	ID         int64
+	ScheduleID sql.NullInt64
+	Channel    string
+	Title      string
+	Start      time.Time
+	End        sql.NullTime
+	Path       string
+	SizeBytes  sql.NullInt64
+	State      RecordingState
+	Error      string
+}
+
+func (r Recording) MarshalJSON() ([]byte, error) {
+	type out struct {
+		ID         int64          `json:"id"`
+		ScheduleID *int64         `json:"schedule_id"`
+		Channel    string         `json:"channel"`
+		Title      string         `json:"title,omitempty"`
+		Start      time.Time      `json:"start"`
+		End        *time.Time     `json:"end"`
+		Path       string         `json:"path"`
+		SizeBytes  *int64         `json:"size_bytes"`
+		State      RecordingState `json:"state"`
+		Error      string         `json:"error,omitempty"`
+	}
+	o := out{
+		ID:      r.ID,
+		Channel: r.Channel,
+		Title:   r.Title,
+		Start:   r.Start,
+		Path:    r.Path,
+		State:   r.State,
+		Error:   r.Error,
+	}
+	if r.ScheduleID.Valid {
+		v := r.ScheduleID.Int64
+		o.ScheduleID = &v
+	}
+	if r.End.Valid {
+		v := r.End.Time
+		o.End = &v
+	}
+	if r.SizeBytes.Valid {
+		v := r.SizeBytes.Int64
+		o.SizeBytes = &v
+	}
+	return json.Marshal(o)
 }
 
 func (s *Store) CreateRecording(ctx context.Context, r Recording) (int64, error) {

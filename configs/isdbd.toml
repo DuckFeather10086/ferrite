@@ -1,0 +1,18 @@
+# Default dev config for running isdbd from the workspace.
+# For production, copy to /etc/isdbd/isdbd.toml and adjust paths.
+
+http_port = 8010
+storage_root = "./var"
+adapters = [0]
+
+# Sibling repos under ~/code/isdb-workspace/. Adjust if you cloned
+# elsewhere.
+dvbr_bin   = "../dvbr/target/release/dvbr"
+b25_bin    = "../libaribb25-rs/target/release/b25"
+ffmpeg_bin = "ffmpeg"
+
+channels_file = "channels.json"
+
+# EPG refresh cron (UTC). Default: every 6 hours.
+epg_cron = "0 */6 * * *"
+epg_channels = ["TOKYO MX1", "NHKEFl1El5~", "asahi"]
