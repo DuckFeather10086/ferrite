@@ -12,8 +12,10 @@ External binaries it drives (each in its own sibling repo):
 
 ## Status
 
-Skeleton. See `internal/*/` for what each package will own. Nothing
-implemented yet.
+Substantively implemented in Go (race-clean tests across the board);
+**not yet wired to b25** and **not exercised against real hardware**.
+See `CLAUDE.md` "Current implementation status" for the per-package
+breakdown.
 
 ## Layout
 

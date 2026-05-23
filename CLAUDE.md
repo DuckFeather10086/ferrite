@@ -51,6 +51,45 @@ dvbr stdout → b25 stdin → b25 stdout → fanout.Broadcaster
   - `api/` — chi router for `/api/...` + serves `internal/web/dist`.
   - `web/` — `//go:embed dist` of Next.js `output: 'export'` build.
 
+## Current implementation status
+
+Implemented and tested (race-clean):
+- `proc.Spawn` / `proc.SpawnOpt(Stdin:true)` — subprocess + pgrp
+  lifecycle, stderr→slog, stdin pipe for ffmpeg.
+- `tuner.DvbrCLI.Tune` — wraps `dvbr tune` into a TsStream.
+- `tuner.Pool` — refcounted leases, same-channel sharing, source-EOF
+  recovery. **Not wired to b25 yet** — leases emit raw (encrypted) TS.
+- `fanout.Broadcaster` — 1→N chunk fanout with drop-on-slow, pooled
+  buffers.
+- `store` — sqlite (WAL) with embedded migrations; CRUD for
+  `epg_events`, `schedules`, `recordings`; custom MarshalJSON for
+  clean API output.
+- `config` — TOML daemon config + channels.json loader; `Channels.Find`
+  mirrors dvbr's `find_entry`.
+- `epg.Parse` + `epg.Refresher` — parse `dvbr epg --json` (JST→UTC),
+  periodic refresh loop with cron-like interval.
+- `recorder.Runner` — job lifecycle: lead-in wait → Acquire →
+  open file → drain chunks with startup/stall watchdogs → finalize row.
+- `scheduler.Scheduler` — tick → DueSchedules → reserve row →
+  dispatch → finalize state.
+- `hls.Manager` + `Session` — refcounted ffmpeg-per-channel, idle
+  janitor, m3u8 + segments on disk.
+- `api` (chi) — `/health`, `/api/status` (with adapter occupancy),
+  `/api/channels`, `/api/epg`, `/api/now`, `/api/schedule` (CRUD),
+  `/api/recordings`, `/api/live/{channel}.m3u8` + segments.
+
+**Not implemented:**
+- `internal/web` — the embed.FS placeholder exists; the Next.js
+  source + build hasn't been started.
+- Insertion of `b25` into the tuner pipeline. Currently
+  `tuner.DvbrCLI.Tune` returns dvbr's raw stdout. For descrambled
+  output, either chain a second subprocess in the pump goroutine or
+  spawn the whole `dvbr | b25` as a shell pipeline. Recorder writes
+  raw TS today; HLS ffmpeg will get encrypted bytes and fail.
+- End-to-end hardware verification — every package has unit/integration
+  tests with mocks/fakes, but nothing has been exercised against an
+  actual tuner since the switch from `live_hls.py`.
+
 ## Architecture invariants
 
 - **One process per adapter at a time.** Cross-process serialization
