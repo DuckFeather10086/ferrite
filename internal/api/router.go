@@ -30,14 +30,16 @@ import (
 
 	"github.com/DuckFeather10086/isdbd/internal/config"
 	"github.com/DuckFeather10086/isdbd/internal/store"
+	"github.com/DuckFeather10086/isdbd/internal/tuner"
 )
 
 // Deps is what the router needs from the rest of the daemon. Pass a
-// value with the fields you have — tests can leave Store nil and
-// only exercise the static endpoints.
+// value with the fields you have — tests can leave Store / Tuners nil
+// and only exercise the static endpoints.
 type Deps struct {
 	Channels  *config.Channels
 	Store     *store.Store
+	Tuners    *tuner.Pool
 	StartedAt time.Time
 	Version   string // build-time injected, optional
 }
@@ -74,6 +76,9 @@ func (d Deps) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"version": d.Version,
 		"started": d.StartedAt.Format(time.RFC3339),
 		"uptime":  time.Since(d.StartedAt).Round(time.Second).String(),
+	}
+	if d.Tuners != nil {
+		resp["adapters"] = d.Tuners.Status()
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

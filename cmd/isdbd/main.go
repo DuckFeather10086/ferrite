@@ -29,6 +29,7 @@ import (
 	"github.com/DuckFeather10086/isdbd/internal/config"
 	"github.com/DuckFeather10086/isdbd/internal/epg"
 	"github.com/DuckFeather10086/isdbd/internal/store"
+	"github.com/DuckFeather10086/isdbd/internal/tuner"
 )
 
 // Set via -ldflags "-X main.version=...".
@@ -73,9 +74,17 @@ func run(cfgPath, logLevel string) error {
 	defer st.Close()
 	slog.Info("store opened", "path", dbPath)
 
+	dvbrCLI := &tuner.DvbrCLI{
+		BinPath:      cfg.DvbrBin,
+		ChannelsFile: cfg.ChannelsFile,
+	}
+	tunerPool := tuner.NewPool(dvbrCLI, channels, cfg.Adapters, 8)
+	slog.Info("tuner pool initialized", "adapters", cfg.Adapters)
+
 	handler := api.NewRouter(api.Deps{
 		Channels:  channels,
 		Store:     st,
+		Tuners:    tunerPool,
 		StartedAt: time.Now(),
 		Version:   version,
 	})
