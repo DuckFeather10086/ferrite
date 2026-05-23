@@ -28,6 +28,8 @@ import (
 	"github.com/DuckFeather10086/isdbd/internal/api"
 	"github.com/DuckFeather10086/isdbd/internal/config"
 	"github.com/DuckFeather10086/isdbd/internal/epg"
+	"github.com/DuckFeather10086/isdbd/internal/recorder"
+	"github.com/DuckFeather10086/isdbd/internal/scheduler"
 	"github.com/DuckFeather10086/isdbd/internal/store"
 	"github.com/DuckFeather10086/isdbd/internal/tuner"
 )
@@ -81,6 +83,16 @@ func run(cfgPath, logLevel string) error {
 	tunerPool := tuner.NewPool(dvbrCLI, channels, cfg.Adapters, 8)
 	slog.Info("tuner pool initialized", "adapters", cfg.Adapters)
 
+	recRunner := &recorder.Runner{
+		Tuners:      tunerPool,
+		Store:       st,
+		StorageRoot: cfg.StorageRoot,
+	}
+	sched := &scheduler.Scheduler{
+		Store:  st,
+		Runner: recRunner,
+	}
+
 	handler := api.NewRouter(api.Deps{
 		Channels:  channels,
 		Store:     st,
@@ -92,6 +104,13 @@ func run(cfgPath, logLevel string) error {
 	ctx, stop := signal.NotifyContext(context.Background(),
 		syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	go func() {
+		if err := sched.Run(ctx); err != nil && ctx.Err() == nil {
+			slog.Warn("scheduler exited", "err", err)
+		}
+	}()
+	slog.Info("scheduler started")
 
 	// EPG refresher (best-effort: missing dvbr binary or no
 	// epg_channels just means no ingest, not a fatal).
