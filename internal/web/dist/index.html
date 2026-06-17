@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>isdbd</title>
+  <link rel="stylesheet" href="styles.css">
+  <!-- hls.js for MSE-based HLS playback (Chrome/Firefox). Safari/iOS
+       play HLS natively and work even if this CDN is unreachable. -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">📺 <span>isdbd</span></div>
+    <div id="status" class="status">…</div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab" data-view="live">Live</button>
+    <button class="tab" data-view="guide">Guide</button>
+    <button class="tab" data-view="schedules">Schedules</button>
+    <button class="tab" data-view="recordings">Recordings</button>
+  </nav>
+
+  <main>
+    <!-- ── Live ─────────────────────────────────────────────── -->
+    <section id="view-live" class="view">
+      <div class="live-grid">
+        <aside class="channel-list" id="channel-list"></aside>
+        <div class="player-pane">
+          <div class="player-wrap">
+            <video id="player" controls playsinline></video>
+            <div id="player-overlay" class="player-overlay hidden"></div>
+          </div>
+          <div class="now-bar">
+            <div id="now-title" class="now-title">Pick a channel to start watching.</div>
+            <button id="stop-btn" class="btn btn-stop hidden">Stop</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Guide ────────────────────────────────────────────── -->
+    <section id="view-guide" class="view hidden">
+      <div class="toolbar">
+        <label>Channel
+          <select id="guide-channel"></select>
+        </label>
+        <button id="guide-refresh" class="btn">Refresh</button>
+      </div>
+      <div id="guide-list" class="epg-list"></div>
+    </section>
+
+    <!-- ── Schedules ────────────────────────────────────────── -->
+    <section id="view-schedules" class="view hidden">
+      <div class="toolbar">
+        <button id="sched-refresh" class="btn">Refresh</button>
+      </div>
+      <div id="sched-list" class="table-wrap"></div>
+    </section>
+
+    <!-- ── Recordings ───────────────────────────────────────── -->
+    <section id="view-recordings" class="view hidden">
+      <div class="toolbar">
+        <button id="rec-refresh" class="btn">Refresh</button>
+      </div>
+      <div id="rec-list" class="table-wrap"></div>
+    </section>
+  </main>
+
+  <div id="toasts" class="toasts"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/DuckFeather10086/isdbd/internal/config"
@@ -154,6 +155,39 @@ func TestSchedules_BadJSON(t *testing.T) {
 		strings.NewReader(`not json`)))
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("got %d", rr.Code)
+	}
+}
+
+func TestWebUI_ServesAndFallsBack(t *testing.T) {
+	web := fstest.MapFS{
+		"index.html": {Data: []byte("<html>SPA-SHELL</html>")},
+		"app.js":     {Data: []byte("console.log('app')")},
+	}
+	h := NewRouter(Deps{
+		Channels:  &config.Channels{},
+		StartedAt: time.Now(),
+		Web:       web,
+	})
+
+	// Root serves index.html.
+	if rr := get(t, h, "/"); rr.Code != 200 || !strings.Contains(rr.Body.String(), "SPA-SHELL") {
+		t.Fatalf("root: %d %s", rr.Code, rr.Body.String())
+	}
+	// Real asset is served verbatim.
+	if rr := get(t, h, "/app.js"); rr.Code != 200 || !strings.Contains(rr.Body.String(), "console.log") {
+		t.Fatalf("asset: %d %s", rr.Code, rr.Body.String())
+	}
+	// Unknown non-API path falls back to the SPA shell (client routing).
+	if rr := get(t, h, "/guide/123"); rr.Code != 200 || !strings.Contains(rr.Body.String(), "SPA-SHELL") {
+		t.Fatalf("spa fallback: %d %s", rr.Code, rr.Body.String())
+	}
+	// Unknown API path stays a JSON 404, not the HTML shell.
+	rr := get(t, h, "/api/nonsense")
+	if rr.Code != http.StatusNotFound || strings.Contains(rr.Body.String(), "SPA-SHELL") {
+		t.Fatalf("api 404: %d %s", rr.Code, rr.Body.String())
+	}
+	if !json.Valid(rr.Body.Bytes()) {
+		t.Fatalf("api 404 not JSON: %s", rr.Body.String())
 	}
 }
 
