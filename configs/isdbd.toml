@@ -7,7 +7,7 @@ adapters = [0]
 
 # Sibling repos under ~/code/isdb-workspace/. Adjust if you cloned
 # elsewhere.
-dvbr_bin   = "../dvbr/target/release/dvbr"
+dvbr_bin   = "../target/release/dvbr"
 b25_bin    = "../libaribb25-rs/target/release/b25"
 ffmpeg_bin = "ffmpeg"
 
