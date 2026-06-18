@@ -1,26 +1,24 @@
-# isdbd
+# isdb-hub
 
-Go daemon for a self-hosted ISDB-T TV stack. Owns adapter resources,
+Go orchestrator for a self-hosted ISDB-T TV stack. Owns adapter resources,
 runs EPG ingestion + scheduling + recording, and serves live HLS + a
 static web UI.
 
 External components (each in its own sibling repo):
 
 - [`dvbr`](https://github.com/DuckFeather10086/dvbr) — tune / scan / EPG.
-  Internally depends on [`arib-b24` (libaribb24-rs)](https://github.com/DuckFeather10086/libaribb24-rs)
+  Internally depends on [`libaribb24-rs`](https://github.com/DuckFeather10086/libaribb24-rs)
   (ARIB STD-B24 text decoder) for SDT service names and EIT programme text → UTF-8.
-- [`b25`](https://github.com/DuckFeather10086/libaribb25-rs) — ARIB STD-B25 descrambler
+- [`libaribb25-rs`](https://github.com/DuckFeather10086/libaribb25-rs) — ARIB STD-B25 descrambler
   (MULTI2 decrypt via B-CAS card over PC/SC). Optional for FTA-only setups.
 - `ffmpeg` — remux / encode for HLS and recordings
 
 ## Status
 
-Substantively implemented in Go (race-clean tests across the board).
-The tuner pipeline now chains `dvbr | b25` (descrambled TS) and the
-daemon serves an embedded static web UI (Live / Guide / Schedules /
-Recordings). **Not yet exercised against real hardware.** See
-`CLAUDE.md` "Current implementation status" for the per-package
-breakdown.
+Implemented in Go (race-clean tests). The tuner pipeline chains
+`dvbr | b25` (descrambled TS) and the daemon serves an embedded static
+web UI (Live / Guide / Schedules / Recordings). See `CLAUDE.md`
+"Current implementation status" for the per-package breakdown.
 
 ## Layout
 
@@ -37,9 +35,9 @@ internal/
   scheduler/         cron-driven recording trigger
   hls/               ffmpeg subprocess + m3u8 serving
   api/               chi router + handlers
-  web/               embedded Next.js static export
+  web/               embedded static SPA (no-build, //go:embed)
 configs/             example daemon config
-scripts/             systemd unit etc.
+scripts/             systemd unit
 ```
 
 ## Build
@@ -48,9 +46,7 @@ scripts/             systemd unit etc.
 go build ./...
 ```
 
-Real run is not wired yet.
-
 ## Workspace
 
-This repo is meant to be cloned alongside the Rust crates under a
-single `~/code/isdb-workspace/` dir. See that dir's `README.md`.
+This repo is a submodule of [`isdb-workspace`](https://github.com/DuckFeather10086/isdb-workspace).
+Clone recursively to get the full stack.

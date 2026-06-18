@@ -27,7 +27,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/DuckFeather10086/isdbd/internal/tuner"
+	"github.com/DuckFeather10086/isdb-hub/internal/tuner"
 )
 
 func main() {

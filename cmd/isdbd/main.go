@@ -27,15 +27,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/DuckFeather10086/isdbd/internal/api"
-	"github.com/DuckFeather10086/isdbd/internal/config"
-	"github.com/DuckFeather10086/isdbd/internal/epg"
-	"github.com/DuckFeather10086/isdbd/internal/hls"
-	"github.com/DuckFeather10086/isdbd/internal/recorder"
-	"github.com/DuckFeather10086/isdbd/internal/scheduler"
-	"github.com/DuckFeather10086/isdbd/internal/store"
-	"github.com/DuckFeather10086/isdbd/internal/tuner"
-	"github.com/DuckFeather10086/isdbd/internal/web"
+	"github.com/DuckFeather10086/isdb-hub/internal/api"
+	"github.com/DuckFeather10086/isdb-hub/internal/config"
+	"github.com/DuckFeather10086/isdb-hub/internal/epg"
+	"github.com/DuckFeather10086/isdb-hub/internal/hls"
+	"github.com/DuckFeather10086/isdb-hub/internal/recorder"
+	"github.com/DuckFeather10086/isdb-hub/internal/scheduler"
+	"github.com/DuckFeather10086/isdb-hub/internal/store"
+	"github.com/DuckFeather10086/isdb-hub/internal/tuner"
+	"github.com/DuckFeather10086/isdb-hub/internal/web"
 )
 
 // Set via -ldflags "-X main.version=...".

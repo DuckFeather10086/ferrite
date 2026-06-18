@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/DuckFeather10086/isdbd/internal/config"
+	"github.com/DuckFeather10086/isdb-hub/internal/config"
 )
 
 // fakeTuner returns scripted TsStreams instead of spawning dvbr.

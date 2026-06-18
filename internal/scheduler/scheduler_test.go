@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/DuckFeather10086/isdbd/internal/recorder"
-	"github.com/DuckFeather10086/isdbd/internal/store"
+	"github.com/DuckFeather10086/isdb-hub/internal/recorder"
+	"github.com/DuckFeather10086/isdb-hub/internal/store"
 )
 
 type fakeRunner struct {

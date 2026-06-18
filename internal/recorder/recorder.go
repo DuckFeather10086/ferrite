@@ -27,8 +27,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/DuckFeather10086/isdbd/internal/store"
-	"github.com/DuckFeather10086/isdbd/internal/tuner"
+	"github.com/DuckFeather10086/isdb-hub/internal/store"
+	"github.com/DuckFeather10086/isdb-hub/internal/tuner"
 )
 
 // Default watchdog timings.

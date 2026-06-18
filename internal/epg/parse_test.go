@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/DuckFeather10086/isdbd/internal/store"
+	"github.com/DuckFeather10086/isdb-hub/internal/store"
 )
 
 func TestParse_AsahiFixture(t *testing.T) {

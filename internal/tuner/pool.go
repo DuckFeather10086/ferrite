@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/DuckFeather10086/isdbd/internal/config"
-	"github.com/DuckFeather10086/isdbd/internal/fanout"
+	"github.com/DuckFeather10086/isdb-hub/internal/config"
+	"github.com/DuckFeather10086/isdb-hub/internal/fanout"
 )
 
 // Tuner is the seam between Pool and an actual tuner driver. Production

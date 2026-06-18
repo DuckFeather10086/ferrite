@@ -4,7 +4,7 @@ Guidance for Claude Code in this repo.
 
 ## What this is
 
-`isdbd` is the Go daemon for a self-hosted ISDB-T TV stack. It owns
+`isdb-hub` is the Go daemon for a self-hosted ISDB-T TV stack. It owns
 the DVB adapter(s), runs EPG ingestion, schedules and executes
 recordings, and serves live HLS + a static web UI.
 
@@ -16,7 +16,7 @@ binaries spawned as subprocesses:
 - `b25` (Rust, sibling repo `libaribb25-rs`) — ARIB B25 descrambler;
   reads encrypted TS on stdin, writes plain TS on stdout.
 - `arib-b24` (Rust, sibling repo `libaribb24-rs`) — ARIB STD-B24 text
-  decoder. Used *inside* dvbr (not spawned directly by isdbd) to decode
+  decoder. Used *inside* dvbr (not spawned directly by isdb-hub) to decode
   SDT service names and EIT programme text to UTF-8.
 - `ffmpeg` — TS → HLS remux + AAC re-encode; or TS → MP4 for recordings.
 
@@ -35,8 +35,8 @@ dvbr stdout → b25 stdin → b25 stdout → fanout.Broadcaster
   - `proc/` — subprocess helpers: `setpgid`, kill-by-pgrp, stderr→slog.
     Mirrors the contracts in the legacy `live_hls.py` (see archived
     `isdb-test` repo) — especially the **adapter lock** convention:
-    when isdbd spawns `dvbr` it should set `DVBR_SKIP_ADAPTER_LOCK=1`
-    only if isdbd itself holds the flock; otherwise let dvbr lock.
+    when isdb-hub spawns `dvbr` it should set `DVBR_SKIP_ADAPTER_LOCK=1`
+    only if isdb-hub itself holds the flock; otherwise let dvbr lock.
   - `tuner/` — `Pool` of adapters; `Lease` represents an active
     subscription to a tuned service. Same-frequency/same-service
     leases share one underlying `dvbr` subprocess via `fanout`.
@@ -109,7 +109,7 @@ Implemented and tested (race-clean):
 ## Architecture invariants
 
 - **One process per adapter at a time.** Cross-process serialization
-  is `dvbr`'s flock on `/tmp/dvbr-adapter{N}.lock`. Inside isdbd, an
+  is `dvbr`'s flock on `/tmp/dvbr-adapter{N}.lock`. Inside isdb-hub, an
   in-memory mutex on the adapter's `Pool` slot is sufficient.
 - **Subprocess stderr is not /dev/null.** Pipe to slog at warn level.
   The legacy Python silently masked failures and we missed recordings.

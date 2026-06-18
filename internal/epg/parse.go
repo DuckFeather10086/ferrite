@@ -6,7 +6,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/DuckFeather10086/isdbd/internal/store"
+	"github.com/DuckFeather10086/isdb-hub/internal/store"
 )
 
 // jst is the timezone dvbr emits EIT times in (ARIB EIT carries JST

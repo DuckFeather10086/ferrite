@@ -1,4 +1,4 @@
-module github.com/DuckFeather10086/isdbd
+module github.com/DuckFeather10086/isdb-hub
 
 go 1.25.0
 
