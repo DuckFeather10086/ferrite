@@ -154,7 +154,11 @@ func (m *Manager) Open(ctx context.Context, channel string) (*Session, error) {
 
 	args := append([]string{}, m.FFmpegArgs...)
 	args = append(args,
-		"-hide_banner", "-loglevel", "warning", "-nostats",
+		// -loglevel error: ISDB AAC/partial-GOP input makes ffmpeg emit a
+		// nonstop stream of benign "warning" lines; at error level only
+		// real failures reach proc's stderr→slog (which is also rate-
+		// limited). Keeps a long-running session from flooding the log.
+		"-hide_banner", "-loglevel", "error", "-nostats",
 		"-fflags", "+genpts+discardcorrupt",
 		"-probesize", "10M", "-analyzeduration", "10M",
 		"-i", "pipe:0",

@@ -27,6 +27,17 @@ import (
 // can take longer to flush. 2s is a comfortable upper bound.
 const killGracePeriod = 2 * time.Second
 
+// stderr→slog rate limiting. A child on a glitchy signal (ffmpeg
+// especially) can emit warning lines forever; logging every one has
+// filled disks in the field. We log a short burst verbatim, then at
+// most one line per stderrLogInterval, annotated with how many lines
+// were suppressed in between. This bounds log growth to ~burst +
+// runtime/interval lines per subprocess.
+const (
+	stderrLogBurst    = 20
+	stderrLogInterval = 2 * time.Second
+)
+
 // Process is a running subprocess whose stdout is exposed as an
 // io.Reader and whose lifetime is bounded by Close (or the parent
 // context's cancellation).
@@ -153,13 +164,34 @@ func SpawnOpt(ctx context.Context, opts SpawnOpts, name string, args ...string) 
 		p.Stdin = stdinW
 	}
 
-	// Drain stderr into slog. Long-line safe up to 1 MiB.
+	// Drain stderr into slog, rate-limited (see stderrLogInterval) so a
+	// chatty or looping child can't fill the disk. Long-line safe to 1 MiB.
 	go func() {
 		defer stderrR.Close()
 		scanner := bufio.NewScanner(stderrR)
 		scanner.Buffer(make([]byte, 0, 4096), 1<<20)
+		var (
+			count      int
+			suppressed int64
+			lastLogged time.Time
+		)
 		for scanner.Scan() {
-			slog.Warn("subprocess stderr", "cmd", name, "line", scanner.Text())
+			count++
+			if count > stderrLogBurst && time.Since(lastLogged) < stderrLogInterval {
+				suppressed++
+				continue
+			}
+			if suppressed > 0 {
+				slog.Warn("subprocess stderr", "cmd", name,
+					"line", scanner.Text(), "suppressed", suppressed)
+				suppressed = 0
+			} else {
+				slog.Warn("subprocess stderr", "cmd", name, "line", scanner.Text())
+			}
+			lastLogged = time.Now()
+		}
+		if suppressed > 0 {
+			slog.Warn("subprocess stderr (truncated)", "cmd", name, "suppressed", suppressed)
 		}
 		if err := scanner.Err(); err != nil && !errors.Is(err, io.ErrClosedPipe) {
 			slog.Debug("subprocess stderr scan error", "cmd", name, "err", err)
