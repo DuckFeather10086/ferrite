@@ -1,0 +1,154 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_BUILD_RUSTFLAGS: '-C strip=symbols'
+
+jobs:
+  build:
+    name: build (${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    env:
+      CGO_ENABLED: 0
+      GOOS: linux
+      GOARCH: ${{ matrix.arch == 'amd64' && 'amd64' || 'arm64' }}
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          set -eux
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libclang-dev libpcsclite-dev pkg-config
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            libaribb25-rs/target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-v3-${{ hashFiles('Cargo.lock', 'dvb-rs/Cargo.toml', 'libaribb24-rs/Cargo.toml', 'libaribb25-rs/Cargo.toml', 'libaribb25-rs/aribb25/Cargo.toml', 'libaribb25-rs/b25/Cargo.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-v3-
+
+      - name: Build dvb-rs (root workspace)
+        run: cargo build --release
+
+      - name: Build b25-rs (inner workspace)
+        run: cargo build --release --manifest-path libaribb25-rs/Cargo.toml
+
+      - name: Build ferrite (Go daemon)
+        run: |
+          go build \
+            -ldflags "-s -w -X main.version=${{ github.ref_name }}" \
+            -o ferrite \
+            ./cmd/isdbd
+
+      - name: Assemble release directory
+        run: |
+          TAG='${{ github.ref_name }}'
+          RELEASE_DIR="ferrite-${TAG}-linux-${{ matrix.arch }}"
+          mkdir -p "$RELEASE_DIR"
+
+          cp target/release/dvb-rs                 "$RELEASE_DIR/dvb-rs"
+          cp libaribb25-rs/target/release/b25-rs    "$RELEASE_DIR/b25-rs"
+          cp ferrite                                "$RELEASE_DIR/ferrite"
+          cp -r configs                             "$RELEASE_DIR/"
+          cp scripts/isdbd.service                  "$RELEASE_DIR/"
+          cp README.md                              "$RELEASE_DIR/"
+
+          chmod +x "$RELEASE_DIR/dvb-rs" "$RELEASE_DIR/b25-rs" "$RELEASE_DIR/ferrite"
+
+          echo "ferrite ${TAG} — linux/${{ matrix.arch }}" > "$RELEASE_DIR/VERSION"
+          "$RELEASE_DIR/dvb-rs" --version 2>&1 | head -1 >> "$RELEASE_DIR/VERSION" || true
+          "$RELEASE_DIR/b25-rs" 2>&1 | head -1 >> "$RELEASE_DIR/VERSION" || true
+          echo "ferrite ${TAG}" >> "$RELEASE_DIR/VERSION"
+          cat "$RELEASE_DIR/VERSION"
+
+      - name: Package
+        run: |
+          TAG='${{ github.ref_name }}'
+          RELEASE_DIR="ferrite-${TAG}-linux-${{ matrix.arch }}"
+          tar czf "${RELEASE_DIR}.tar.gz" "$RELEASE_DIR"
+          sha256sum "${RELEASE_DIR}.tar.gz" > "${RELEASE_DIR}.tar.gz.sha256"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ferrite-${{ github.ref_name }}-linux-${{ matrix.arch }}
+          path: |
+            ferrite-${{ github.ref_name }}-linux-${{ matrix.arch }}.tar.gz
+            ferrite-${{ github.ref_name }}-linux-${{ matrix.arch }}.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ferrite-${{ github.ref_name }}-linux-*
+          merge-multiple: true
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body: |
+            ## ferrite ${{ github.ref_name }}
+
+            **ISDB-T self-hosted TV stack** — tuner (dvb-rs) + descrambler (b25-rs) + orchestrator + web UI (ferrite).
+
+            ### per-arch tarballs
+            Each contains `ferrite`, `dvb-rs`, `b25-rs`, example configs, and a systemd unit.
+
+            | File | Arch |
+            |------|------|
+            | `ferrite-${{ github.ref_name }}-linux-amd64.tar.gz` | x86_64 |
+            | `ferrite-${{ github.ref_name }}-linux-arm64.tar.gz` | aarch64 (Raspberry Pi 4/5, etc.) |
+
+            ### install
+            ```bash
+            curl -L "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ferrite-${{ github.ref_name }}-linux-amd64.tar.gz" | tar xz
+            cd ferrite-${{ github.ref_name }}-linux-amd64
+            sudo cp ferrite dvb-rs b25-rs /usr/local/bin/
+            sudo mkdir -p /etc/ferrite && sudo cp configs/* /etc/ferrite/
+            sudo cp isdbd.service /etc/systemd/system/
+            ```
+
+            ### requirements
+            - Linux DVB adapter at `/dev/dvb/adapter*/`
+            - `ffmpeg` / `ffprobe` on `$PATH`
+            - For scrambled channels: `pcscd` + B-CAS card reader
+          files: artifacts/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

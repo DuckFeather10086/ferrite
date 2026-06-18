@@ -11,8 +11,8 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/DuckFeather10086/isdb-hub/internal/config"
-	"github.com/DuckFeather10086/isdb-hub/internal/store"
+	"github.com/DuckFeather10086/ferrite/internal/config"
+	"github.com/DuckFeather10086/ferrite/internal/store"
 )
 
 func newTestRouter(t *testing.T, withStore bool) (http.Handler, *store.Store) {

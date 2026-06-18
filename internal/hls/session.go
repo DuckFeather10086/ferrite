@@ -30,9 +30,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/DuckFeather10086/isdb-hub/internal/fanout"
-	"github.com/DuckFeather10086/isdb-hub/internal/proc"
-	"github.com/DuckFeather10086/isdb-hub/internal/tuner"
+	"github.com/DuckFeather10086/ferrite/internal/fanout"
+	"github.com/DuckFeather10086/ferrite/internal/proc"
+	"github.com/DuckFeather10086/ferrite/internal/tuner"
 )
 
 // defaultProbeSeconds is the ffprobe sampling window used to measure the

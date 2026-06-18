@@ -4,7 +4,7 @@ Guidance for Claude Code in this repo.
 
 ## What this is
 
-`isdb-hub` is the Go daemon for a self-hosted ISDB-T TV stack. It owns
+`ferrite` is the Go daemon for a self-hosted ISDB-T TV stack. It owns
 the DVB adapter(s), runs EPG ingestion, schedules and executes
 recordings, and serves live HLS + a static web UI.
 
@@ -16,7 +16,7 @@ binaries spawned as subprocesses:
 - `b25-rs` (Rust, sibling repo `libaribb25-rs`) — ARIB B25 descrambler;
   reads encrypted TS on stdin, writes plain TS on stdout.
 - `arib-b24` (Rust, sibling repo `libaribb24-rs`) — ARIB STD-B24 text
-  decoder. Used *inside* dvb-rs (not spawned directly by isdb-hub) to decode
+  decoder. Used *inside* dvb-rs (not spawned directly by ferrite) to decode
   SDT service names and EIT programme text to UTF-8.
 - `ffmpeg` — TS → HLS remux + AAC re-encode; or TS → MP4 for recordings.
 
@@ -35,8 +35,8 @@ dvb-rs stdout → b25-rs stdin → b25-rs stdout → fanout.Broadcaster
   - `proc/` — subprocess helpers: `setpgid`, kill-by-pgrp, stderr→slog.
     Mirrors the contracts in the legacy `live_hls.py` (see archived
     `isdb-test` repo) — especially the **adapter lock** convention:
-    when isdb-hub spawns `dvb-rs` it should set `DVBR_SKIP_ADAPTER_LOCK=1`
-    only if isdb-hub itself holds the flock; otherwise let dvb-rs lock.
+    when ferrite spawns `dvb-rs` it should set `DVBR_SKIP_ADAPTER_LOCK=1`
+    only if ferrite itself holds the flock; otherwise let dvb-rs lock.
   - `tuner/` — `Pool` of adapters; `Lease` represents an active
     subscription to a tuned service. Same-frequency/same-service
     leases share one underlying `dvb-rs` subprocess via `fanout`.
@@ -109,7 +109,7 @@ Implemented and tested (race-clean):
 ## Architecture invariants
 
 - **One process per adapter at a time.** Cross-process serialization
-  is `dvb-rs`'s flock on `/tmp/dvbr-adapter{N}.lock`. Inside isdb-hub, an
+  is `dvb-rs`'s flock on `/tmp/dvbr-adapter{N}.lock`. Inside ferrite, an
   in-memory mutex on the adapter's `Pool` slot is sufficient.
 - **Subprocess stderr is not /dev/null.** Pipe to slog at warn level.
   The legacy Python silently masked failures and we missed recordings.

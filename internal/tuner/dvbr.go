@@ -22,7 +22,7 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/DuckFeather10086/isdb-hub/internal/proc"
+	"github.com/DuckFeather10086/ferrite/internal/proc"
 )
 
 // DvbrCLI is a thin invoker for the dvb-rs binary. One instance per

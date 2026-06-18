@@ -1,0 +1,15 @@
+[submodule "libaribb24-rs"]
+	path = libaribb24-rs
+	url = https://github.com/DuckFeather10086/libaribb24-rs.git
+	branch = main
+	ignore = untracked
+[submodule "libaribb25-rs"]
+	path = libaribb25-rs
+	url = https://github.com/DuckFeather10086/libaribb25-rs.git
+	branch = main
+	ignore = untracked
+[submodule "dvb-rs"]
+	path = dvb-rs
+	url = https://github.com/DuckFeather10086/dvb-rs.git
+	branch = fix/sdt-arib-b24
+	ignore = untracked

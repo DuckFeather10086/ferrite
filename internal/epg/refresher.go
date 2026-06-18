@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/DuckFeather10086/isdb-hub/internal/config"
-	"github.com/DuckFeather10086/isdb-hub/internal/store"
+	"github.com/DuckFeather10086/ferrite/internal/config"
+	"github.com/DuckFeather10086/ferrite/internal/store"
 )
 
 // Refresher periodically runs `dvbr epg --schedule --json` against

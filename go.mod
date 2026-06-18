@@ -1,4 +1,4 @@
-module github.com/DuckFeather10086/isdb-hub
+module github.com/DuckFeather10086/ferrite
 
 go 1.25.0
 

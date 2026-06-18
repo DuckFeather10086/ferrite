@@ -32,10 +32,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	"github.com/DuckFeather10086/isdb-hub/internal/config"
-	"github.com/DuckFeather10086/isdb-hub/internal/hls"
-	"github.com/DuckFeather10086/isdb-hub/internal/store"
-	"github.com/DuckFeather10086/isdb-hub/internal/tuner"
+	"github.com/DuckFeather10086/ferrite/internal/config"
+	"github.com/DuckFeather10086/ferrite/internal/hls"
+	"github.com/DuckFeather10086/ferrite/internal/store"
+	"github.com/DuckFeather10086/ferrite/internal/tuner"
 )
 
 // Deps is what the router needs from the rest of the daemon. Pass a

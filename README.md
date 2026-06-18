@@ -1,24 +1,52 @@
-# isdb-hub
+# ferrite
 
-Go orchestrator for a self-hosted ISDB-T TV stack. Owns adapter resources,
-runs EPG ingestion + scheduling + recording, and serves live HLS + a
-static web UI.
+> Self-hosted **ISDB-T** TV stack — tune, descramble, record, and stream
+> live to your LAN. Go orchestrator driving three Rust engines.
 
-External components (each in its own sibling repo):
+## The stack
 
-- [`dvbr`](https://github.com/DuckFeather10086/dvb-rs) — tune / scan / EPG.
-  Internally depends on [`libaribb24-rs`](https://github.com/DuckFeather10086/libaribb24-rs)
-  (ARIB STD-B24 text decoder) for SDT service names and EIT programme text → UTF-8.
-- [`libaribb25-rs`](https://github.com/DuckFeather10086/libaribb25-rs) — ARIB STD-B25 descrambler
-  (MULTI2 decrypt via B-CAS card over PC/SC). Optional for FTA-only setups.
-- `ffmpeg` — remux / encode for HLS and recordings
+```mermaid
+graph TB
+    subgraph Hardware
+        TUNER["DVB Adapter<br/>/dev/dvb/adapterN"]
+        CARD["B-CAS Card<br/>(scrambled only)"]
+    end
 
-## Status
+    subgraph "Rust engines"
+        DVBR["dvb-rs<br/>tune · scan · EPG"]
+        B24["libaribb24<br/>B24 text decode"]
+        B25["b25-rs<br/>B25 descramble"]
+    end
 
-Implemented in Go (race-clean tests). The tuner pipeline chains
-`dvb-rs | b25-rs` (descrambled TS) and the daemon serves an embedded static
-web UI (Live / Guide / Schedules / Recordings). See `CLAUDE.md`
-"Current implementation status" for the per-package breakdown.
+    subgraph "ferrite (Go)"
+        FANOUT["fanout<br/>1→N broadcast"]
+        HLS["ffmpeg → HLS<br/>.m3u8 / .ts"]
+        REC["recorder → .mp4"]
+        EPG["EPG store<br/>(SQLite)"]
+        SCHED["scheduler<br/>(cron)"]
+        WEB["Web UI<br/>Live · Guide · Recordings"]
+    end
+
+    TUNER -->|"lock & tune"| DVBR
+    DVBR -->|"SDT / EIT bytes"| B24
+    B24 -.->|"UTF-8 text"| DVBR
+    DVBR -->|"encrypted TS"| B25
+    CARD -.->|"PC/SC"| B25
+    B25 -->|"plain TS"| FANOUT
+    FANOUT --> HLS
+    FANOUT --> REC
+    DVBR -->|"epg scan"| EPG
+    EPG --> SCHED
+    SCHED -->|"dispatch job"| REC
+    HLS --> WEB
+    REC --> WEB
+    EPG --> WEB
+```
+
+The hot path per active channel is a two-process pipe —
+`dvb-rs tune … | b25-rs -v 0 - -` — broadcast 1→N by `fanout` (slow
+consumers are dropped, never block live playback). `dvb-rs epg` feeds the
+EPG store on a timer.
 
 ## Layout
 
@@ -35,18 +63,58 @@ internal/
   scheduler/         cron-driven recording trigger
   hls/               ffmpeg subprocess + m3u8 serving
   api/               chi router + handlers
-  web/               embedded static SPA (no-build, //go:embed)
+  web/               embedded static SPA
 configs/             example daemon config
 scripts/             systemd unit
+libaribb24-rs/       ARIB B24 text decoder (Rust, submodule)
+libaribb25-rs/       ARIB B25 descrambler (Rust, submodule)
+dvb-rs/              DVB tuner frontend (Rust, submodule)
 ```
+
+## Quickstart
+
+```bash
+git clone --recursive https://github.com/DuckFeather10086/ferrite.git
+cd ferrite
+./bootstrap.sh build
+go run ./cmd/isdbd -config configs/isdbd.toml
+```
+
+Open the web UI in a browser (Live / Guide / Schedules / Recordings).
 
 ## Build
 
+The two Rust build roots and the Go module build independently:
+
 ```bash
+# Rust: libaribb24 + dvb-rs share the root virtual workspace
+cargo build --release
+#   → target/release/dvb-rs
+
+# Rust: b25-rs has its own inner workspace (excluded from the root one)
+cargo build --release --manifest-path libaribb25-rs/Cargo.toml
+#   → libaribb25-rs/target/release/b25-rs
+
+# Go orchestrator (CGO-free, web UI embedded)
 go build ./...
 ```
 
-## Workspace
+`bootstrap.sh` wraps these and verifies the submodules are checked out.
 
-This repo is a submodule of [`ferrite`](https://github.com/DuckFeather10086/ferrite).
-Clone recursively to get the full stack.
+## Releases
+
+Pre-built tarballs for **linux/amd64** and **linux/arm64** at
+[GitHub Releases](https://github.com/DuckFeather10086/ferrite/releases).
+
+```bash
+curl -L "https://github.com/DuckFeather10086/ferrite/releases/download/v1.0.0/ferrite-v1.0.0-linux-amd64.tar.gz" | tar xz
+cd ferrite-v1.0.0-linux-amd64
+sudo cp ferrite dvb-rs b25-rs /usr/local/bin/
+```
+
+## Runtime requirements
+
+- A USB ISDB-T tuner at `/dev/dvb/adapter*/`.
+- `ffmpeg` / `ffprobe` on `$PATH`.
+- For scrambled channels: **`pcscd`** + B-CAS card reader (polkit rule
+  for the invoking user). FTA-only setups can run without `b25-rs`.
