@@ -1,14 +1,16 @@
 // Command isdbd is the ISDB-T tuner / EPG / recording daemon.
 //
-// What's wired today (and what isn't):
-//   ✓ config load + channels.json load
-//   ✓ sqlite store with migrations
-//   ✓ HTTP API (chi) on configured port, graceful shutdown
-//   ✗ tuner.Pool / fanout / hls.Manager / recorder / scheduler / epg
-//     refresher — packages exist but Run methods still panic.
+// Wired today:
 //
-// You can curl /api/status, /api/channels, /api/epg etc. against this
-// — they answer with empty or 503 until the runtime pieces are wired.
+//	✓ config + channels.json load
+//	✓ sqlite store with migrations
+//	✓ HTTP API (chi) + embedded web UI, graceful shutdown
+//	✓ tuner.Pool (dvbr | b25) / fanout / hls.Manager / recorder /
+//	  scheduler / epg refresher
+//
+// The runtime pieces spawn dvbr/b25/ffmpeg on demand, so the daemon
+// runs (and serves the API + UI) even without a tuner attached —
+// tune-dependent endpoints just fail loudly when no adapter answers.
 package main
 
 import (
@@ -33,6 +35,7 @@ import (
 	"github.com/DuckFeather10086/isdbd/internal/scheduler"
 	"github.com/DuckFeather10086/isdbd/internal/store"
 	"github.com/DuckFeather10086/isdbd/internal/tuner"
+	"github.com/DuckFeather10086/isdbd/internal/web"
 )
 
 // Set via -ldflags "-X main.version=...".
@@ -79,6 +82,7 @@ func run(cfgPath, logLevel string) error {
 
 	dvbrCLI := &tuner.DvbrCLI{
 		BinPath:      cfg.DvbrBin,
+		B25Bin:       cfg.B25Bin,
 		ChannelsFile: cfg.ChannelsFile,
 	}
 	tunerPool := tuner.NewPool(dvbrCLI, channels, cfg.Adapters, 8)
@@ -96,9 +100,12 @@ func run(cfgPath, logLevel string) error {
 
 	hlsRoot, _ := cfg.StoragePath("hls")
 	hlsMgr := &hls.Manager{
-		Tuners:     tunerPool,
-		OutputRoot: hlsRoot,
-		FFmpegBin:  cfg.FFmpegBin,
+		Tuners:          tunerPool,
+		OutputRoot:      hlsRoot,
+		FFmpegBin:       cfg.FFmpegBin,
+		FFprobeBin:      cfg.FFprobeBin,
+		ProbeSeconds:    cfg.ProbeSeconds,
+		AudioOffsetBias: cfg.AudioOffsetBias,
 	}
 
 	handler := api.NewRouter(api.Deps{
@@ -108,6 +115,7 @@ func run(cfgPath, logLevel string) error {
 		HLS:       hlsMgr,
 		StartedAt: time.Now(),
 		Version:   version,
+		Web:       web.FS(),
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(),

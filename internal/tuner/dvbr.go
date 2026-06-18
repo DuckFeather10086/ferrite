@@ -15,8 +15,11 @@ package tuner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"os"
 	"strconv"
 
 	"github.com/DuckFeather10086/isdbd/internal/proc"
@@ -28,6 +31,11 @@ import (
 type DvbrCLI struct {
 	// BinPath is the absolute path to the dvbr executable.
 	BinPath string
+	// B25Bin is the absolute path to the b25 descrambler. When set,
+	// Tune chains dvbr's output through b25 so consumers receive
+	// descrambled TS. Empty disables descrambling (raw TS — only useful
+	// for free-to-air or when no B-CAS card is present).
+	B25Bin string
 	// ChannelsFile is passed as --channels to every subcommand.
 	ChannelsFile string
 	// LockTimeoutMs bounds how long dvbr waits for the frontend to
@@ -70,16 +78,71 @@ func (d *DvbrCLI) Tune(ctx context.Context, adapter int, channel string) (TsStre
 		channel,
 	}
 
-	p, err := proc.Spawn(ctx, d.BinPath, args...)
+	dvbrProc, err := proc.Spawn(ctx, d.BinPath, args...)
 	if err != nil {
 		return nil, fmt.Errorf("tuner: spawn dvbr tune: %w", err)
 	}
-	return &tuneStream{p: p}, nil
+
+	// Free-to-air / no card: hand back dvbr's raw stdout directly.
+	if d.B25Bin == "" {
+		return &tuneStream{dvbr: dvbrProc}, nil
+	}
+
+	// Scrambled (the common ISDB-T case): chain dvbr → b25. b25 reads
+	// encrypted TS on stdin and writes descrambled TS on stdout:
+	//   b25 -v 0 - -
+	// -v 0 silences the per-chunk progress line b25 prints to stderr
+	// (which would otherwise flood slog); end-of-stream warnings such
+	// as "unpurchased ECM" still surface.
+	b25Proc, err := proc.SpawnOpt(ctx, proc.SpawnOpts{Stdin: true}, d.B25Bin, "-v", "0", "-", "-")
+	if err != nil {
+		_ = dvbrProc.Close()
+		return nil, fmt.Errorf("tuner: spawn b25: %w", err)
+	}
+
+	// Pump dvbr's stdout into b25's stdin. When dvbr exits (source EOF
+	// or teardown) we close b25's stdin so it flushes its final packets
+	// and exits cleanly. The goroutine always terminates: io.Copy
+	// returns once either side of the pipe is closed by teardown.
+	go func() {
+		_, copyErr := io.Copy(b25Proc.Stdin, dvbrProc.Stdout)
+		_ = b25Proc.Stdin.Close()
+		if copyErr != nil &&
+			!errors.Is(copyErr, os.ErrClosed) &&
+			!errors.Is(copyErr, io.ErrClosedPipe) {
+			slog.Debug("tuner: dvbr→b25 copy ended", "adapter", adapter, "err", copyErr)
+		}
+	}()
+
+	return &tuneStream{dvbr: dvbrProc, b25: b25Proc}, nil
 }
 
+// tuneStream is the read side of a tuned pipeline. When b25 is non-nil
+// the readable stream is b25's descrambled stdout; otherwise it is
+// dvbr's raw stdout. Close tears down the whole pipeline.
 type tuneStream struct {
-	p *proc.Process
+	dvbr *proc.Process
+	b25  *proc.Process // nil when descrambling is disabled
 }
 
-func (t *tuneStream) Read(b []byte) (int, error) { return t.p.Stdout.Read(b) }
-func (t *tuneStream) Close() error               { return t.p.Close() }
+func (t *tuneStream) Read(b []byte) (int, error) {
+	if t.b25 != nil {
+		return t.b25.Stdout.Read(b)
+	}
+	return t.dvbr.Stdout.Read(b)
+}
+
+// Close tears down both subprocesses. b25 (downstream) is closed first
+// so a blocked reader unblocks promptly; dvbr (upstream) follows. Each
+// is its own process group, so ordering only affects teardown latency,
+// not correctness.
+func (t *tuneStream) Close() error {
+	var err error
+	if t.b25 != nil {
+		err = t.b25.Close()
+	}
+	if e := t.dvbr.Close(); e != nil && err == nil {
+		err = e
+	}
+	return err
+}

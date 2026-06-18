@@ -47,7 +47,10 @@ dvbr stdout → b25 stdin → b25 stdout → fanout.Broadcaster
   - `scheduler/` — `robfig/cron` driving recordings from `schedules`
     table.
   - `hls/` — per-channel session: acquire lease → ffmpeg subprocess
-    → m3u8 dir. Refcounted; teardown when last viewer leaves.
+    → m3u8 dir. Refcounted; teardown when last viewer leaves. On start
+    it probes the first audio/video PTS (ffprobe) and delays audio via
+    `-af asetpts` to correct ISDB's A/V skew — ports the live_hls.py
+    auto-offset (config `ffprobe_bin` / `probe_seconds`).
   - `api/` — chi router for `/api/...` + serves `internal/web/dist`.
   - `web/` — `//go:embed dist` of Next.js `output: 'export'` build.
 
@@ -58,7 +61,8 @@ Implemented and tested (race-clean):
   lifecycle, stderr→slog, stdin pipe for ffmpeg.
 - `tuner.DvbrCLI.Tune` — wraps `dvbr tune` into a TsStream.
 - `tuner.Pool` — refcounted leases, same-channel sharing, source-EOF
-  recovery. **Not wired to b25 yet** — leases emit raw (encrypted) TS.
+  recovery. Now chains `dvbr | b25` so leases emit descrambled TS
+  (see `DvbrCLI.B25Bin`; empty disables descrambling for FTA/no-card).
 - `fanout.Broadcaster` — 1→N chunk fanout with drop-on-slow, pooled
   buffers.
 - `store` — sqlite (WAL) with embedded migrations; CRUD for
@@ -76,19 +80,28 @@ Implemented and tested (race-clean):
   janitor, m3u8 + segments on disk.
 - `api` (chi) — `/health`, `/api/status` (with adapter occupancy),
   `/api/channels`, `/api/epg`, `/api/now`, `/api/schedule` (CRUD),
-  `/api/recordings`, `/api/live/{channel}.m3u8` + segments.
+  `/api/recordings`, `/api/live/{channel}.m3u8` + segments. Also serves
+  the embedded web UI (SPA fallback) for all non-`/api` routes.
+- `tuner.DvbrCLI.Tune` — chains `dvbr | b25`: dvbr's stdout is pumped
+  into `b25 -v 0 - -` and the descrambled stdout is the lease stream.
+  A copy goroutine bridges the two pipes and closes b25's stdin on
+  dvbr EOF; `tuneStream.Close` tears down both subprocesses.
+- `internal/web` — hand-written no-build SPA in `dist/` (Live / Guide /
+  Schedules / Recordings), `//go:embed all:dist`, mounted by `api`.
 
 **Not implemented:**
-- `internal/web` — the embed.FS placeholder exists; the Next.js
-  source + build hasn't been started.
-- Insertion of `b25` into the tuner pipeline. Currently
-  `tuner.DvbrCLI.Tune` returns dvbr's raw stdout. For descrambled
-  output, either chain a second subprocess in the pump goroutine or
-  spawn the whole `dvbr | b25` as a shell pipeline. Recorder writes
-  raw TS today; HLS ffmpeg will get encrypted bytes and fail.
+- HLS segment URLs: the playlist is served at `/api/live/{channel}.m3u8`
+  and segments at `/api/live/{channel}/{segment}`; ffmpeg is given
+  `-hls_base_url {channel}/` so segment URIs resolve under the channel
+  subpath. The recordings file-download endpoint
+  (`/api/recordings/{id}/file`) is still a stub.
+- Vendoring hls.js: the UI currently loads it from a CDN with a native
+  HLS fallback (Safari/iOS). Drop a copy into `dist/` for fully offline
+  LAN playback in Chrome/Firefox.
 - End-to-end hardware verification — every package has unit/integration
-  tests with mocks/fakes, but nothing has been exercised against an
-  actual tuner since the switch from `live_hls.py`.
+  tests with mocks/fakes; the `dvbr | b25` chaining is covered by a
+  fake-binary integration test, but nothing has been exercised against
+  an actual tuner since the switch from `live_hls.py`.
 
 ## Architecture invariants
 

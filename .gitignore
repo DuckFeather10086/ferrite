@@ -4,8 +4,10 @@
 *.db
 *.db-wal
 *.db-shm
-hls/
-recordings/
+# Runtime output lives under the dev storage_root (./var). These were
+# previously bare "hls/" and "recordings/" — unanchored, so they also
+# matched the internal/hls source package and silently un-tracked it.
+/var/
 web/node_modules/
 web/.next/
 .env

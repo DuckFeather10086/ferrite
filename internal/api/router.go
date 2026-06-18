@@ -20,8 +20,10 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"net/http"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -46,6 +48,10 @@ type Deps struct {
 	HLS       *hls.Manager
 	StartedAt time.Time
 	Version   string // build-time injected, optional
+	// Web is the embedded static UI (e.g. web.FS()). When non-nil it is
+	// served for all non-/api routes with an index.html SPA fallback;
+	// nil disables UI serving (tests, headless deployments).
+	Web fs.FS
 }
 
 // NewRouter returns an http.Handler with all endpoints wired.
@@ -76,7 +82,38 @@ func NewRouter(d Deps) http.Handler {
 		r.Post("/live/{channel}/stop", d.handleLiveStop)
 	})
 
+	// Static web UI: everything not matched above falls through to the
+	// embedded SPA. chi routes /health and /api/* to their handlers
+	// first, so this only catches asset and client-route requests.
+	if d.Web != nil {
+		r.NotFound(staticHandler(d.Web))
+	}
+
 	return r
+}
+
+// staticHandler serves the embedded UI bundle. Real files are served
+// as-is; any other path falls back to index.html so client-side routing
+// works. Unknown /api/* paths still get a JSON 404 rather than the SPA
+// shell, so a mistyped API call fails as JSON, not HTML.
+func staticHandler(fsys fs.FS) http.HandlerFunc {
+	fileServer := http.FileServer(http.FS(fsys))
+	return func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			writeErr(w, http.StatusNotFound, "not found")
+			return
+		}
+		name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+		if name != "" {
+			if f, err := fsys.Open(name); err != nil {
+				// Not a real asset → serve the SPA shell.
+				r.URL.Path = "/"
+			} else {
+				_ = f.Close()
+			}
+		}
+		fileServer.ServeHTTP(w, r)
+	}
 }
 
 func (d Deps) handleStatus(w http.ResponseWriter, r *http.Request) {

@@ -12,9 +12,11 @@ External binaries it drives (each in its own sibling repo):
 
 ## Status
 
-Substantively implemented in Go (race-clean tests across the board);
-**not yet wired to b25** and **not exercised against real hardware**.
-See `CLAUDE.md` "Current implementation status" for the per-package
+Substantively implemented in Go (race-clean tests across the board).
+The tuner pipeline now chains `dvbr | b25` (descrambled TS) and the
+daemon serves an embedded static web UI (Live / Guide / Schedules /
+Recordings). **Not yet exercised against real hardware.** See
+`CLAUDE.md` "Current implementation status" for the per-package
 breakdown.
 
 ## Layout
