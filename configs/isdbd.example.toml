@@ -3,8 +3,8 @@ storage_root = "/var/lib/isdbd"
 adapters = [0]
 
 # dvbr is built into the parent virtual workspace's target/, not dvbr/target/.
-dvbr_bin     = "/home/duckfeather/code/isdb-workspace/target/release/dvbr"
-b25_bin      = "/home/duckfeather/code/isdb-workspace/libaribb25-rs/target/release/b25"
+dvbr_bin     = "/home/duckfeather/code/isdb-workspace/target/release/dvb-rs"
+b25_bin      = "/home/duckfeather/code/isdb-workspace/libaribb25-rs/target/release/b25-rs"
 ffmpeg_bin   = "ffmpeg"
 ffprobe_bin  = "ffprobe"
 

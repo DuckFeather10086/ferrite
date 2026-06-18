@@ -66,7 +66,7 @@ channels_file = "`+channelsPath+`"
 	if d.HTTPPort != 9000 {
 		t.Fatalf("HTTPPort: %d", d.HTTPPort)
 	}
-	if d.DvbrBin != "dvbr" { // default
+	if d.DvbrBin != "dvb-rs" { // default
 		t.Fatalf("DvbrBin default lost: %q", d.DvbrBin)
 	}
 	if len(d.Adapters) != 2 {

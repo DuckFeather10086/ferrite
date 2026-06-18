@@ -16,7 +16,7 @@ External components (each in its own sibling repo):
 ## Status
 
 Implemented in Go (race-clean tests). The tuner pipeline chains
-`dvbr | b25` (descrambled TS) and the daemon serves an embedded static
+`dvb-rs | b25-rs` (descrambled TS) and the daemon serves an embedded static
 web UI (Live / Guide / Schedules / Recordings). See `CLAUDE.md`
 "Current implementation status" for the per-package breakdown.
 
@@ -27,10 +27,10 @@ cmd/isdbd/           entrypoint
 internal/
   config/            channels.json + daemon TOML
   proc/              subprocess helpers (pgrp, stderr-to-slog)
-  tuner/             adapter pool + dvbr CLI wrapper + leases
+  tuner/             adapter pool + dvb-rs CLI wrapper + leases
   fanout/            TS stream 1→N broadcaster (chunk pool, drop on slow)
   store/             sqlite (epg events, recordings, schedules)
-  epg/               periodic dvbr epg ingest
+  epg/               periodic dvb-rs epg ingest
   recorder/          recording job lifecycle
   scheduler/         cron-driven recording trigger
   hls/               ffmpeg subprocess + m3u8 serving

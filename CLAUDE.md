@@ -11,18 +11,18 @@ recordings, and serves live HLS + a static web UI.
 It is **the orchestrator** — the heavy lifting is done by external
 binaries spawned as subprocesses:
 
-- `dvbr` (Rust, sibling repo) — tune frontend, parse PAT/PMT, tap PIDs,
-  emit TS on stdout; also `dvbr epg` for EIT ingestion.
-- `b25` (Rust, sibling repo `libaribb25-rs`) — ARIB B25 descrambler;
+- `dvb-rs` (Rust, sibling repo) — tune frontend, parse PAT/PMT, tap PIDs,
+  emit TS on stdout; also `dvb-rs epg` for EIT ingestion.
+- `b25-rs` (Rust, sibling repo `libaribb25-rs`) — ARIB B25 descrambler;
   reads encrypted TS on stdin, writes plain TS on stdout.
 - `arib-b24` (Rust, sibling repo `libaribb24-rs`) — ARIB STD-B24 text
-  decoder. Used *inside* dvbr (not spawned directly by isdb-hub) to decode
+  decoder. Used *inside* dvb-rs (not spawned directly by isdb-hub) to decode
   SDT service names and EIT programme text to UTF-8.
 - `ffmpeg` — TS → HLS remux + AAC re-encode; or TS → MP4 for recordings.
 
 Pipeline (per active tune):
 ```
-dvbr stdout → b25 stdin → b25 stdout → fanout.Broadcaster
+dvb-rs stdout → b25-rs stdin → b25-rs stdout → fanout.Broadcaster
                                         ├─ recorder writer
                                         └─ hls ffmpeg stdin → m3u8 + .ts
 ```
@@ -31,20 +31,20 @@ dvbr stdout → b25 stdin → b25 stdout → fanout.Broadcaster
 
 - `cmd/isdbd/` — entrypoint.
 - `internal/`:
-  - `config/` — load channels.json (shared format with `dvbr`) + daemon TOML.
+  - `config/` — load channels.json (shared format with `dvb-rs`) + daemon TOML.
   - `proc/` — subprocess helpers: `setpgid`, kill-by-pgrp, stderr→slog.
     Mirrors the contracts in the legacy `live_hls.py` (see archived
     `isdb-test` repo) — especially the **adapter lock** convention:
-    when isdb-hub spawns `dvbr` it should set `DVBR_SKIP_ADAPTER_LOCK=1`
-    only if isdb-hub itself holds the flock; otherwise let dvbr lock.
+    when isdb-hub spawns `dvb-rs` it should set `DVBR_SKIP_ADAPTER_LOCK=1`
+    only if isdb-hub itself holds the flock; otherwise let dvb-rs lock.
   - `tuner/` — `Pool` of adapters; `Lease` represents an active
     subscription to a tuned service. Same-frequency/same-service
-    leases share one underlying `dvbr` subprocess via `fanout`.
+    leases share one underlying `dvb-rs` subprocess via `fanout`.
   - `fanout/` — TS broadcaster. **Slow consumer policy is drop, not
     block.** A stuck recorder must never starve live HLS.
   - `store/` — sqlite. Open with `_journal_mode=WAL` (so EPG batch
     writes don't block UI reads). No write-concurrency tuning needed.
-  - `epg/` — cron-tick → `dvbr epg --json` → ingest into store.
+  - `epg/` — cron-tick → `dvb-rs epg --json` → ingest into store.
   - `recorder/` — schedule-fired job: acquire lease, write file,
     update store row.
   - `scheduler/` — `robfig/cron` driving recordings from `schedules`
@@ -62,9 +62,9 @@ dvbr stdout → b25 stdin → b25 stdout → fanout.Broadcaster
 Implemented and tested (race-clean):
 - `proc.Spawn` / `proc.SpawnOpt(Stdin:true)` — subprocess + pgrp
   lifecycle, stderr→slog, stdin pipe for ffmpeg.
-- `tuner.DvbrCLI.Tune` — wraps `dvbr tune` into a TsStream.
+- `tuner.DvbrCLI.Tune` — wraps `dvb-rs tune` into a TsStream.
 - `tuner.Pool` — refcounted leases, same-channel sharing, source-EOF
-  recovery. Now chains `dvbr | b25` so leases emit descrambled TS
+  recovery. Now chains `dvb-rs | b25-rs` so leases emit descrambled TS
   (see `DvbrCLI.B25Bin`; empty disables descrambling for FTA/no-card).
 - `fanout.Broadcaster` — 1→N chunk fanout with drop-on-slow, pooled
   buffers.
@@ -73,7 +73,7 @@ Implemented and tested (race-clean):
   clean API output.
 - `config` — TOML daemon config + channels.json loader; `Channels.Find`
   mirrors dvbr's `find_entry`.
-- `epg.Parse` + `epg.Refresher` — parse `dvbr epg --json` (JST→UTC),
+- `epg.Parse` + `epg.Refresher` — parse `dvb-rs epg --json` (JST→UTC),
   periodic refresh loop with cron-like interval.
 - `recorder.Runner` — job lifecycle: lead-in wait → Acquire →
   open file → drain chunks with startup/stall watchdogs → finalize row.
@@ -85,10 +85,10 @@ Implemented and tested (race-clean):
   `/api/channels`, `/api/epg`, `/api/now`, `/api/schedule` (CRUD),
   `/api/recordings`, `/api/live/{channel}.m3u8` + segments. Also serves
   the embedded web UI (SPA fallback) for all non-`/api` routes.
-- `tuner.DvbrCLI.Tune` — chains `dvbr | b25`: dvbr's stdout is pumped
-  into `b25 -v 0 - -` and the descrambled stdout is the lease stream.
+- `tuner.DvbrCLI.Tune` — chains `dvb-rs | b25-rs`: dvbr's stdout is pumped
+  into `b25-rs -v 0 - -` and the descrambled stdout is the lease stream.
   A copy goroutine bridges the two pipes and closes b25's stdin on
-  dvbr EOF; `tuneStream.Close` tears down both subprocesses.
+  dvb-rs EOF; `tuneStream.Close` tears down both subprocesses.
 - `internal/web` — hand-written no-build SPA in `dist/` (Live / Guide /
   Schedules / Recordings), `//go:embed all:dist`, mounted by `api`.
 
@@ -109,7 +109,7 @@ Implemented and tested (race-clean):
 ## Architecture invariants
 
 - **One process per adapter at a time.** Cross-process serialization
-  is `dvbr`'s flock on `/tmp/dvbr-adapter{N}.lock`. Inside isdb-hub, an
+  is `dvb-rs`'s flock on `/tmp/dvbr-adapter{N}.lock`. Inside isdb-hub, an
   in-memory mutex on the adapter's `Pool` slot is sufficient.
 - **Subprocess stderr is not /dev/null.** Pipe to slog at warn level.
   The legacy Python silently masked failures and we missed recordings.
@@ -119,7 +119,7 @@ Implemented and tested (race-clean):
   fail loudly to a status row, not silently produce an empty file.
 - **Channel lookup** must accept name + aliases (mirroring
   `dvbr::config::find_entry`). Don't reinvent — the canonical
-  matching rules live in dvbr.
+  matching rules live in dvb-rs.
 
 ## External dependencies
 
@@ -129,7 +129,7 @@ Implemented and tested (race-clean):
 
 ## Things not to do
 
-- Don't shell out to `dvbv5-zap`. That path is retired; use `dvbr` only.
+- Don't shell out to `dvbv5-zap`. That path is retired; use `dvb-rs` only.
 - Don't write recordings to SD card on a Pi. Always external storage.
 - Don't add CGO deps unless absolutely necessary — `modernc.org/sqlite`
   is preferred so cross-compile to arm64 stays a one-liner.
