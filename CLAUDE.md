@@ -15,6 +15,9 @@ binaries spawned as subprocesses:
   emit TS on stdout; also `dvbr epg` for EIT ingestion.
 - `b25` (Rust, sibling repo `libaribb25-rs`) — ARIB B25 descrambler;
   reads encrypted TS on stdin, writes plain TS on stdout.
+- `arib-b24` (Rust, sibling repo `arib-b24-rs`) — ARIB STD-B24 text
+  decoder. Used *inside* dvbr (not spawned directly by isdbd) to decode
+  SDT service names and EIT programme text to UTF-8.
 - `ffmpeg` — TS → HLS remux + AAC re-encode; or TS → MP4 for recordings.
 
 Pipeline (per active tune):

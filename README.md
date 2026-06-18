@@ -4,10 +4,13 @@ Go daemon for a self-hosted ISDB-T TV stack. Owns adapter resources,
 runs EPG ingestion + scheduling + recording, and serves live HLS + a
 static web UI.
 
-External binaries it drives (each in its own sibling repo):
+External components (each in its own sibling repo):
 
-- [`dvbr`](https://github.com/DuckFeather10086/dvbr) — tune / scan / EPG
-- [`b25`](https://github.com/DuckFeather10086/libaribb25-rs) — ARIB B25 descrambler
+- [`dvbr`](https://github.com/DuckFeather10086/dvbr) — tune / scan / EPG.
+  Internally depends on [`arib-b24`](https://github.com/DuckFeather10086/arib-b24-rs)
+  (ARIB STD-B24 text decoder) for SDT service names and EIT programme text → UTF-8.
+- [`b25`](https://github.com/DuckFeather10086/libaribb25-rs) — ARIB STD-B25 descrambler
+  (MULTI2 decrypt via B-CAS card over PC/SC). Optional for FTA-only setups.
 - `ffmpeg` — remux / encode for HLS and recordings
 
 ## Status
