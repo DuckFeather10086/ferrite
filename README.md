@@ -7,7 +7,7 @@ static web UI.
 External components (each in its own sibling repo):
 
 - [`dvbr`](https://github.com/DuckFeather10086/dvbr) — tune / scan / EPG.
-  Internally depends on [`arib-b24`](https://github.com/DuckFeather10086/arib-b24-rs)
+  Internally depends on [`arib-b24` (libaribb24-rs)](https://github.com/DuckFeather10086/libaribb24-rs)
   (ARIB STD-B24 text decoder) for SDT service names and EIT programme text → UTF-8.
 - [`b25`](https://github.com/DuckFeather10086/libaribb25-rs) — ARIB STD-B25 descrambler
   (MULTI2 decrypt via B-CAS card over PC/SC). Optional for FTA-only setups.
