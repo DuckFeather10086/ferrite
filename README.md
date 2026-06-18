@@ -48,5 +48,5 @@ go build ./...
 
 ## Workspace
 
-This repo is a submodule of [`isdb-workspace`](https://github.com/DuckFeather10086/isdb-workspace).
+This repo is a submodule of [`ferrite`](https://github.com/DuckFeather10086/ferrite).
 Clone recursively to get the full stack.
