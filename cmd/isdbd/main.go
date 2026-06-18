@@ -100,9 +100,12 @@ func run(cfgPath, logLevel string) error {
 
 	hlsRoot, _ := cfg.StoragePath("hls")
 	hlsMgr := &hls.Manager{
-		Tuners:     tunerPool,
-		OutputRoot: hlsRoot,
-		FFmpegBin:  cfg.FFmpegBin,
+		Tuners:          tunerPool,
+		OutputRoot:      hlsRoot,
+		FFmpegBin:       cfg.FFmpegBin,
+		FFprobeBin:      cfg.FFprobeBin,
+		ProbeSeconds:    cfg.ProbeSeconds,
+		AudioOffsetBias: cfg.AudioOffsetBias,
 	}
 
 	handler := api.NewRouter(api.Deps{

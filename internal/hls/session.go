@@ -17,13 +17,16 @@ package hls
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -31,6 +34,14 @@ import (
 	"github.com/DuckFeather10086/isdbd/internal/proc"
 	"github.com/DuckFeather10086/isdbd/internal/tuner"
 )
+
+// defaultProbeSeconds is the ffprobe sampling window used to measure the
+// initial audio/video PTS offset when Manager.ProbeSeconds is unset.
+const defaultProbeSeconds = 5.0
+
+// minAudioOffset is the smallest |offset| (seconds) worth correcting;
+// below this the skew is imperceptible and not worth forcing the filter.
+const minAudioOffset = 0.01
 
 // DefaultIdleTimeout is how long a session stays open without a
 // /api/live/{channel}.m3u8 touch before the janitor closes it.
@@ -46,11 +57,25 @@ type Manager struct {
 	Tuners      Acquirer
 	OutputRoot  string        // sessions write under {OutputRoot}/{channel}/
 	FFmpegBin   string        // path to ffmpeg
+	FFprobeBin  string        // path to ffprobe; empty disables A/V offset probing
 	FFmpegArgs  []string      // extra args inserted before -i pipe:0
 	IdleTimeout time.Duration // 0 → DefaultIdleTimeout
 
+	// A/V sync (see config.Daemon). ProbeSeconds is the ffprobe sampling
+	// window (0 → defaultProbeSeconds; <0 disables); AudioOffsetBias is
+	// added to the measured offset.
+	ProbeSeconds    float64
+	AudioOffsetBias float64
+
 	mu       sync.Mutex
 	sessions map[string]*Session
+}
+
+func (m *Manager) probeSeconds() float64 {
+	if m.ProbeSeconds == 0 {
+		return defaultProbeSeconds
+	}
+	return m.ProbeSeconds
 }
 
 // Session is one live ffmpeg pipeline for one channel.
@@ -102,6 +127,25 @@ func (m *Manager) Open(ctx context.Context, channel string) (*Session, error) {
 	// Clear any leftover segments from a previous run on the same dir.
 	_ = clearStaleSegments(dir)
 
+	// ISDB-T muxes interleave audio ahead of the first decodable video
+	// frame, so HLS otherwise comes up with a constant A/V skew. Sample
+	// the first audio + video PTS off the front of the stream and shift
+	// audio by their difference (mirrors legacy live_hls.py). The probe
+	// consumes a few seconds of lease.Sub; the main pump picks up where
+	// it leaves off. Failure is non-fatal — we just start uncorrected.
+	audioOffset := 0.0
+	if m.FFprobeBin != "" && m.probeSeconds() > 0 {
+		off, perr := probeAudioOffset(context.Background(), m.FFprobeBin, lease.Sub, m.probeSeconds())
+		if perr != nil {
+			slog.Warn("hls: A/V offset probe failed; starting without sync correction",
+				"channel", canonical, "err", perr)
+		} else {
+			audioOffset = off + m.AudioOffsetBias
+			slog.Info("hls: measured A/V offset",
+				"channel", canonical, "offset_s", audioOffset)
+		}
+	}
+
 	// The playlist is served at /api/live/{channel}.m3u8 but segments
 	// are served at /api/live/{channel}/{segment}. Prepend a relative
 	// base url so each segment URI in the playlist resolves under the
@@ -112,9 +156,15 @@ func (m *Manager) Open(ctx context.Context, channel string) (*Session, error) {
 	args = append(args,
 		"-hide_banner", "-loglevel", "warning", "-nostats",
 		"-fflags", "+genpts+discardcorrupt",
+		"-probesize", "10M", "-analyzeduration", "10M",
 		"-i", "pipe:0",
-		"-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
 		"-sn", "-dn",
+	)
+	if af := audioOffsetFilter(audioOffset); af != "" {
+		args = append(args, "-af", af)
+	}
+	args = append(args,
+		"-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
 		"-f", "hls",
 		"-hls_time", "2",
 		"-hls_list_size", "6",
@@ -268,6 +318,114 @@ func pumpToFFmpeg(sub *fanout.Sub, w io.WriteCloser) {
 	}
 }
 
+// probeAudioOffset measures the initial video−audio PTS offset (seconds)
+// by feeding the front of the stream into ffprobe. A positive result
+// means audio leads video and should be delayed. Consumes chunks from
+// sub until ffprobe has read its sampling window and exits; the caller
+// resumes reading sub afterwards.
+func probeAudioOffset(ctx context.Context, ffprobeBin string, sub *fanout.Sub, probeSeconds float64) (float64, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Duration((probeSeconds+10)*float64(time.Second)))
+	defer cancel()
+
+	args := []string{
+		"-v", "quiet",
+		"-read_intervals", fmt.Sprintf("%%+%g", probeSeconds),
+		"-show_entries", "stream=index,codec_type",
+		"-show_entries", "packet=stream_index,pts_time",
+		"-of", "json",
+		"-i", "pipe:0",
+	}
+	p, err := proc.SpawnOpt(ctx, proc.SpawnOpts{Stdin: true}, ffprobeBin, args...)
+	if err != nil {
+		return 0, fmt.Errorf("spawn ffprobe: %w", err)
+	}
+	defer p.Close()
+
+	// Feed the stream into ffprobe until it has read its interval and
+	// exits (closing its stdin → our Write fails). Release every chunk.
+	fed := make(chan struct{})
+	go func() {
+		defer close(fed)
+		for c := range sub.Ch {
+			_, werr := p.Stdin.Write(c.Data)
+			c.Release()
+			if werr != nil {
+				return
+			}
+		}
+	}()
+
+	out, _ := io.ReadAll(p.Stdout)
+	_ = p.Close() // ensure ffprobe is gone before we hand the Sub back
+	<-fed         // ensure the feed goroutine stopped reading sub.Ch
+
+	return parseAudioOffsetJSON(out)
+}
+
+// parseAudioOffsetJSON pulls the first audio and video packet PTS out of
+// ffprobe's JSON and returns video−audio (seconds). Split out for tests.
+func parseAudioOffsetJSON(data []byte) (float64, error) {
+	var po struct {
+		Streams []struct {
+			Index     int    `json:"index"`
+			CodecType string `json:"codec_type"`
+		} `json:"streams"`
+		Packets []struct {
+			StreamIndex int    `json:"stream_index"`
+			PtsTime     string `json:"pts_time"`
+		} `json:"packets"`
+	}
+	if err := json.Unmarshal(data, &po); err != nil {
+		return 0, fmt.Errorf("parse ffprobe json: %w", err)
+	}
+	codecByIdx := make(map[int]string, len(po.Streams))
+	for _, s := range po.Streams {
+		codecByIdx[s.Index] = s.CodecType
+	}
+	var vPTS, aPTS float64
+	haveV, haveA := false, false
+	for _, pk := range po.Packets {
+		if pk.PtsTime == "" {
+			continue
+		}
+		t, err := strconv.ParseFloat(pk.PtsTime, 64)
+		if err != nil {
+			continue
+		}
+		switch codecByIdx[pk.StreamIndex] {
+		case "video":
+			if !haveV {
+				vPTS, haveV = t, true
+			}
+		case "audio":
+			if !haveA {
+				aPTS, haveA = t, true
+			}
+		}
+		if haveV && haveA {
+			break
+		}
+	}
+	if !haveV || !haveA {
+		return 0, fmt.Errorf("could not detect both first audio and video PTS")
+	}
+	return vPTS - aPTS, nil
+}
+
+// audioOffsetFilter builds the ffmpeg -af value that shifts audio PTS by
+// offset seconds (positive delays audio). Returns "" for a negligible
+// offset. Mirrors live_hls.py's asetpts expression.
+func audioOffsetFilter(offset float64) string {
+	if math.Abs(offset) < minAudioOffset {
+		return ""
+	}
+	op := "+"
+	if offset < 0 {
+		op = "-"
+	}
+	return fmt.Sprintf("asetpts=PTS%s%g/TB", op, math.Abs(offset))
+}
+
 // clearStaleSegments removes any leftover stream.m3u8 / .ts files
 // in dir from a previous run. Mirrors live_hls.py's cleanup_hls.
 func clearStaleSegments(dir string) error {
@@ -295,4 +453,3 @@ func (s *Session) AdapterHint() int {
 	}
 	return s.lease.Adapter
 }
-

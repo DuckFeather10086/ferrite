@@ -7,11 +7,18 @@ adapters = [0]
 
 # Sibling repos under ~/code/isdb-workspace/. Adjust if you cloned
 # elsewhere.
-dvbr_bin   = "../target/release/dvbr"
-b25_bin    = "../libaribb25-rs/target/release/b25"
-ffmpeg_bin = "ffmpeg"
+dvbr_bin    = "../target/release/dvbr"
+b25_bin     = "../libaribb25-rs/target/release/b25"
+ffmpeg_bin  = "ffmpeg"
+ffprobe_bin = "ffprobe"
 
 channels_file = "channels.json"
+
+# Live A/V sync: before starting ffmpeg, probe the first audio + video
+# PTS and delay audio by their difference (ISDB interleaves audio ahead
+# of the first decodable frame). Auto-enabled when ffprobe_bin is set.
+#   probe_seconds     = 5   # sampling window; set < 0 to disable probing
+#   audio_offset_bias = 0   # extra seconds added to the measured offset
 
 # EPG refresh cron (UTC). Default: every 6 hours.
 epg_cron = "0 */6 * * *"

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -227,6 +228,54 @@ func TestManager_JanitorClosesIdleSessions(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("janitor did not close idle session")
+}
+
+func TestParseAudioOffsetJSON(t *testing.T) {
+	// Audio leads video by 0.4s → offset video−audio = +0.4 (delay audio).
+	good := []byte(`{
+		"packets": [
+			{"stream_index": 1, "pts_time": "1.000000"},
+			{"stream_index": 0, "pts_time": "1.400000"},
+			{"stream_index": 1, "pts_time": "1.020000"}
+		],
+		"streams": [
+			{"index": 0, "codec_type": "video"},
+			{"index": 1, "codec_type": "audio"}
+		]
+	}`)
+	off, err := parseAudioOffsetJSON(good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(off-0.4) > 1e-6 {
+		t.Fatalf("offset: want 0.4, got %v", off)
+	}
+
+	// Only one stream type present → error (can't compute an offset).
+	bad := []byte(`{
+		"packets": [{"stream_index": 1, "pts_time": "1.0"}],
+		"streams": [{"index": 1, "codec_type": "audio"}]
+	}`)
+	if _, err := parseAudioOffsetJSON(bad); err == nil {
+		t.Fatal("expected error when video PTS missing")
+	}
+}
+
+func TestAudioOffsetFilter(t *testing.T) {
+	cases := []struct {
+		offset float64
+		want   string
+	}{
+		{0.4, "asetpts=PTS+0.4/TB"},    // delay audio
+		{-0.25, "asetpts=PTS-0.25/TB"}, // advance audio
+		{0, ""},                        // negligible → no filter
+		{0.005, ""},                    // below minAudioOffset
+	}
+	for _, c := range cases {
+		if got := audioOffsetFilter(c.offset); got != c.want {
+			t.Errorf("audioOffsetFilter(%v) = %q, want %q", c.offset, got, c.want)
+		}
+	}
 }
 
 func TestManager_AcquireFailurePropagates(t *testing.T) {

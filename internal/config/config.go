@@ -23,22 +23,34 @@ type Daemon struct {
 	DvbrBin      string   `toml:"dvbr_bin"`
 	B25Bin       string   `toml:"b25_bin"`
 	FFmpegBin    string   `toml:"ffmpeg_bin"`
+	FFprobeBin   string   `toml:"ffprobe_bin"`
 	ChannelsFile string   `toml:"channels_file"`
 	EPGCron      string   `toml:"epg_cron"`
 	EPGChannels  []string `toml:"epg_channels"`
+
+	// Live HLS A/V sync. ISDB-T muxes interleave audio ahead of the
+	// first decodable video frame, so HLS comes up with a constant
+	// audio/video offset. Before starting ffmpeg, the HLS session probes
+	// the first audio + video PTS and shifts audio by their difference
+	// (mirrors the legacy live_hls.py auto-offset). Probing is enabled
+	// when FFprobeBin is non-empty and ProbeSeconds > 0.
+	ProbeSeconds    float64 `toml:"probe_seconds"`     // ffprobe sampling window; default 5
+	AudioOffsetBias float64 `toml:"audio_offset_bias"` // seconds added to the measured offset
 }
 
 // Defaults returns a daemon config with sensible defaults for fields
 // not present in the TOML.
 func Defaults() Daemon {
 	return Daemon{
-		HTTPPort:    8010,
-		StorageRoot: "./var",
-		Adapters:    []int{0},
-		DvbrBin:     "dvbr",
-		B25Bin:      "b25",
-		FFmpegBin:   "ffmpeg",
-		EPGCron:     "0 */6 * * *",
+		HTTPPort:     8010,
+		StorageRoot:  "./var",
+		Adapters:     []int{0},
+		DvbrBin:      "dvbr",
+		B25Bin:       "b25",
+		FFmpegBin:    "ffmpeg",
+		FFprobeBin:   "ffprobe",
+		EPGCron:      "0 */6 * * *",
+		ProbeSeconds: 5,
 	}
 }
 

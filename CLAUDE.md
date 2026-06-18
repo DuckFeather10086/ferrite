@@ -47,7 +47,10 @@ dvbr stdout → b25 stdin → b25 stdout → fanout.Broadcaster
   - `scheduler/` — `robfig/cron` driving recordings from `schedules`
     table.
   - `hls/` — per-channel session: acquire lease → ffmpeg subprocess
-    → m3u8 dir. Refcounted; teardown when last viewer leaves.
+    → m3u8 dir. Refcounted; teardown when last viewer leaves. On start
+    it probes the first audio/video PTS (ffprobe) and delays audio via
+    `-af asetpts` to correct ISDB's A/V skew — ports the live_hls.py
+    auto-offset (config `ffprobe_bin` / `probe_seconds`).
   - `api/` — chi router for `/api/...` + serves `internal/web/dist`.
   - `web/` — `//go:embed dist` of Next.js `output: 'export'` build.
 
