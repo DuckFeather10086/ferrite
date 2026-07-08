@@ -17,4 +17,4 @@ channels_file = "channels.json"
 
 # EPG refresh cron (UTC). Default: every 6 hours.
 epg_cron = "0 */6 * * *"
-epg_channels = ["TOKYO MX1", "NHKEFl1El5~", "asahi"]
+epg_channels = ["TOKYO MX1", "NHKEFl1El5~", "asahi", "TBS1", "tvk1", "TOKYO MX2", "NHK_G", "NTV", "FUJI"]

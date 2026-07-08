@@ -1141,6 +1141,118 @@
         "ISDBT_LAYERC_FEC": "AUTO",
         "INVERSION": "AUTO"
       }
+    },
+    {
+      "name": "NHK_G",
+      "aliases": [
+        "NHK総合",
+        "NHK General",
+        "NHK G",
+        "NHKG"
+      ],
+      "tuning": {
+        "INVERSION": "AUTO",
+        "ISDBT_LAYERA_FEC": "AUTO",
+        "DELIVERY_SYSTEM": "ISDBT",
+        "ISDBT_LAYERC_FEC": "AUTO",
+        "GUARD_INTERVAL": "1/8",
+        "ISDBT_LAYERB_SEGMENT_COUNT": "255",
+        "ISDBT_LAYERC_MODULATION": "QAM/AUTO",
+        "ISDBT_PARTIAL_RECEPTION": "1",
+        "SERVICE_ID": "1024",
+        "ISDBT_LAYERA_SEGMENT_COUNT": "255",
+        "ISDBT_LAYERB_FEC": "AUTO",
+        "ISDBT_LAYERB_MODULATION": "QAM/AUTO",
+        "BANDWIDTH_HZ": "6000000",
+        "ISDBT_LAYERC_SEGMENT_COUNT": "255",
+        "ISDBT_LAYERC_TIME_INTERLEAVING": "255",
+        "COUNTRY": "BR",
+        "FREQUENCY": "557142857",
+        "ISDBT_LAYER_ENABLED": "0",
+        "ISDBT_SB_SEGMENT_COUNT": "0",
+        "ISDBT_LAYERB_TIME_INTERLEAVING": "255",
+        "ISDBT_LAYERA_MODULATION": "QAM/AUTO",
+        "ISDBT_SB_SUBCHANNEL_ID": "0",
+        "TRANSMISSION_MODE": "8K",
+        "ISDBT_SOUND_BROADCASTING": "0",
+        "ISDBT_SB_SEGMENT_IDX": "0",
+        "ISDBT_LAYERA_TIME_INTERLEAVING": "255"
+      }
+    },
+    {
+      "name": "NTV",
+      "aliases": [
+        "日テレ",
+        "日本テレビ",
+        "Nippon TV",
+        "Nittele"
+      ],
+      "tuning": {
+        "INVERSION": "AUTO",
+        "ISDBT_LAYERA_FEC": "AUTO",
+        "DELIVERY_SYSTEM": "ISDBT",
+        "ISDBT_LAYERC_FEC": "AUTO",
+        "GUARD_INTERVAL": "1/8",
+        "ISDBT_LAYERB_SEGMENT_COUNT": "255",
+        "ISDBT_LAYERC_MODULATION": "QAM/AUTO",
+        "ISDBT_PARTIAL_RECEPTION": "1",
+        "SERVICE_ID": "1040",
+        "ISDBT_LAYERA_SEGMENT_COUNT": "255",
+        "ISDBT_LAYERB_FEC": "AUTO",
+        "ISDBT_LAYERB_MODULATION": "QAM/AUTO",
+        "BANDWIDTH_HZ": "6000000",
+        "ISDBT_LAYERC_SEGMENT_COUNT": "255",
+        "ISDBT_LAYERC_TIME_INTERLEAVING": "255",
+        "COUNTRY": "BR",
+        "FREQUENCY": "545142857",
+        "ISDBT_LAYER_ENABLED": "0",
+        "ISDBT_SB_SEGMENT_COUNT": "0",
+        "ISDBT_LAYERB_TIME_INTERLEAVING": "255",
+        "ISDBT_LAYERA_MODULATION": "QAM/AUTO",
+        "ISDBT_SB_SUBCHANNEL_ID": "0",
+        "TRANSMISSION_MODE": "8K",
+        "ISDBT_SOUND_BROADCASTING": "0",
+        "ISDBT_SB_SEGMENT_IDX": "0",
+        "ISDBT_LAYERA_TIME_INTERLEAVING": "255"
+      }
+    },
+    {
+      "name": "FUJI",
+      "aliases": [
+        "フジテレビ",
+        "フジ",
+        "Fuji TV",
+        "CX",
+        "Fuji"
+      ],
+      "tuning": {
+        "INVERSION": "AUTO",
+        "ISDBT_LAYERA_FEC": "AUTO",
+        "DELIVERY_SYSTEM": "ISDBT",
+        "ISDBT_LAYERC_FEC": "AUTO",
+        "GUARD_INTERVAL": "1/8",
+        "ISDBT_LAYERB_SEGMENT_COUNT": "255",
+        "ISDBT_LAYERC_MODULATION": "QAM/AUTO",
+        "ISDBT_PARTIAL_RECEPTION": "1",
+        "SERVICE_ID": "1056",
+        "ISDBT_LAYERA_SEGMENT_COUNT": "255",
+        "ISDBT_LAYERB_FEC": "AUTO",
+        "ISDBT_LAYERB_MODULATION": "QAM/AUTO",
+        "BANDWIDTH_HZ": "6000000",
+        "ISDBT_LAYERC_SEGMENT_COUNT": "255",
+        "ISDBT_LAYERC_TIME_INTERLEAVING": "255",
+        "COUNTRY": "BR",
+        "FREQUENCY": "521142857",
+        "ISDBT_LAYER_ENABLED": "0",
+        "ISDBT_SB_SEGMENT_COUNT": "0",
+        "ISDBT_LAYERB_TIME_INTERLEAVING": "255",
+        "ISDBT_LAYERA_MODULATION": "QAM/AUTO",
+        "ISDBT_SB_SUBCHANNEL_ID": "0",
+        "TRANSMISSION_MODE": "8K",
+        "ISDBT_SOUND_BROADCASTING": "0",
+        "ISDBT_SB_SEGMENT_IDX": "0",
+        "ISDBT_LAYERA_TIME_INTERLEAVING": "255"
+      }
     }
   ]
 }
