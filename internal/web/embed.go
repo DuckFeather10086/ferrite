@@ -1,12 +1,10 @@
 // Package web embeds the static web UI bundle under dist/ and exposes
 // it as an fs.FS for the api router to mount.
 //
-// dist/ currently holds a hand-written, no-build single-page app
-// (index.html + app.js + styles.css, plain fetch + hls.js from CDN).
-// It needs no toolchain — edit the files and `go build` re-embeds them.
-// If a framework build is ever preferred, point its static export at
-// this dir (e.g. Next.js `output: 'export'`, distDir
-// '../internal/web/dist') and the embed picks it up unchanged.
+// dist/ holds the output of a Next.js (Bun) static export run via
+// `bun run build` in the ferrite/web/ directory. The build step calls
+// `next build` (output: 'export') and copies out/ → internal/web/dist/.
+// `go build` re-embeds whatever is in dist/ — no runtime Node needed.
 package web
 
 import (

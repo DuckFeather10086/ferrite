@@ -65,6 +65,11 @@ func NewRouter(d Deps) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 
+	// /stream.m3u8 is a convenience shortcut that serves the most
+	// recently opened/touched HLS session. Bookmark this in VLC/iPad
+	// for one-tap live TV without browsing to the web UI.
+	r.Get("/stream.m3u8", d.handleStreamM3U8)
+
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/status", d.handleStatus)
 		r.Get("/channels", d.handleChannels)
@@ -93,9 +98,10 @@ func NewRouter(d Deps) http.Handler {
 }
 
 // staticHandler serves the embedded UI bundle. Real files are served
-// as-is; any other path falls back to index.html so client-side routing
-// works. Unknown /api/* paths still get a JSON 404 rather than the SPA
-// shell, so a mistyped API call fails as JSON, not HTML.
+// as-is. For paths that don't match an exact file, it also tries the
+// .html suffix (Next.js static export). Everything else falls back to
+// index.html for client-side SPA routing. Unknown /api/* paths still
+// get a JSON 404 rather than the SPA shell.
 func staticHandler(fsys fs.FS) http.HandlerFunc {
 	fileServer := http.FileServer(http.FS(fsys))
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -103,13 +109,19 @@ func staticHandler(fsys fs.FS) http.HandlerFunc {
 			writeErr(w, http.StatusNotFound, "not found")
 			return
 		}
+		// Never cache UI assets — they're embedded in the binary and
+		// change across restarts.
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
 		if name != "" {
-			if f, err := fsys.Open(name); err != nil {
-				// Not a real asset → serve the SPA shell.
-				r.URL.Path = "/"
-			} else {
-				_ = f.Close()
+			if _, err := fsys.Open(name); err != nil {
+				// Try .html suffix for static-export routes (e.g. /guide → guide.html).
+				if _, err2 := fsys.Open(name + ".html"); err2 == nil {
+					r.URL.Path = "/" + name + ".html"
+				} else {
+					// Not a real asset → serve the SPA shell.
+					r.URL.Path = "/"
+				}
 			}
 		}
 		fileServer.ServeHTTP(w, r)
@@ -349,6 +361,21 @@ func (d Deps) handleLiveStop(w http.ResponseWriter, r *http.Request) {
 	channel := chi.URLParam(r, "channel")
 	d.HLS.Close(channel)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (d Deps) handleStreamM3U8(w http.ResponseWriter, r *http.Request) {
+	if d.HLS == nil {
+		writeErr(w, http.StatusServiceUnavailable, "hls not ready")
+		return
+	}
+	s := d.HLS.LastOpened()
+	if s == nil {
+		writeErr(w, http.StatusNotFound, "no active HLS session — open /api/live/{channel}.m3u8 first")
+		return
+	}
+	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeFile(w, r, s.PlaylistPath)
 }
 
 // ── helpers ────────────────────────────────────────────────────────

@@ -81,26 +81,27 @@ Implemented and tested (race-clean):
   dispatch → finalize state.
 - `hls.Manager` + `Session` — refcounted ffmpeg-per-channel, idle
   janitor, m3u8 + segments on disk.
-- `api` (chi) — `/health`, `/api/status` (with adapter occupancy),
-  `/api/channels`, `/api/epg`, `/api/now`, `/api/schedule` (CRUD),
-  `/api/recordings`, `/api/live/{channel}.m3u8` + segments. Also serves
-  the embedded web UI (SPA fallback) for all non-`/api` routes.
+- `api` (chi) — `/health`, `/stream.m3u8` (shortcut to last-opened
+  HLS session), `/api/status` (with adapter occupancy), `/api/channels`,
+  `/api/epg`, `/api/now`, `/api/schedule` (CRUD), `/api/recordings`,
+  `/api/live/{channel}.m3u8` + segments. Also serves the embedded web UI
+  (SPA fallback) for all non-`/api` routes.
 - `tuner.DvbrCLI.Tune` — chains `dvb-rs | b25-rs`: dvbr's stdout is pumped
   into `b25-rs -v 0 - -` and the descrambled stdout is the lease stream.
   A copy goroutine bridges the two pipes and closes b25's stdin on
   dvb-rs EOF; `tuneStream.Close` tears down both subprocesses.
-- `internal/web` — hand-written no-build SPA in `dist/` (Live / Guide /
-  Schedules / Recordings), `//go:embed all:dist`, mounted by `api`.
+- `internal/web` — `//go:embed all:dist` of Next.js `output: 'export'`
+  (Bun). The source project lives in `ferrite/web/`; `bun run build`
+  compiles it and copies `out/` → `internal/web/dist/`. hls.js is
+  bundled via npm (no CDN needed — works fully offline on LAN).
+- `web/` — Bun + Next.js 16 (App Router, TypeScript, Tailwind CSS).
+  Four pages: Live (hls.js player), Guide (EPG), Schedules (create/
+  cancel), Recordings. Static `output: 'export'`; all data fetching is
+  client-side via SWR against the `/api/*` endpoints.
 
 **Not implemented:**
-- HLS segment URLs: the playlist is served at `/api/live/{channel}.m3u8`
-  and segments at `/api/live/{channel}/{segment}`; ffmpeg is given
-  `-hls_base_url {channel}/` so segment URIs resolve under the channel
-  subpath. The recordings file-download endpoint
-  (`/api/recordings/{id}/file`) is still a stub.
-- Vendoring hls.js: the UI currently loads it from a CDN with a native
-  HLS fallback (Safari/iOS). Drop a copy into `dist/` for fully offline
-  LAN playback in Chrome/Firefox.
+- The recordings file-download endpoint (`/api/recordings/{id}/file`)
+  is still a stub.
 - End-to-end hardware verification — every package has unit/integration
   tests with mocks/fakes; the `dvbr | b25` chaining is covered by a
   fake-binary integration test, but nothing has been exercised against

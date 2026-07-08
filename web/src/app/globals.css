@@ -1,0 +1,87 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --color-bg: #0a0e1a;
+    --color-surface: #141b2e;
+    --color-surface-hi: #1d2742;
+    --color-border: #2a3a5c;
+    --color-text: #f2f6ff;
+    --color-text-muted: #9fadc8;
+    --color-accent: #22d3ee;
+    --color-accent-dim: #06b6d4;
+    --color-accent-soft: rgba(34, 211, 238, 0.14);
+    --color-danger: #ff6b8a;
+    --color-success: #4ade80;
+    --color-warn: #facc15;
+  }
+
+  body {
+    background:
+      radial-gradient(1100px 600px at 12% -10%, rgba(34, 211, 238, 0.08), transparent 60%),
+      radial-gradient(900px 500px at 100% 0%, rgba(99, 102, 241, 0.07), transparent 55%),
+      var(--color-bg);
+    color: var(--color-text);
+    font-family: "Inter", system-ui, -apple-system, sans-serif;
+  }
+
+  ::selection {
+    background: var(--color-accent-soft);
+    color: var(--color-text);
+  }
+
+  /* Subtle accent scrollbar to match the brighter theme. */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-surface-hi);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: var(--color-border); background-clip: padding-box; }
+}
+
+/* ── shared ui atoms ────────────────────────────────────────── */
+
+.btn {
+  @apply inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium
+         transition-colors cursor-pointer border-none;
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+}
+.btn:hover { background: var(--color-surface-hi); border-color: var(--color-accent-soft); }
+.btn-accent { background: var(--color-accent-dim); color: #042027; border-color: transparent; font-weight: 600; }
+.btn-accent:hover { background: var(--color-accent); box-shadow: 0 0 0 1px var(--color-accent), 0 0 14px rgba(34, 211, 238, 0.35); }
+.btn-danger { background: var(--color-danger); color: #2a0612; border-color: transparent; font-weight: 600; }
+.btn-danger:hover { filter: brightness(1.08); box-shadow: 0 0 14px rgba(255, 107, 138, 0.35); }
+
+.badge {
+  @apply inline-block px-2 py-0.5 rounded-full text-xs font-medium;
+}
+
+.table-wrap {
+  @apply overflow-x-auto rounded-xl border;
+  border-color: var(--color-border);
+}
+table {
+  @apply w-full text-sm;
+}
+th {
+  @apply text-left px-3 py-2 text-xs uppercase tracking-wider;
+  color: var(--color-text-muted);
+}
+td {
+  @apply px-3 py-2;
+  border-top: 1px solid var(--color-border);
+}
+
+.toasts {
+  @apply fixed bottom-4 right-4 z-50 flex flex-col gap-2;
+}
+.toast {
+  @apply px-4 py-2 rounded-lg text-sm shadow-lg animate-pulse;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+}

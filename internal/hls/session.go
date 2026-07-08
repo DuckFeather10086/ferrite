@@ -69,6 +69,9 @@ type Manager struct {
 
 	mu       sync.Mutex
 	sessions map[string]*Session
+	// lastOpen records the most recently opened/touched channel so the
+	// /stream.m3u8 shortcut knows which session to serve.
+	lastOpen string
 }
 
 func (m *Manager) probeSeconds() float64 {
@@ -104,6 +107,7 @@ func (m *Manager) Open(ctx context.Context, channel string) (*Session, error) {
 	}
 	if s, ok := m.sessions[channel]; ok && !s.closed {
 		s.lastSeen = time.Now()
+		m.lastOpen = channel
 		m.mu.Unlock()
 		return s, nil
 	}
@@ -199,6 +203,7 @@ func (m *Manager) Open(ctx context.Context, channel string) (*Session, error) {
 
 	m.mu.Lock()
 	m.sessions[canonical] = s
+	m.lastOpen = canonical
 	m.mu.Unlock()
 
 	slog.Info("hls: session opened", "channel", canonical, "dir", dir)
@@ -212,9 +217,26 @@ func (m *Manager) Touch(channel string) *Session {
 	defer m.mu.Unlock()
 	if s, ok := m.sessions[channel]; ok && !s.closed {
 		s.lastSeen = time.Now()
+		m.lastOpen = channel
 		return s
 	}
 	return nil
+}
+
+// LastOpened returns the session for the most recently opened/touched
+// channel, or nil if no session is active. This powers the /stream.m3u8
+// shortcut for bookmark-based playback (VLC, iPad, etc.).
+func (m *Manager) LastOpened() *Session {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lastOpen == "" {
+		return nil
+	}
+	s, ok := m.sessions[m.lastOpen]
+	if !ok || s.closed {
+		return nil
+	}
+	return s
 }
 
 // Close tears down a specific session. Idempotent.
@@ -226,6 +248,9 @@ func (m *Manager) Close(channel string) {
 		return
 	}
 	delete(m.sessions, channel)
+	if m.lastOpen == channel {
+		m.lastOpen = ""
+	}
 	m.mu.Unlock()
 	s.tearDown()
 }
