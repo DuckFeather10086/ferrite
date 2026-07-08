@@ -159,10 +159,14 @@ func run(cfgPath, logLevel string) error {
 	}
 
 	srv := &http.Server{
-		Addr:         ":" + strconv.Itoa(cfg.HTTPPort),
-		Handler:      handler,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		Addr:        ":" + strconv.Itoa(cfg.HTTPPort),
+		Handler:     handler,
+		ReadTimeout: 10 * time.Second,
+		// WriteTimeout must cover the slowest handler: a cold
+		// /api/live/{ch}.m3u8 blocks through the frontend lock timeout
+		// (~25s) plus waiting for ffmpeg's first playlist write (~30s)
+		// before it can respond.
+		WriteTimeout: 120 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 

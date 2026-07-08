@@ -69,9 +69,23 @@ type Manager struct {
 
 	mu       sync.Mutex
 	sessions map[string]*Session
+	// opening tracks in-flight opens per channel so concurrent viewers
+	// (e.g. a player retrying its manifest request mid-tune) join the
+	// same tune instead of racing a second Acquire — the loser of that
+	// race would overwrite the winner in sessions and orphan a running
+	// ffmpeg + lease that the janitor can never reap.
+	opening map[string]*openCall
 	// lastOpen records the most recently opened/touched channel so the
 	// /stream.m3u8 shortcut knows which session to serve.
 	lastOpen string
+}
+
+// openCall is one in-flight session open; done is closed once s/err
+// are set.
+type openCall struct {
+	done chan struct{}
+	s    *Session
+	err  error
 }
 
 func (m *Manager) probeSeconds() float64 {
@@ -111,10 +125,43 @@ func (m *Manager) Open(ctx context.Context, channel string) (*Session, error) {
 		m.mu.Unlock()
 		return s, nil
 	}
+	if call, ok := m.opening[channel]; ok {
+		m.mu.Unlock()
+		select {
+		case <-call.done:
+			return call.s, call.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	call := &openCall{done: make(chan struct{})}
+	if m.opening == nil {
+		m.opening = make(map[string]*openCall)
+	}
+	m.opening[channel] = call
 	m.mu.Unlock()
 
-	// New session. Acquire outside the lock — Pool.Acquire can block
-	// on frontend lock.
+	// A cold open runs the frontend lock timeout (~25s) plus the A/V
+	// probe — longer than a typical player's manifest timeout. Detach
+	// from the request context so an impatient client aborting its
+	// request doesn't tear down the tune mid-flight; its retry joins
+	// via m.opening, and a fully abandoned session is reaped by the
+	// idle janitor.
+	s, err := m.openSession(context.WithoutCancel(ctx), channel)
+
+	m.mu.Lock()
+	call.s, call.err = s, err
+	delete(m.opening, channel)
+	m.mu.Unlock()
+	close(call.done)
+	return s, err
+}
+
+// openSession does the actual acquire → probe → ffmpeg spawn. Calls
+// are serialized per channel via m.opening.
+func (m *Manager) openSession(ctx context.Context, channel string) (*Session, error) {
+	// Acquire outside the manager lock — Pool.Acquire can block on
+	// frontend lock.
 	lease, err := m.Tuners.Acquire(ctx, channel)
 	if err != nil {
 		return nil, fmt.Errorf("hls: acquire %q: %w", channel, err)
@@ -172,7 +219,18 @@ func (m *Manager) Open(ctx context.Context, channel string) (*Session, error) {
 		args = append(args, "-af", af)
 	}
 	args = append(args,
-		"-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+		// ISDB-T video is MPEG-2 1080i — browsers have no MPEG-2
+		// decoder, so `-c:v copy` produces a stream hls.js loads but
+		// can never render (audio-less black frame, videoWidth 0).
+		// Transcode to H.264: yadif deinterlaces the 30i source to
+		// 30p, superfast+zerolatency runs ~2.5× realtime on an Intel
+		// N100, and -g 60 keys every ~2s so segments (hls_time 2)
+		// each start on an IDR frame.
+		"-vf", "yadif=0",
+		"-c:v", "libx264", "-preset", "superfast", "-tune", "zerolatency",
+		"-b:v", "6M", "-maxrate", "7M", "-bufsize", "12M",
+		"-g", "60", "-pix_fmt", "yuv420p",
+		"-c:a", "aac", "-b:a", "192k",
 		"-f", "hls",
 		"-hls_time", "2",
 		"-hls_list_size", "6",

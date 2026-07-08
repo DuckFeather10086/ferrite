@@ -18,11 +18,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"os"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -322,9 +325,36 @@ func (d Deps) handleLivePlaylist(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	// ffmpeg writes stream.m3u8 only once the first segment completes —
+	// several seconds after Open returns on a cold tune. Hold the
+	// request until the playlist exists; an immediate ServeFile would
+	// 404 and most players treat a missing manifest as fatal.
+	if err := waitForFile(r.Context(), s.PlaylistPath, 30*time.Second); err != nil {
+		writeErr(w, http.StatusGatewayTimeout, "stream did not start: "+err.Error())
+		return
+	}
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "no-store")
 	http.ServeFile(w, r, s.PlaylistPath)
+}
+
+// waitForFile polls until path exists and is non-empty, the context is
+// canceled, or timeout elapses.
+func waitForFile(ctx context.Context, path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if fi, err := os.Stat(path); err == nil && fi.Size() > 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("no playlist after %s", timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 }
 
 func (d Deps) handleLiveSegment(w http.ResponseWriter, r *http.Request) {
