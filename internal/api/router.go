@@ -1,23 +1,25 @@
 // Package api wires HTTP handlers onto a chi router.
 //
 // Endpoints implemented:
-//   GET  /health                        liveness
-//   GET  /api/status                    daemon info, adapter status
-//   GET  /api/channels                  channels.json listing
-//   GET  /api/epg?service=&from=&to=    EPG events in window (RFC3339)
-//   GET  /api/now?service=              currently-airing event
-//   GET  /api/schedule                  list schedules
-//   POST /api/schedule                  create schedule
-//   DELETE /api/schedule/{id}           cancel schedule
-//   GET  /api/recordings                list recordings
-//   POST /api/record                    start recording now
-//   POST /api/record/{id}/stop          stop an in-progress recording
-//   GET  /api/live/{channel}.m3u8       live HLS playlist
-//   GET  /api/live/{channel}/{seg}.ts   live HLS segment
-//   POST /api/live/{channel}/stop       tear down a live session
+//
+//	GET  /health                        liveness
+//	GET  /api/status                    daemon info, adapter status
+//	GET  /api/channels                  channels.json listing
+//	GET  /api/epg?service=&from=&to=    EPG events in window (RFC3339)
+//	GET  /api/now?service=              currently-airing event
+//	GET  /api/schedule                  list schedules
+//	POST /api/schedule                  create schedule
+//	DELETE /api/schedule/{id}           cancel schedule
+//	GET  /api/recordings                list recordings
+//	POST /api/record                    start recording now
+//	POST /api/record/{id}/stop          stop an in-progress recording
+//	GET  /api/live/{channel}.m3u8       live HLS playlist
+//	GET  /api/live/{channel}/{seg}.ts   live HLS segment
+//	POST /api/live/{channel}/stop       tear down a live session
 //
 // Future:
-//   GET  /api/recordings/{id}/file      stream a recorded file
+//
+//	GET  /api/recordings/{id}/file      stream a recorded file
 package api
 
 import (
@@ -203,7 +205,7 @@ func (d Deps) handleEPG(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, events)
+	writeJSON(w, http.StatusOK, orEmpty(events))
 }
 
 func (d Deps) handleNow(w http.ResponseWriter, r *http.Request) {
@@ -238,14 +240,14 @@ func (d Deps) handleListSchedules(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, list)
+	writeJSON(w, http.StatusOK, orEmpty(list))
 }
 
 type scheduleCreateReq struct {
 	Channel   string `json:"channel"`
 	ServiceID uint16 `json:"service_id"`
-	Start     string `json:"start"`  // RFC3339
-	End       string `json:"end"`    // RFC3339
+	Start     string `json:"start"` // RFC3339
+	End       string `json:"end"`   // RFC3339
 	LeadS     int64  `json:"lead_s"`
 	TrailS    int64  `json:"trail_s"`
 }
@@ -329,7 +331,7 @@ func (d Deps) handleListRecordings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, list)
+	writeJSON(w, http.StatusOK, orEmpty(list))
 }
 
 // handleListAVOffsets exposes the cached A/V skew measurements. Mostly
@@ -629,6 +631,19 @@ func parseWindow(fromS, toS string) (time.Time, time.Time, error) {
 		to = t
 	}
 	return from, to, nil
+}
+
+// orEmpty makes a nil slice marshal as [] rather than null.
+//
+// A nil slice is the same as an empty one in Go, so this is invisible on the
+// server — but every non-Go client has to special-case `null` before
+// iterating, and forgetting to is a crash rather than an empty list. Wrap
+// every list response.
+func orEmpty[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

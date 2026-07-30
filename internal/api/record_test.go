@@ -246,3 +246,37 @@ func TestLiveSwitch_Validation(t *testing.T) {
 		t.Fatalf("hls unavailable: %d %s", rr.Code, rr.Body.String())
 	}
 }
+
+// Empty list endpoints must answer `[]`, never `null`.
+//
+// A nil slice is indistinguishable from an empty one in Go, so this is
+// invisible from the server side — but every other client has to special-case
+// null before iterating. The TS agent crashed on `null.map` for a channel with
+// no guide data, which is why this is pinned.
+func TestEmptyListsAreArraysNotNull(t *testing.T) {
+	h, _, _ := newRecordRouter(t)
+
+	for _, path := range []string{
+		"/api/epg?service=1064",
+		"/api/recordings",
+		"/api/schedule",
+		"/api/channels",
+		"/api/av-offsets",
+	} {
+		rr := get(t, h, path)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", path, rr.Code, rr.Body.String())
+		}
+		body := strings.TrimSpace(rr.Body.String())
+		if body == "null" {
+			t.Fatalf("%s returned null; a client iterating this crashes", path)
+		}
+		var list []any
+		if err := json.Unmarshal([]byte(body), &list); err != nil {
+			t.Fatalf("%s: not a JSON array: %s", path, body)
+		}
+		if list == nil {
+			t.Fatalf("%s decoded to a nil slice: %s", path, body)
+		}
+	}
+}
