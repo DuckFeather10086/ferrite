@@ -1,5 +1,76 @@
 # Handoff
 
+## 2026-07-30 (last) — recording download + delete
+
+The first "Still open" item below is done: recordings can now be watched
+back and thrown away, from all three front ends.
+
+- `GET /api/recordings/{id}/file` — the raw TS via `http.ServeContent`,
+  so **Range works** and a player can seek instead of streaming a
+  two-hour file from the top. A row still in state 'recording' is served
+  too (the bytes so far are a valid TS prefix, `Cache-Control: no-store`
+  because it is still growing); a row whose file is gone answers **410**,
+  not 404 — the recording exists, it just has nothing to serve.
+- `DELETE /api/recordings/{id}` — file then row, answering
+  `{"id":…,"file_deleted":…}`. A missing file is not an error (the row
+  still goes; that is what the caller asked for), and the now-empty day
+  directory is pruned. An in-progress recording is **refused with 409**:
+  unlinking under the recorder leaves it writing to an inode nobody can
+  reach and then finalizing a row that no longer exists. `?force=1`
+  overrides, for rows stranded in 'recording' by a hard kill — the daemon
+  only finalizes those on a graceful shutdown.
+
+**`Deps.StorageRoot` is load-bearing, not decoration.** Both handlers
+resolve the row's `path` against it and refuse anything outside. The
+recorder writes that column, so the check never fires in normal use — but
+it is a filesystem path in a database, and one bad row is otherwise the
+difference between a download endpoint and an arbitrary-file read (and an
+arbitrary-file *unlink*). A row pointing outside the root still loses its
+row on DELETE; nothing is unlinked. Tests cover both an absolute escape
+and a `..` traversal.
+
+Where it shows up:
+
+- **TUI** recordings view: `⏎` plays the highlighted recording in mpv
+  (against the file URL — no tuner, so it never interrupts live or a
+  recording), `d` then `y` deletes. Enter used to tune whatever the
+  *channel* cursor was on even in this view; it now routes by view.
+  Playback uses `DefaultFileArgs`, deliberately not the live
+  `--profile=low-latency` — that profile shrinks the cache seeking needs.
+- **Web** recordings table: a Download link and a Delete button
+  (disabled while recording). `web/src/lib/api.ts`'s `Recording` type was
+  wrong — it claimed `file_path` and a non-null `size_bytes` where the
+  daemon sends `path` and null-until-finalized — so `fmtBytes` rendered
+  "null B" on a running recording. Type and formatters now match the wire.
+- **Agent/MCP**: `tv_recording_delete` (12 tools now), and every row in
+  `tv_recordings` carries `play_url`. The on-disk path means nothing to a
+  user sitting somewhere else; the URL is the part they can open.
+
+### A filename bug this surfaced
+
+`recorder.slugify` capped titles with `s[:80]` — **bytes**, not runes. Every
+Japanese title long enough to hit the cap ended in a half-written UTF-8
+sequence, and that invalid byte travelled into the download's
+`Content-Disposition`. Now truncated on a rune boundary
+(`truncateRunes`). Names are Japanese, so the header sends both forms per
+RFC 6266: an ASCII-transliterated `filename` and the real name in
+`filename*=UTF-8''…` (percent-encoded by hand — net/url's escapers all
+leave something unencoded that is legal in a URL but not in a header
+parameter).
+
+**Verified on hardware** (single Siano adapter, asahi + NHK_G): a 20s
+recording downloaded byte-identical to the file on disk (same sha256) and
+ffprobed as mpeg2video 1440x1080 + AAC 48k + arib_caption, decoding clean
+past the first partial GOP; `Range: bytes=4-6` → 206; an in-progress
+recording served 8.6 MB mid-run; DELETE while recording → 409, then stop →
+DELETE → 200 with the file and day directory gone; the same delete driven
+through the TUI under a pty and through the MCP tool against the live
+daemon.
+
+Still open: nothing decodes the `arib_caption` stream; watching A while
+recording B needs a 2nd tuner; Telegram front end (needs a bot token and
+a chat-id allow-list).
+
 ## 2026-07-30 — adapter arbitration + record-now (EPG starvation FIXED)
 
 The open issue below ("EPG startup scan starves live HLS") is resolved.
@@ -144,8 +215,9 @@ Also worth correcting the 2026-06-18 note below: 473142857 and 485142857
 are **not** dead. They lock and carry J:COMテレビ and テレ玉 — they had
 simply never been re-scanned.
 
-Still open: no recording download/delete endpoint; nothing decodes the
-`arib_caption` stream; watching A while recording B needs a 2nd tuner.
+Still open: ~~no recording download/delete endpoint~~ (done — see the
+entry at the top); nothing decodes the `arib_caption` stream; watching A
+while recording B needs a 2nd tuner.
 
 ## 2026-07-30 (later) — TUI remote
 

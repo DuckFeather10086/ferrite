@@ -35,7 +35,9 @@ dvb-rs stdout → b25-rs stdin → b25-rs stdout → fanout.Broadcaster
   UI. Runs on the machine you are sitting at (`--host` points it at the
   tuner box) and spawns a local mpv for video; with no display it declines
   to spawn and reports the stream URL instead, since over ssh the window
-  would open on the tuner box.
+  would open on the tuner box. The recordings view plays a recording
+  (mpv against the file endpoint — no tuner involved) and deletes one
+  behind a y/n confirmation.
 - `internal/`:
   - `config/` — load channels.json (shared format with `dvb-rs`) + daemon TOML.
   - `proc/` — subprocess helpers: `setpgid`, kill-by-pgrp, stderr→slog.
@@ -112,7 +114,9 @@ Implemented and tested (race-clean):
   use time so config changes need no re-probe).
 - `api` (chi) — `/health`, `/stream.m3u8` (shortcut to last-opened
   HLS session), `/api/status` (with adapter occupancy), `/api/channels`,
-  `/api/epg`, `/api/now`, `/api/schedule` (CRUD), `/api/recordings`,
+  `/api/epg`, `/api/now`, `/api/schedule` (CRUD), `/api/recordings`
+  + `/api/recordings/{id}/file` (download/stream, Range-capable) and
+  `DELETE /api/recordings/{id}` (file + row),
   `/api/record` + `/api/record/{id}/stop` (record now / stop),
   `/api/live/{channel}.m3u8` + segments, `/api/live/{channel}/stop`, and
   `/api/live/{channel}/switch` (change channel: close other sessions,
@@ -134,12 +138,10 @@ Implemented and tested (race-clean):
   a different one. `bun test` needs no network and no API key.
 - `web/` — Bun + Next.js 16 (App Router, TypeScript, Tailwind CSS).
   Four pages: Live (hls.js player), Guide (EPG), Schedules (create/
-  cancel), Recordings. Static `output: 'export'`; all data fetching is
-  client-side via SWR against the `/api/*` endpoints.
+  cancel), Recordings (download / delete). Static `output: 'export'`; all
+  data fetching is client-side via SWR against the `/api/*` endpoints.
 
 **Not implemented:**
-- Recording playback / management: no `/api/recordings/{id}/file`
-  download and no delete.
 - Subtitles: `arib_caption` is present in the recorded TS (and in the
   tapped service PIDs) but nothing decodes or serves it yet.
 - Channel-list hygiene: duplicate records survive from the legacy
@@ -189,6 +191,13 @@ mid-recording finalizing as 'done'.
   what guarantees the dead child's flock is gone. Subprocess plumbing
   needs `cmd.WaitDelay` set: without it a grandchild holding the
   inherited stdout pipe keeps `cmd.Wait` blocked and wedges the adapter.
+- **A recording's `path` column is untrusted input.** The file endpoints
+  resolve it against `storage_root` and refuse anything outside
+  (`api.Deps.StorageRoot`, `recordingPath`). It is our own recorder that
+  writes the column, but a hand-edited or corrupted row is otherwise the
+  difference between a download endpoint and an arbitrary-file read — and,
+  for DELETE, an arbitrary-file unlink. Keep the check on any new endpoint
+  that opens a path out of the database.
 - **Subprocess stderr is not /dev/null.** Pipe to slog at warn level.
   The legacy Python silently masked failures and we missed recordings.
 - **Always validate the pipeline produces bytes.** Port the watchdog
