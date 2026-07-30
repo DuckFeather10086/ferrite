@@ -101,11 +101,25 @@ func (r *Refresher) RefreshOnce(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("epg: DvbrBin / ChannelsFile required")
 	}
 	total := 0
+	// One tune per *mux*. `dvbr epg` harvests every service in the tuned
+	// transport stream, so a second channel on a frequency already visited
+	// this pass would re-collect the same EIT — a wasted minute of tuner
+	// time that live viewing has to preempt.
+	done := map[string]string{} // frequency → the channel that covered it
 	for _, name := range r.ChannelNames {
 		select {
 		case <-ctx.Done():
 			return total, ctx.Err()
 		default:
+		}
+
+		if freq := r.frequencyOf(name); freq != "" {
+			if first, seen := done[freq]; seen {
+				slog.Debug("epg: mux already covered this pass",
+					"channel", name, "covered_by", first, "frequency", freq)
+				continue
+			}
+			done[freq] = name
 		}
 
 		n, err := r.refreshOne(ctx, name)
@@ -124,6 +138,19 @@ func (r *Refresher) RefreshOnce(ctx context.Context) (int, error) {
 		slog.Info("epg refreshed", "channel", name, "events", n)
 	}
 	return total, nil
+}
+
+// frequencyOf is the mux key for channelName, or "" when it can't be
+// resolved — an unresolvable name is still attempted, so it fails loudly in
+// refreshOne rather than being silently skipped here.
+func (r *Refresher) frequencyOf(channelName string) string {
+	if r.Channels == nil {
+		return ""
+	}
+	if ch := r.Channels.Find(channelName); ch != nil {
+		return ch.Frequency()
+	}
+	return ""
 }
 
 func (r *Refresher) refreshOne(ctx context.Context, channelName string) (int, error) {

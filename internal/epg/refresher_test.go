@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -73,6 +74,65 @@ func newRefresher(t *testing.T, script string, pool *tuner.Pool) (*Refresher, *s
 
 const oneEventJSON = `echo '[{"event_id":1,"start":"2026-07-30 20:00:00",` +
 	`"duration":"00:30:00","running_status":0,"title":"Fake Show","text":"","genres":[]}]'`
+
+// A pass tunes each mux once. dvbr harvests the EIT of the whole transport
+// stream, so a second channel on a frequency already visited would spend
+// another minute of tuner time re-collecting the same guide.
+func TestRefresher_TunesEachMuxOnce(t *testing.T) {
+	countFile := filepath.Join(t.TempDir(), "runs")
+	script := "echo \"$@\" >> " + countFile + "\n" + oneEventJSON
+	r, _ := newRefresher(t, script, nil)
+	r.Tuners = nil // no hardware needed: the fake dvbr is the whole pass
+	r.Channels = &config.Channels{Version: 1, Channels: []config.Channel{
+		{Name: "asahi", Tuning: map[string]string{"SERVICE_ID": "1064", "FREQUENCY": "539142857"}},
+		{Name: "asahi2", Tuning: map[string]string{"SERVICE_ID": "1065", "FREQUENCY": "539142857"}},
+		{Name: "nhk", Tuning: map[string]string{"SERVICE_ID": "1024", "FREQUENCY": "557142857"}},
+	}}
+	r.ChannelNames = []string{"asahi", "asahi2", "nhk"}
+
+	n, err := r.RefreshOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runs, err := os.ReadFile(countFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := 0
+	for _, ln := range strings.Split(strings.TrimSpace(string(runs)), "\n") {
+		if ln != "" {
+			lines++
+		}
+	}
+	if lines != 2 {
+		t.Fatalf("dvbr ran %d times, want 2 (one per mux):\n%s", lines, runs)
+	}
+	if strings.Contains(string(runs), "asahi2") {
+		t.Fatalf("asahi2 shares 539142857 with asahi and should have been skipped:\n%s", runs)
+	}
+	// Sanity: the pass still ingested, once per mux.
+	if n != 2 {
+		t.Fatalf("ingested %d events, want 2 (one per mux)", n)
+	}
+}
+
+// A channel with no FREQUENCY must still be attempted — being unable to
+// group it is not a reason to silently drop it from the pass.
+func TestRefresher_ChannelWithoutFrequencyStillRuns(t *testing.T) {
+	r, _ := newRefresher(t, oneEventJSON, nil)
+	r.Tuners = nil
+	r.Channels = testChannels() // no FREQUENCY keys at all
+	r.ChannelNames = []string{"mx", "nhk"}
+
+	n, err := r.RefreshOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("ingested %d events, want one per channel", n)
+	}
+}
 
 // A normal pass reserves the adapter, runs dvbr, ingests, and gives the
 // adapter back — so a live claim right after does not have to preempt.

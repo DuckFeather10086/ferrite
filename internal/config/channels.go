@@ -107,6 +107,19 @@ func hasJapanese(s string) bool {
 	return false
 }
 
+// Frequency returns c's FREQUENCY tuning value verbatim ("" if absent).
+//
+// It is the mux identity: services sharing it share one transport stream,
+// so they tune together and their EIT arrives together. Compared as a
+// string on purpose — it is only ever used as a grouping key, and
+// channels.json is the sole writer.
+func (c *Channel) Frequency() string {
+	if c == nil {
+		return ""
+	}
+	return c.Tuning["FREQUENCY"]
+}
+
 // ServiceID returns the parsed SERVICE_ID for c, or 0 if absent /
 // unparseable. Used by callers that need to pass `-map 0:p:N` to
 // ffmpeg.

@@ -17,4 +17,7 @@ channels_file = "channels.json"
 
 # EPG refresh cron (UTC). Default: every 6 hours.
 epg_cron = "0 */6 * * *"
-epg_channels = ["TOKYO MX1", "NHKEFl1El5~", "asahi", "TBS1", "tvk1", "TOKYO MX2", "NHK_G", "NTV", "FUJI"]
+# List one channel per *mux* (per distinct FREQUENCY in channels.json). One
+# pass collects the EIT of every service in the transport stream it tuned, so
+# a second channel on the same frequency is skipped as already covered.
+epg_channels = ["TOKYO MX1", "asahi", "TBS1", "tvk1", "NHK_G", "NTV", "FUJI"]

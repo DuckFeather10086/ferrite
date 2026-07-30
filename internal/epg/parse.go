@@ -17,6 +17,13 @@ var jst = time.FixedZone("JST", 9*3600)
 // rawEvent is the wire shape produced by `dvbr epg --json`. See
 // dvbr/src/main.rs::print_events_json for the writer.
 type rawEvent struct {
+	// ServiceID is which service the event belongs to. One EPG pass
+	// harvests every service on the tuned mux — EIT on PID 0x0012
+	// describes the whole transport stream — so this is per event and not
+	// per pass. A pointer to tell "absent" from 0: an older dvbr emitted
+	// no service_id at all, and those events do belong to the channel that
+	// was asked for.
+	ServiceID     *uint16  `json:"service_id"`
 	EventID       uint16   `json:"event_id"`
 	Start         string   `json:"start"`         // "YYYY-MM-DD HH:MM:SS" in JST
 	Duration      string   `json:"duration"`      // "HH:MM:SS"
@@ -26,8 +33,14 @@ type rawEvent struct {
 	Genres        []string `json:"genres"`
 }
 
-// Parse decodes a `dvbr epg --json` payload (a JSON array of events)
-// and converts each into a store.EPGEvent for the given serviceID.
+// Parse decodes a `dvbr epg --json` payload (a JSON array of events) into
+// store.EPGEvents.
+//
+// serviceID is the fallback for events that don't name their own — i.e.
+// the channel the pass was run for. Events that do carry a service_id keep
+// it, which is what lets one tune fill in a broadcaster's subchannels as
+// well as its main one. Stamping them all with the requested service
+// instead would file another channel's programmes under this one.
 //
 // Times are parsed as JST and stored as UTC. Events with unparseable
 // start/duration are skipped (logged by the caller); ARIB sometimes
@@ -62,9 +75,13 @@ func Parse(r io.Reader, serviceID uint16) ([]store.EPGEvent, []error) {
 				fmt.Errorf("event %d: bad duration %q: %w", e.EventID, e.Duration, err))
 			continue
 		}
+		sid := serviceID
+		if e.ServiceID != nil {
+			sid = *e.ServiceID
+		}
 		raw, _ := json.Marshal(e)
 		out = append(out, store.EPGEvent{
-			ServiceID:  serviceID,
+			ServiceID:  sid,
 			EventID:    e.EventID,
 			Start:      start.UTC(),
 			Duration:   dur,

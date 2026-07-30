@@ -22,4 +22,20 @@ channels_file = "channels.json"
 
 # EPG refresh cron (UTC). Default: every 6 hours.
 epg_cron = "0 */6 * * *"
-epg_channels = ["TOKYO MX1", "NHKEFl1El5~", "asahi", "TBS1", "tvk1", "TOKYO MX2", "NHK_G", "NTV", "FUJI"]
+# One entry per *mux*, not per channel. A pass harvests the EIT of the whole
+# transport stream it tuned, so listing a second service on the same
+# frequency only re-collects the same guide (the refresher skips it).
+# Ten muxes × up to 60s of collection, at background priority — live viewing
+# and recordings preempt it.
+epg_channels = [
+  "J：COMテレビ",   # 473.14 MHz
+  "テレ玉1",        # 485.14
+  "tvk1",           # 503.14
+  "TOKYO MX1",      # 515.14
+  "FUJI",           # 521.14
+  "TBS1",           # 527.14
+  "asahi",          # 539.14
+  "NTV",            # 545.14
+  "NHKEテレ1東京",  # 551.14 (alias of the mojibake name NHKEFl1El5~)
+  "NHK_G",          # 557.14
+]

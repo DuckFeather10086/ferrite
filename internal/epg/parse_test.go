@@ -41,6 +41,47 @@ func TestParse_AsahiFixture(t *testing.T) {
 	}
 }
 
+// One pass covers the whole mux, so events name their own service and must
+// be filed under it. Stamping them all with the channel that was asked for
+// is how every sibling channel ended up with an empty guide — or worse,
+// with another channel's programmes.
+func TestParse_KeepsEachEventsOwnService(t *testing.T) {
+	body := `[
+		{"service_id":1064,"event_id":1,"start":"2026-05-23 10:00:00","duration":"00:30:00","title":"asahi prog"},
+		{"service_id":1065,"event_id":1,"start":"2026-05-23 10:00:00","duration":"00:30:00","title":"subchannel prog"},
+		{"event_id":9,"start":"2026-05-23 11:00:00","duration":"00:30:00","title":"no service_id"}
+	]`
+	events, skipped := Parse(strings.NewReader(body), 1064)
+	if len(skipped) != 0 {
+		t.Fatalf("unexpected skips: %v", skipped)
+	}
+	if len(events) != 3 {
+		t.Fatalf("got %d events, want 3", len(events))
+	}
+
+	// event_id 1 appears once per service: two different programmes that
+	// must not collapse into one. The last event names no service and
+	// belongs to the channel the pass ran for — that is what an older dvbr
+	// emitted for every event.
+	type row struct {
+		sid   uint16
+		title string
+	}
+	got := map[row]bool{}
+	for _, e := range events {
+		got[row{e.ServiceID, e.Title}] = true
+	}
+	for _, want := range []row{
+		{1064, "asahi prog"},
+		{1065, "subchannel prog"},
+		{1064, "no service_id"},
+	} {
+		if !got[want] {
+			t.Errorf("missing %d → %q; got %v", want.sid, want.title, got)
+		}
+	}
+}
+
 func TestParse_BadJSON(t *testing.T) {
 	_, errs := Parse(strings.NewReader("not json"), 1)
 	if len(errs) == 0 {
