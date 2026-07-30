@@ -64,6 +64,8 @@ dvb-rs stdout → b25-rs stdin → b25-rs stdout → fanout.Broadcaster
     pixels (1440x1080 SAR 4:3 → 1920x1080 SAR 1:1) because hls.js does
     not reliably honour the SAR in the H.264 VUI.
   - `api/` — chi router for `/api/...` + serves `internal/web/dist`.
+    **List endpoints must answer `[]`, not `null`** — wrap them in `orEmpty`.
+    A nil slice is invisible in Go and crashes every other client.
   - `web/` — `//go:embed dist` of Next.js `output: 'export'` build.
 
 ## Current implementation status
@@ -124,6 +126,12 @@ Implemented and tested (race-clean):
   (Bun). The source project lives in `ferrite/web/`; `bun run build`
   compiles it and copies `out/` → `internal/web/dist/`. hls.js is
   bundled via npm (no CDN needed — works fully offline on LAN).
+- `agent/` — Bun + TypeScript. `src/tools.ts` is the single tool list ("how to
+  operate the TV"), consumed both by an MCP server (`src/mcp.ts`, stdio) and a
+  DeepSeek tool-calling loop (`src/agent.ts`). Channel resolution there mirrors
+  `config.Channels.Find` exactly — first record whose name *or* aliases match,
+  in file order. Diverging means one tool reads a channel while another acts on
+  a different one. `bun test` needs no network and no API key.
 - `web/` — Bun + Next.js 16 (App Router, TypeScript, Tailwind CSS).
   Four pages: Live (hls.js player), Guide (EPG), Schedules (create/
   cancel), Recordings. Static `output: 'export'`; all data fetching is
@@ -162,6 +170,12 @@ mid-recording finalizing as 'done'.
   starved live HLS for minutes at a time (the first `GET /api/live/{ch}`
   after boot 404'd). Code that needs the adapter without a fanout takes
   a `Pool.Reserve` instead of spawning dvb-rs itself.
+- **Channel lookup is first-match-wins over each record's name *and* aliases,
+  in file order** (`config.Channels.Find`). Two consequences: every record must
+  be selectable by its own name (a name that is an earlier record's alias makes
+  the later record unreachable — `dvbr scan --merge` guards against creating
+  that), and any other client must reimplement this order rather than something
+  that merely looks equivalent.
 - **Priority, not first-come.** `PrioRecord > PrioLive > PrioBackground`.
   A claim preempts only a *strictly* lower one, so: a recording evicts
   live playback (a missed recording is unrecoverable), live and

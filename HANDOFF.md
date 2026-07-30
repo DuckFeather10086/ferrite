@@ -169,10 +169,47 @@ Verified against the live daemon: `wire_live_test.go` (skipped unless
 `FERRITE_LIVE` is set) decodes all 32 channels, adapter status and a real
 EPG event, and the TUI renders under a pty.
 
-Next: the Bun + TypeScript agent, exposing the same operations as MCP tools
-plus a Telegram channel for scheduling from a phone. The API surface it
-needs already exists — /api/channels, /api/epg, /api/live/{ch}/switch,
-/api/record — so it should be a thin layer.
+## 2026-07-30 (later still) — MCP tools + DeepSeek agent
+
+`agent/`, Bun + TypeScript. `src/tools.ts` holds the one tool list; the MCP
+server (`src/mcp.ts`) and the DeepSeek loop (`src/agent.ts`) both consume it.
+DeepSeek is OpenAI-compatible, so the `openai` client works with a base URL.
+
+Register with Claude Code:
+
+```sh
+claude mcp add ferrite -- bun run <repo>/agent/src/mcp.ts
+```
+
+Verified live: the MCP stdio handshake against a running daemon (11 tools,
+real guide data), and one DeepSeek call which read tv_status and correctly
+explained that the EPG scan was holding the tuner at background priority.
+
+Telegram is deferred — no bot token yet. `cli.ts` already reads one request
+per line from stdin, so a chat channel goes in front of it without touching
+the loop. **When it does get built it needs an allow-list of chat ids**: a
+Telegram bot accepts messages from anyone who finds it, and these tools
+change channel and start recordings.
+
+### Three bugs that only a live daemon could show
+
+1. **A Go nil slice marshals as `null`, not `[]`.** `/api/epg` for a channel
+   with no guide data returned `null` and the TS client died on `.map`. Fixed
+   server-side (`orEmpty`) *and* defensively in the client. The fake daemon in
+   the tests returned `[]`, which is exactly why the tests were green.
+2. **`--merge` handed service 1065 the name "テレビ朝日"**, which was already
+   an alias of `asahi` (1064). Lookup is first-match-wins over each record's
+   name and aliases in file order, so 1065 became unreachable by its own name.
+   Fixed in dvb-rs (collisions now consider aliases) and in the data.
+3. **Channel resolution has to match the daemon's order exactly.** The TS tool
+   originally did a global names-before-aliases pass, which for テレビ朝日
+   selected 1065 while the daemon selected 1064 — so `tv_guide` read an empty
+   schedule for a channel that `tv_watch` would tune fine. Any future client
+   must copy `Channels.Find`, not approximate it.
+
+Noticed in passing, not fixed: some stored EPG titles render the katakana
+prolonged sound mark as `「` (`ニュ「ス` for `ニュース`), i.e. a character
+mapping gap in libaribb24-rs. Cosmetic, and in a different submodule.
 
 ## 2026-06-18 — first real-hardware E2E run of the b25 pipeline
 
