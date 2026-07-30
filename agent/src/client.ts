@@ -139,6 +139,19 @@ export class FerriteClient {
     return this.getList<Recording>("/api/recordings");
   }
 
+  /** Deletes a recording and its file. 409 while it is still running. */
+  deleteRecording(id: number): Promise<{ id: number; file_deleted: boolean }> {
+    return this.request<{ id: number; file_deleted: boolean }>(
+      "DELETE",
+      `/api/recordings/${id}`,
+    );
+  }
+
+  /** The recorded TS. Range-capable, so mpv and VLC can seek in it. */
+  recordingFileUrl(id: number): string {
+    return `${this.baseUrl}/api/recordings/${id}/file`;
+  }
+
   schedules(): Promise<Schedule[]> {
     return this.getList<Schedule>("/api/schedule");
   }

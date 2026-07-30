@@ -86,6 +86,25 @@ export function startFakeDaemon(overrides: Partial<FakeState> = {}): FakeDaemon 
       }
 
       if (path === "/api/recordings") return json(state.recordings);
+
+      const recFile = path.match(/^\/api\/recordings\/(\d+)\/file$/);
+      if (recFile && req.method === "GET") {
+        const row = state.recordings.find((r) => r.id === Number(recFile[1]));
+        if (!row) return json({ error: "no such recording" }, 404);
+        return new Response("TS", { headers: { "content-type": "video/mp2t" } });
+      }
+
+      const delRec = path.match(/^\/api\/recordings\/(\d+)$/);
+      if (delRec && req.method === "DELETE") {
+        const id = Number(delRec[1]);
+        const row = state.recordings.find((r) => r.id === id);
+        if (!row) return json({ error: "no such recording" }, 404);
+        if (row.state === "recording") {
+          return json({ error: `recording ${id} is still running — stop it first` }, 409);
+        }
+        state.recordings = state.recordings.filter((r) => r.id !== id);
+        return json({ id, file_deleted: true });
+      }
       if (path === "/api/schedule" && req.method === "GET") return json(state.schedules);
 
       if (path === "/api/schedule" && req.method === "POST") {

@@ -56,7 +56,8 @@ minutes"*.
 | `tv_off` | stop live playback, release the tuner |
 | `tv_record_start` | record now, open-ended or for N minutes |
 | `tv_record_stop` | stop a recording (defaults to the newest) |
-| `tv_recordings` | list recordings with state, size, path |
+| `tv_recordings` | list recordings with state, size, path and a playable URL |
+| `tv_recording_delete` | delete a recording and its file (not reversible) |
 | `tv_schedule_list` | pending timers |
 | `tv_schedule_add` | set a timer, ideally by `event_id` from `tv_guide` |
 | `tv_schedule_cancel` | cancel a timer |

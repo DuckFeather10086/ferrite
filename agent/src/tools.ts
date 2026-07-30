@@ -239,7 +239,10 @@ export const tools: Tool[] = [
     name: "tv_recordings",
     description:
       "List recordings, newest first: state (recording/done/failed), channel, " +
-      "size and file path. A failed row carries the reason.",
+      "size and file path. A failed row carries the reason. Each row also has " +
+      "a `play_url` — the recorded file itself, which any player (mpv, VLC) " +
+      "can open directly; give that to the user rather than the on-disk path " +
+      "when they want to watch something back.",
     inputSchema: {
       type: "object",
       properties: {
@@ -259,9 +262,37 @@ export const tools: Tool[] = [
           started_local: local(r.start),
           megabytes: r.size_bytes == null ? null : Math.round(r.size_bytes / 1e6),
           path: r.path,
+          play_url: client.recordingFileUrl(r.id),
           error: r.error || undefined,
         })),
       );
+    },
+  },
+
+  {
+    name: "tv_recording_delete",
+    description:
+      "Delete a recording: the file on disk and its entry, permanently. This " +
+      "is not reversible and there is no undo, so only call it when the user " +
+      "has named what to delete — never to tidy up on your own initiative. A " +
+      "recording still in progress is refused; stop it with tv_record_stop " +
+      "first. Deleting frees disk space; nothing else about the TV changes.",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "number", description: "Recording id from tv_recordings." } },
+      required: ["id"],
+      additionalProperties: false,
+    },
+    async run(client, args) {
+      const id = Number(args.id);
+      if (!id) throw new Error("id is required");
+      const res = await client.deleteRecording(id);
+      return ok({
+        deleted_recording_id: res.id,
+        // Distinguished because a row can outlive its file — someone
+        // removing it by hand is normal, and the row still goes.
+        file_removed: res.file_deleted,
+      });
     },
   },
 

@@ -185,6 +185,40 @@ describe("recording", () => {
     expect(data[0].state).toBe("done");
     expect(data[0].megabytes).toBe(12);
   });
+
+  // The on-disk path is on the tuner box and means nothing to the user; the
+  // URL is the thing they can actually open.
+  test("listing offers a playable URL, not just a path", async () => {
+    await call("tv_record_start", { channel: "asahi" });
+    const { data } = await call("tv_recordings");
+    expect(data[0].play_url).toBe(`${daemon.url}/api/recordings/${data[0].id}/file`);
+  });
+
+  test("delete removes the recording and says whether a file went", async () => {
+    const started = await call("tv_record_start", { channel: "asahi" });
+    const id = started.data.recording_id;
+    await call("tv_record_stop", { id });
+
+    const { data } = await call("tv_recording_delete", { id });
+    expect(data.deleted_recording_id).toBe(id);
+    expect(data.file_removed).toBe(true);
+    expect((await call("tv_recordings")).data).toEqual([]);
+  });
+
+  test("deleting a running recording is refused with the way out", async () => {
+    const started = await call("tv_record_start", { channel: "asahi" });
+    const res = await call("tv_recording_delete", { id: started.data.recording_id });
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain("still running");
+    // Nothing was removed.
+    expect((await call("tv_recordings")).data).toHaveLength(1);
+  });
+
+  test("deleting an unknown id reports it rather than pretending", async () => {
+    const res = await call("tv_recording_delete", { id: 4242 });
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain("no such recording");
+  });
 });
 
 describe("tv_schedule_add", () => {
