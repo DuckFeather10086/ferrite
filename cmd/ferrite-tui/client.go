@@ -36,9 +36,24 @@ func NewClient(baseURL string) *Client {
 // ── wire types ─────────────────────────────────────────────────────
 
 type Channel struct {
-	Name      string   `json:"name"`
-	Aliases   []string `json:"aliases,omitempty"`
-	ServiceID uint16   `json:"service_id"`
+	Name string `json:"name"`
+	// DisplayName is the daemon's label for a person to read. Name is
+	// still what every request takes — channels.json mixes curated ASCII
+	// keys (`asahi`), legacy mojibake (`NHKEFl1El5~`) and scanned
+	// broadcast names, and the daemon is the one place that decides which
+	// of them to show.
+	DisplayName string   `json:"display_name"`
+	Aliases     []string `json:"aliases,omitempty"`
+	ServiceID   uint16   `json:"service_id"`
+}
+
+// Display is DisplayName, falling back to Name against an older daemon
+// that doesn't send the field.
+func (c Channel) Display() string {
+	if c.DisplayName != "" {
+		return c.DisplayName
+	}
+	return c.Name
 }
 
 type Adapter struct {

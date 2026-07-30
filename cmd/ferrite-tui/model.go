@@ -247,21 +247,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.failure = ""
 		url := m.client.PlaylistURL(msg.result.Channel)
+		shown := m.displayFor(msg.result.Channel)
 		if err := m.player.Play(msg.result.Channel, url); err != nil {
 			// Not a failure of the TV: the stream is up, we just aren't the
 			// ones showing it. Hand over the URL so it can be opened
 			// wherever the user actually is.
 			switch {
 			case errors.Is(err, ErrNoDisplay):
-				m.message = "now on " + msg.result.Channel + " — no display here, open: " + url
+				m.message = "now on " + shown + " — no display here, open: " + url
 			case errors.Is(err, ErrPlaybackDisabled):
-				m.message = "now on " + msg.result.Channel + " — " + url
+				m.message = "now on " + shown + " — " + url
 			default:
 				m.failure = "player: " + err.Error()
 			}
 			return m, m.fetchStatus()
 		}
-		m.message = "watching " + msg.result.Channel
+		m.message = "watching " + shown
 		return m, m.fetchStatus()
 
 	case recordMsg:
@@ -276,7 +277,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			title = "untitled"
 		}
 		m.message = fmt.Sprintf("recording %s (%s) — id %d, R to stop",
-			msg.result.Channel, title, msg.result.ID)
+			m.displayFor(msg.result.Channel), title, msg.result.ID)
 		return m, tea.Batch(m.fetchStatus(), m.fetchRecordings())
 
 	case stopRecMsg:
@@ -352,7 +353,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !ok {
 			return m, nil
 		}
-		m.busy = "tuning " + ch.Name
+		m.busy = "tuning " + ch.Display()
 		m.message, m.failure = "", ""
 		return m, m.switchTo(ch.Name)
 
@@ -370,7 +371,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !ok || m.busy != "" {
 			return m, nil
 		}
-		m.busy = "starting recording on " + ch.Name
+		m.busy = "starting recording on " + ch.Display()
 		m.message, m.failure = "", ""
 		return m, m.recordNow(ch.Name)
 
@@ -472,6 +473,19 @@ func (m Model) selected() (Channel, bool) {
 		return Channel{}, false
 	}
 	return m.channels[m.cursor], true
+}
+
+// displayFor maps a canonical channel name — what the daemon reports in
+// adapter status and recording rows, and what every request takes — to the
+// label a person should read. Unknown names pass through: a recording can
+// name a channel that has since left channels.json.
+func (m Model) displayFor(name string) string {
+	for _, ch := range m.channels {
+		if ch.Name == name {
+			return ch.Display()
+		}
+	}
+	return name
 }
 
 // selectedRecording is the highlighted row, and only in the recordings
@@ -629,7 +643,7 @@ func (m Model) renderChannels() string {
 		case ch.Name == live:
 			marker = styleDim.Render("·")
 		}
-		line := fmt.Sprintf("%s %s", marker, ch.Name)
+		line := fmt.Sprintf("%s %s", marker, ch.Display())
 		if i == m.cursor {
 			line = styleCursor.Render(line)
 		}
@@ -647,7 +661,14 @@ func (m Model) renderGuide() string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString(styleTitle.Render(ch.Name) + styleDim.Render(fmt.Sprintf("  (sid %d)", ch.ServiceID)) + "\n")
+	// The canonical name comes along when it differs from the label: it is
+	// what /api/... and `dvb-rs tune` take, so it is worth being able to
+	// read it off the screen.
+	ident := fmt.Sprintf("  (sid %d)", ch.ServiceID)
+	if ch.Display() != ch.Name {
+		ident = fmt.Sprintf("  (%s · sid %d)", ch.Name, ch.ServiceID)
+	}
+	b.WriteString(styleTitle.Render(ch.Display()) + styleDim.Render(ident) + "\n")
 
 	current, upcoming := m.nowNext(ch.ServiceID)
 	if current == nil && len(upcoming) == 0 {
@@ -684,9 +705,12 @@ func (m Model) viewRecordings() string {
 		if state == "recording" {
 			state = styleRec.Render("● REC")
 		}
-		line := fmt.Sprintf("%-6s %-14s %-16s %8s  %s",
-			state, rec.Channel, rec.Start.Local().Format("01-02 15:04"),
-			humanSize(rec.SizeBytes), firstLine(rec.Title))
+		// Columns are laid out by display width, not %-Ns: a channel name
+		// in kana is 3 bytes and 2 cells per rune, and the state cell
+		// carries ANSI. fmt would count both and shear the table.
+		line := cell(state, 7) + cell(m.displayFor(rec.Channel), 16) +
+			cell(rec.Start.Local().Format("01-02 15:04"), 14) +
+			cellRight(humanSize(rec.SizeBytes), 8) + "  " + firstLine(rec.Title)
 		if i == m.recCursor {
 			line = styleCursor.Render(line)
 		}
@@ -703,9 +727,9 @@ func (m Model) renderStatusBar() string {
 	parts := []string{}
 
 	if playing := m.player.Playing(); playing != "" {
-		parts = append(parts, styleLive.Render("▶ "+playing))
+		parts = append(parts, styleLive.Render("▶ "+m.displayFor(playing)))
 	} else if live := m.status.LiveChannel(); live != "" {
-		parts = append(parts, "tuned "+live)
+		parts = append(parts, "tuned "+m.displayFor(live))
 	} else {
 		parts = append(parts, styleDim.Render("off"))
 	}
@@ -715,7 +739,8 @@ func (m Model) renderStatusBar() string {
 		case a.Reserved:
 			parts = append(parts, fmt.Sprintf("a%d EPG", a.Adapter))
 		case a.Channel != "":
-			parts = append(parts, fmt.Sprintf("a%d %s×%d/%s", a.Adapter, a.Channel, a.Refs, a.Prio))
+			parts = append(parts, fmt.Sprintf("a%d %s×%d/%s",
+				a.Adapter, m.displayFor(a.Channel), a.Refs, a.Prio))
 		default:
 			parts = append(parts, fmt.Sprintf("a%d idle", a.Adapter))
 		}
@@ -744,6 +769,17 @@ func (m Model) renderStatusBar() string {
 
 func (m Model) renderKeys() string {
 	return styleDim.Render("j/k select  ⏎ watch  r rec  R stop rec  s stop player  l recordings  g refresh  q quit")
+}
+
+// cell renders s padded (or truncated) to w terminal cells. Unlike
+// fmt's %-Ns this counts what the terminal draws: wide CJK runes as two
+// columns and ANSI escapes as none.
+func cell(s string, w int) string {
+	return lipgloss.NewStyle().Width(w).MaxWidth(w).Render(s)
+}
+
+func cellRight(s string, w int) string {
+	return lipgloss.NewStyle().Width(w).MaxWidth(w).Align(lipgloss.Right).Render(s)
 }
 
 func timeRange(e Event) string {

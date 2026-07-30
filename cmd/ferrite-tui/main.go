@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -27,6 +28,17 @@ func main() {
 	host := flag.String("host", defaultHost(), "ferrite daemon base URL")
 	player := flag.String("player", "mpv", "video player binary, or \"none\" to only report stream URLs")
 	flag.Parse()
+
+	// A pasted placeholder otherwise fails as an opaque DNS error
+	// ("lookup <tunerbox>: no such host") next to an empty channel list,
+	// which reads like the daemon lost its channels.
+	if strings.ContainsAny(*host, "<>") {
+		fmt.Fprintf(os.Stderr,
+			"ferrite-tui: --host %s looks like a placeholder — put the real "+
+				"daemon address there,\n              or drop the flag "+
+				"entirely to use %s\n", *host, defaultHost())
+		os.Exit(2)
+	}
 
 	p := &Player{Bin: *player}
 	if *player == "none" {

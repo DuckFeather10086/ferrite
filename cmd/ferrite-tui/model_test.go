@@ -195,6 +195,73 @@ func TestRecordingsCursorClampsWhenListShrinks(t *testing.T) {
 	_ = m.View()
 }
 
+// The list shows the daemon's label; every request still carries the
+// canonical name. Both matter: channels.json is full of keys like
+// `NHKEFl1El5~` that nobody should have to read.
+func TestChannelListShowsDisplayNamesButActsOnNames(t *testing.T) {
+	m := newTestModel()
+	next, _ := m.Update(channelsMsg{channels: []Channel{
+		{Name: "NHKEFl1El5~", DisplayName: "NHKEテレ1東京", ServiceID: 1032},
+		{Name: "TBS1", ServiceID: 1048}, // no display_name: falls back
+	}})
+	m = next.(Model)
+
+	out := m.View()
+	if !strings.Contains(out, "NHKEテレ1東京") {
+		t.Fatalf("the readable name is missing:\n%s", out)
+	}
+	if !strings.Contains(out, "TBS1") {
+		t.Fatalf("a channel without display_name must still render:\n%s", out)
+	}
+	// The canonical name stays visible next to the guide, since that is
+	// what an API call or `dvb-rs tune` takes.
+	if !strings.Contains(out, "NHKEFl1El5~") {
+		t.Fatalf("the canonical name should still be on screen:\n%s", out)
+	}
+
+	m2, cmd := key(m, "enter")
+	if cmd == nil {
+		t.Fatal("enter should switch")
+	}
+	if !strings.Contains(m2.busy, "NHKEテレ1東京") {
+		t.Fatalf("busy = %q, want the readable name", m2.busy)
+	}
+	// switchTo got the canonical name — the daemon would 404 on the label
+	// unless it happens to be an alias.
+	if got := m.client.PlaylistURL(m.channels[0].Name); !strings.Contains(got, "NHKEFl1El5") {
+		t.Fatalf("request URL = %q", got)
+	}
+}
+
+// Adapter status and recording rows come back keyed by canonical name;
+// they have to be relabelled or the status bar disagrees with the list.
+func TestStatusAndRecordingsUseDisplayNames(t *testing.T) {
+	m := newTestModel()
+	next, _ := m.Update(channelsMsg{channels: []Channel{
+		{Name: "asahi", DisplayName: "テレビ朝日", ServiceID: 1064},
+	}})
+	m = next.(Model)
+	next, _ = m.Update(statusMsg{status: Status{
+		Adapters: []Adapter{{Adapter: 0, Channel: "asahi", Refs: 1, Prio: "live"}},
+	}})
+	m = next.(Model)
+
+	if bar := m.renderStatusBar(); !strings.Contains(bar, "テレビ朝日") {
+		t.Fatalf("status bar = %q", bar)
+	}
+
+	m = withRecordings(m, Recording{ID: 1, State: "done", Channel: "asahi", Title: "報道"})
+	if out := m.View(); !strings.Contains(out, "テレビ朝日") {
+		t.Fatalf("recordings view is missing the label:\n%s", out)
+	}
+
+	// A recording naming a channel that has left channels.json still shows.
+	m = withRecordings(m, Recording{ID: 2, State: "done", Channel: "gone-channel"})
+	if out := m.View(); !strings.Contains(out, "gone-channel") {
+		t.Fatalf("unknown channel should pass through:\n%s", out)
+	}
+}
+
 func withRecordings(m Model, recs ...Recording) Model {
 	m.view = viewRecordings
 	next, _ := m.Update(recordingsMsg{recordings: recs})
