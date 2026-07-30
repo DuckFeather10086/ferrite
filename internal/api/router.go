@@ -174,17 +174,23 @@ func (d Deps) handleChannels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type out struct {
-		Name      string   `json:"name"`
-		Aliases   []string `json:"aliases,omitempty"`
-		ServiceID uint16   `json:"service_id"`
+		Name string `json:"name"`
+		// DisplayName is what a UI shows; Name is what every other
+		// endpoint takes. Computed here so the TUI, the web UI and any
+		// agent all label a channel identically instead of each
+		// re-deriving it from the alias list and disagreeing.
+		DisplayName string   `json:"display_name"`
+		Aliases     []string `json:"aliases,omitempty"`
+		ServiceID   uint16   `json:"service_id"`
 	}
 	rows := make([]out, 0, len(d.Channels.Channels))
 	for i := range d.Channels.Channels {
 		c := &d.Channels.Channels[i]
 		rows = append(rows, out{
-			Name:      c.Name,
-			Aliases:   c.Aliases,
-			ServiceID: c.ServiceID(),
+			Name:        c.Name,
+			DisplayName: c.DisplayName(),
+			Aliases:     c.Aliases,
+			ServiceID:   c.ServiceID(),
 		})
 	}
 	writeJSON(w, http.StatusOK, rows)

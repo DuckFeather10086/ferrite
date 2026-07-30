@@ -89,6 +89,43 @@ func TestChannels(t *testing.T) {
 	if int(out[0]["service_id"].(float64)) != 23608 {
 		t.Fatalf("service_id: %v", out[0]["service_id"])
 	}
+	// display_name is always present, so a client can render it without
+	// re-deriving a label from the alias list (and disagreeing with the
+	// other clients when it does).
+	if out[0]["display_name"] != "mx" {
+		t.Fatalf("display_name = %v, want the name when no alias reads better",
+			out[0]["display_name"])
+	}
+}
+
+// The label a UI shows is chosen server-side. A record whose own name is
+// legacy mojibake must come back with the readable alias.
+func TestChannels_DisplayNamePrefersTheReadableAlias(t *testing.T) {
+	h := NewRouter(Deps{
+		Channels: &config.Channels{Version: 1, Channels: []config.Channel{
+			{Name: "NHKEFl1El5~", Aliases: []string{"NHKEテレ1東京"}},
+			{Name: "asahi", Aliases: []string{"|ÆìÓD+F|", "テレビ朝日"}},
+			{Name: "J：COMテレビ", Aliases: []string{"J!'COM|ÆìÓ"}},
+		}},
+		StartedAt: time.Now(),
+	})
+	var out []struct {
+		Name        string `json:"name"`
+		DisplayName string `json:"display_name"`
+	}
+	if err := json.Unmarshal(get(t, h, "/api/channels").Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"NHKEFl1El5~": "NHKEテレ1東京",
+		"asahi":       "テレビ朝日",
+		"J：COMテレビ":    "J：COMテレビ", // its own name already reads fine
+	}
+	for _, row := range out {
+		if got := want[row.Name]; row.DisplayName != got {
+			t.Errorf("%q → display_name %q, want %q", row.Name, row.DisplayName, got)
+		}
+	}
 }
 
 func TestEPG_NoStoreReturns503(t *testing.T) {

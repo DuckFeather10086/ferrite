@@ -105,6 +105,68 @@ channels_file = "/does/not/exist.json"
 	}
 }
 
+// Every case here is a real record out of channels.json — the file mixes
+// three provenances (legacy mojibake names, curated ASCII keys, scanned
+// broadcast names) and the display rule has to read well for all of them.
+func TestDisplayName(t *testing.T) {
+	cases := []struct {
+		what    string
+		ch      Channel
+		want    string
+		because string
+	}{{
+		what:    "legacy mojibake name, scanned alias",
+		ch:      Channel{Name: "NHKEFl1El5~", Aliases: []string{"NHKEテレ1東京"}},
+		want:    "NHKEテレ1東京",
+		because: "the alias is the only readable candidate",
+	}, {
+		what:    "curated ASCII key",
+		ch:      Channel{Name: "asahi", Aliases: []string{"|ÆìÓD+F|", "テレビ朝日"}},
+		want:    "テレビ朝日",
+		because: "skip the mojibake alias, take the Japanese one",
+	}, {
+		what:    "first Japanese alias wins",
+		ch:      Channel{Name: "NHK_G", Aliases: []string{"NHK総合", "NHK General", "NHK総合1東京"}},
+		want:    "NHK総合",
+		because: "file order, same as lookup",
+	}, {
+		what:    "good name, mojibake alias",
+		ch:      Channel{Name: "J：COMテレビ", Aliases: []string{"J!'COM|ÆìÓ", "u23656_473142857"}},
+		want:    "J：COMテレビ",
+		because: "the record's own name reads fine; never prefer an alias over it",
+	}, {
+		what:    "disambiguating suffix is kept",
+		ch:      Channel{Name: "テレビ朝日_2", Aliases: []string{"テレビ朝日"}},
+		want:    "テレビ朝日_2",
+		because: "four services share one service name; dropping _2 merges them on screen",
+	}, {
+		what:    "deliberately ASCII, no aliases",
+		ch:      Channel{Name: "TBS1"},
+		want:    "TBS1",
+		because: "nothing to improve",
+	}, {
+		what:    "ideographic space is not an improvement",
+		ch:      Channel{Name: "TOKYO MX1", Aliases: []string{"TOKYO　MX1"}},
+		want:    "TOKYO MX1",
+		because: "U+3000 must not count as Japanese, or the alias wins for no gain",
+	}, {
+		what:    "placeholder with nothing better",
+		ch:      Channel{Name: "515.14MHz#23864"},
+		want:    "515.14MHz#23864",
+		because: "an honest placeholder beats inventing a name",
+	}}
+
+	for _, tc := range cases {
+		if got := tc.ch.DisplayName(); got != tc.want {
+			t.Errorf("%s: DisplayName() = %q, want %q (%s)", tc.what, got, tc.want, tc.because)
+		}
+	}
+
+	if (*Channel)(nil).DisplayName() != "" {
+		t.Error("nil receiver should be empty, not panic")
+	}
+}
+
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
