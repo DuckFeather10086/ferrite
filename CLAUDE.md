@@ -51,9 +51,12 @@ dvb-rs stdout → b25-rs stdin → b25-rs stdout → fanout.Broadcaster
     table.
   - `hls/` — per-channel session: acquire lease → ffmpeg subprocess
     → m3u8 dir. Refcounted; teardown when last viewer leaves. On start
-    it probes the first audio/video PTS (ffprobe) and delays audio via
-    `-af asetpts` to correct ISDB's A/V skew — ports the live_hls.py
-    auto-offset (config `ffprobe_bin` / `probe_seconds`).
+    it delays audio via `-af asetpts` to correct ISDB's A/V skew — ports
+    the live_hls.py auto-offset (config `ffprobe_bin` / `probe_seconds`).
+    The measurement is **cached per channel** in `av_offsets`; only a
+    cache miss pays the ffprobe pass. Output is normalized to square
+    pixels (1440x1080 SAR 4:3 → 1920x1080 SAR 1:1) because hls.js does
+    not reliably honour the SAR in the H.264 VUI.
   - `api/` — chi router for `/api/...` + serves `internal/web/dist`.
   - `web/` — `//go:embed dist` of Next.js `output: 'export'` build.
 
@@ -66,6 +69,9 @@ Implemented and tested (race-clean):
 - `tuner.Pool` — refcounted leases, same-channel sharing, source-EOF
   recovery. Now chains `dvb-rs | b25-rs` so leases emit descrambled TS
   (see `DvbrCLI.B25Bin`; empty disables descrambling for FTA/no-card).
+  Also the single adapter arbiter: `AcquireAt(prio)` / `Reserve(prio)`,
+  preemption of strictly-lower-priority holders, `ErrNoAdapter` when
+  nothing can be freed, and `CanServe` for cheap upfront rejection.
 - `fanout.Broadcaster` — 1→N chunk fanout with drop-on-slow, pooled
   buffers.
 - `store` — sqlite (WAL) with embedded migrations; CRUD for
@@ -74,17 +80,35 @@ Implemented and tested (race-clean):
 - `config` — TOML daemon config + channels.json loader; `Channels.Find`
   mirrors dvbr's `find_entry`.
 - `epg.Parse` + `epg.Refresher` — parse `dvb-rs epg --json` (JST→UTC),
-  periodic refresh loop with cron-like interval.
+  periodic refresh loop with cron-like interval. Each pass holds a
+  `Pool.Reserve(PrioBackground)`, aborts its dvb-rs child when preempted
+  (reporting `ErrPreempted`), defers the first pass by `StartupDelay`,
+  and retries a preempted pass after `RetryAfterPreempt` (10m) instead
+  of idling until the next 6h tick.
 - `recorder.Runner` — job lifecycle: lead-in wait → Acquire →
   open file → drain chunks with startup/stall watchdogs → finalize row.
+  `Job.Stop` is the graceful early finish (row → 'done' with the bytes
+  written, as opposed to canceling ctx, which is 'failed'); `Job.OnStart`
+  hands the new row id to the caller.
+- `recorder.Manager` — "record now" jobs: `Start` (open-ended, capped at
+  `MaxAdhocDuration` 12h) returns the row id, `Stop(id)` ends it,
+  `StopAllAndWait` is the shutdown path. Must be called *before* the
+  store closes, or the row stays stuck in state 'recording'. Its `Base`
+  context must not be the daemon's signal context — cancellation would
+  beat the graceful stop and mark shutdown recordings 'failed'.
 - `scheduler.Scheduler` — tick → DueSchedules → reserve row →
   dispatch → finalize state.
 - `hls.Manager` + `Session` — refcounted ffmpeg-per-channel, idle
-  janitor, m3u8 + segments on disk.
+  janitor, m3u8 + segments on disk. A/V offset cache (`Offsets`,
+  `OffsetMaxAge`; raw measurement stored, `AudioOffsetBias` applied at
+  use time so config changes need no re-probe).
 - `api` (chi) — `/health`, `/stream.m3u8` (shortcut to last-opened
   HLS session), `/api/status` (with adapter occupancy), `/api/channels`,
   `/api/epg`, `/api/now`, `/api/schedule` (CRUD), `/api/recordings`,
-  `/api/live/{channel}.m3u8` + segments. Also serves the embedded web UI
+  `/api/record` + `/api/record/{id}/stop` (record now / stop),
+  `/api/live/{channel}.m3u8` + segments, `/api/live/{channel}/stop`, and
+  `/api/live/{channel}/switch` (change channel: close other sessions,
+  tune, wait for the playlist). Also serves the embedded web UI
   (SPA fallback) for all non-`/api` routes.
 - `tuner.DvbrCLI.Tune` — chains `dvb-rs | b25-rs`: dvbr's stdout is pumped
   into `b25-rs -v 0 - -` and the descrambled stdout is the lease stream.
@@ -100,18 +124,51 @@ Implemented and tested (race-clean):
   client-side via SWR against the `/api/*` endpoints.
 
 **Not implemented:**
-- The recordings file-download endpoint (`/api/recordings/{id}/file`)
-  is still a stub.
-- End-to-end hardware verification — every package has unit/integration
-  tests with mocks/fakes; the `dvbr | b25` chaining is covered by a
-  fake-binary integration test, but nothing has been exercised against
-  an actual tuner since the switch from `live_hls.py`.
+- Recording playback / management: no `/api/recordings/{id}/file`
+  download and no delete.
+- Subtitles: `arib_caption` is present in the recorded TS (and in the
+  tapped service PIDs) but nothing decodes or serves it yet.
+- Channel-list hygiene: duplicate records survive from the legacy
+  migrate (`TOKYO MX1` + `TOKYO MX1_2` for separate service_ids,
+  `515.14MHz#23864`), and several muxes carry the same service name on
+  4 services, so names get `_2`/`_3` suffixes. Nothing is broken, but a
+  human pass over `channels.json` would tidy it.
+- Watch-one-channel-while-recording-another needs a second tuner; with
+  one adapter the recording wins and live drops.
+
+**Hardware-verified (2026-07-30, single Siano adapter, Tokyo):** EPG
+preempted by record and by live; record-now → file grows ~1.4 MB/s →
+stop → row 'done' (mpeg2video 1440x1080 + AAC 48k + arib_caption,
+`scrambling_control` 0 across the sampled packets, 477 frames decoded
+clean after the first partial GOP); `switch` between NHK_G and TBS1
+(~14s cold, dominated by the 5s A/V probe + ffmpeg's first segment);
+same-channel record+live sharing one tune (refs=2); SIGTERM
+mid-recording finalizing as 'done'.
 
 ## Architecture invariants
 
 - **One process per adapter at a time.** Cross-process serialization
-  is `dvb-rs`'s flock on `/tmp/dvbr-adapter{N}.lock`. Inside ferrite, an
-  in-memory mutex on the adapter's `Pool` slot is sufficient.
+  is `dvb-rs`'s flock on `/tmp/dvbr-adapter{N}.lock`.
+- **`tuner.Pool` is the *only* in-process arbiter of an adapter.**
+  Everything that touches the hardware goes through it — including work
+  that drives dvb-rs out-of-process. `epg.Refresher` used to spawn
+  `dvb-rs epg` directly and take the flock behind the Pool's back, which
+  starved live HLS for minutes at a time (the first `GET /api/live/{ch}`
+  after boot 404'd). Code that needs the adapter without a fanout takes
+  a `Pool.Reserve` instead of spawning dvb-rs itself.
+- **Priority, not first-come.** `PrioRecord > PrioLive > PrioBackground`.
+  A claim preempts only a *strictly* lower one, so: a recording evicts
+  live playback (a missed recording is unrecoverable), live and
+  recording both evict EPG, and live never evicts live — two viewers on
+  different channels get `ErrNoAdapter`, which is why changing channel
+  goes through `POST /api/live/{ch}/switch` (close, then open) rather
+  than open-then-close.
+- **A preempted holder must let go, and the preemptor must wait for it.**
+  `Reservation.Preempted()` fires, the holder kills its child and calls
+  `Release()`, and only then does the preemptor tune — that ordering is
+  what guarantees the dead child's flock is gone. Subprocess plumbing
+  needs `cmd.WaitDelay` set: without it a grandchild holding the
+  inherited stdout pipe keeps `cmd.Wait` blocked and wedges the adapter.
 - **Subprocess stderr is not /dev/null.** Pipe to slog at warn level.
   The legacy Python silently masked failures and we missed recordings.
 - **Always validate the pipeline produces bytes.** Port the watchdog

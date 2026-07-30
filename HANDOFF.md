@@ -1,5 +1,152 @@
 # Handoff
 
+## 2026-07-30 — adapter arbitration + record-now (EPG starvation FIXED)
+
+The open issue below ("EPG startup scan starves live HLS") is resolved.
+`epg_channels` no longer has to be empty — the default config with all
+nine channels was used for the hardware run.
+
+**What changed.** `tuner.Pool` became the single in-process arbiter with
+a priority ladder (`PrioRecord` > `PrioLive` > `PrioBackground`) and
+preemption of strictly-lower claims:
+
+- `Pool.Reserve(prio)` — an exclusive hold for a consumer that drives the
+  hardware out-of-process. `epg.Refresher` takes one at
+  `PrioBackground`, kills its `dvb-rs epg` child on `Preempted()`, and
+  `Release()`s only after the child is reaped — so the flock is gone
+  before the preemptor tunes. `cmd.WaitDelay` bounds that reap (a
+  grandchild holding the inherited stdout pipe would otherwise block
+  `cmd.Wait` and wedge the adapter).
+- `Pool.AcquireAt(prio)` — recordings claim at `PrioRecord` and evict
+  live. Live never evicts live, which is why changing channel needs
+  `POST /api/live/{ch}/switch` (close others, then open) — the naive
+  open-then-close deadlocks on `ErrNoAdapter` with one tuner.
+- EPG also defers its first pass 15s and retries a preempted pass after
+  10m instead of idling until the next 6h tick.
+
+**Record now:** `POST /api/record {channel,title?,duration_s?}` → row id;
+`POST /api/record/{id}/stop`. Open-ended by default, capped at 12h.
+`recorder.Job.Stop` finalizes as 'done' (ctx cancel remains 'failed').
+
+**Two shutdown traps, both hit for real and fixed** — worth knowing
+before touching `cmd/isdbd`:
+
+1. `StopAll()` only *signals*; the deferred `st.Close()` then beat the
+   recorder to `FinalizeRecording` and the row stayed stuck in state
+   'recording'. Use `StopAllAndWait(5s)`, which returns only once the
+   rows are written.
+2. `recorder.Manager.Base` must **not** be the signal context. With it,
+   SIGTERM cancels the job at the same instant shutdown asks it to stop
+   gracefully, `select` picks either, and recordings land as 'failed'
+   with their bytes already on disk. Shutdown reaches ad-hoc jobs only
+   through `StopAllAndWait`.
+
+### Channel-change latency: 14.4s → 7.3s
+
+Two fixes, both measured on hardware:
+
+1. **A/V offset is cached** (`av_offsets` table, `hls.Manager.Offsets`).
+   The ffprobe pass only runs on a cache miss. Only the raw measurement
+   is stored; `audio_offset_bias` is applied at use time so retuning it
+   in config doesn't invalidate the cache. `GET /api/av-offsets` to
+   inspect, `DELETE /api/av-offsets/{channel}` to force a re-probe.
+2. **`-analyzeduration 10M` was 10 *seconds*, not 10 MB.** That single
+   flag was ~9.7s of the ~14s switch (the tune itself is only ~2.3s —
+   `proc.Spawn` returns before the frontend locks, so Acquire looks
+   instant and the wait shows up inside ffmpeg). Now `-analyzeduration 1M
+   -probesize 5M`; video+audio still both detected.
+
+Remaining budget at 7.3s: ~2.3s tune/lock, ~1s analyze, 2s for the first
+`hls_time 2` segment, plus 250ms playlist polling. `hls_time 1` is the
+next knob if it needs to feel snappier.
+
+### Aspect ratio
+
+ISDB-T HD is coded 1440x1080 with SAR 4:3 (DAR 16:9). The transcode
+passed that through and relied on the player honouring the H.264 VUI
+SAR, which hls.js/MSE does not do reliably → squished picture. The
+filter chain now normalizes to square pixels:
+`yadif=0,scale=trunc(iw*sar/2)*2:ih,setsar=1` → **1920x1080 SAR 1:1**
+(verified via ffprobe on a live segment). Expression-based rather than a
+hardcoded 1920x1080 so an already-square mux or a 4:3 SD subchannel
+stays geometrically correct. Recordings are unaffected — they are raw TS
+`copy`, so the original SAR travels with the stream (this is why
+`live_hls.py` was always right here).
+
+### Mojibake status (asked 2026-07-30)
+
+- EPG text: **correct**. 6847 stored titles decode as proper Japanese
+  including ARIB pictograms (`幼女戦記Ⅱ`, `🈑🈖🈞`).
+- Channel names: **were mojibake in channels.json** — `asahi` had alias
+  `'|ÆìÓD+F|'`, `tvk1` had `'tvk|ïó»°1'`, `epg_channels` still lists
+  `NHKEFl1El5~`. These are raw ARIB bytes read as Latin-1, inherited
+  from `dvbr migrate` of the legacy dvbv5 `.conf`; note
+  `legacy_zap_section` equalled the alias in every case — a tell that
+  they never went through the B24 decoder at all.
+- Root cause for why they were never refreshed: `dvb-rs scan` hung on
+  this tuner. **Both fixed the same day** — see the two sections below;
+  `channels.json` has been re-merged and now carries real names. The
+  mojibake aliases were deliberately left in place so old references
+  (including `epg_channels`) keep resolving.
+
+### `dvb-rs scan`: two bugs, both fixed
+
+1. **It could never run on this hardware.** `scan.rs` read PAT/SDT with
+   `set_section_filter` (kernel `DMX_SET_FILTER`) — the ioctl smsusb does
+   not implement — so it blocked forever (120s timeout, no output, no
+   error). Now it taps the PID to DVR and reassembles sections in
+   userspace, the same approach `dvbr tune`/`epg` already used. That
+   logic moved into a new shared `si_reader` module and `main.rs`'s
+   private copy was deleted, so there is one code path instead of two.
+   **Do not reintroduce `DMX_SET_FILTER` without testing on smsusb.**
+2. **`parse_sdt` had the wrong section layout,** which is why it would
+   have produced nothing useful even if it had run. It read a PMT-style
+   12-bit service-loop-length at `[11..13]` and used 4-byte service
+   entries. Real SDT (EN 300 468 §5.2.3) has *no* loop-length field — the
+   loop starts at `[11]` and runs to the CRC — and each entry header is
+   5 bytes (there is an EIT-flags byte between service_id and
+   descriptors_loop_length). On air this failed as "bad SDT service loop
+   length" and every channel fell back to a `program_<n>` placeholder.
+   The existing unit test passed because it built its fixture with the
+   same wrong layout; it now builds real-layout sections, plus tests for
+   a multi-service loop and a truncated trailing entry.
+
+Result: `dvbr scan --frequency 539142857` completes in ~2.7s and reports
+`テレビ朝日` for all four services.
+
+### `scan --merge`: fixing the channel list without breaking references
+
+`scan -o channels.json` overwrites the file with just the scanned
+transport — the usage in the old docs would have wiped the other 28
+records. And adopting broadcast names wholesale would break every
+reference to a curated name (`live_hls.py`'s `CHANNEL_MAP`,
+`epg_channels`).
+
+`--merge` folds names into an existing document instead, matching on
+SERVICE_ID + FREQUENCY, and is deliberately additive:
+
+- a curated `name` (`asahi`, `NHK_G`, `TBS1`) is **kept** and gains the
+  broadcast name as an alias;
+- only auto-generated placeholders (`u1065_539142857`, `program_1064`,
+  `539.14MHz#1065`) are renamed, with `_2`/`_3` suffixes on collision
+  (a broadcaster's 4 services often share one service name), and the old
+  placeholder is retained as an alias;
+- nothing is ever deleted, so stale mojibake aliases keep resolving.
+
+Applied across all 10 muxes: 24 of 32 records updated. `asahi` →
+alias `テレビ朝日`, `NHK_G` → `NHK総合1東京`, `NHKEFl1El5~` →
+`NHKEテレ1東京`, `NTV` → `日テレ1`; `u1065_539142857` → `テレビ朝日`,
+`u29752_485142857` → `テレ玉1`, `u1183_527142857` → `Gガイド`.
+Verified end to end: `POST /api/record {"channel":"テレビ朝日"}` resolves
+to `asahi` and records. Revert with `git checkout channels.json`.
+
+Also worth correcting the 2026-06-18 note below: 473142857 and 485142857
+are **not** dead. They lock and carry J:COMテレビ and テレ玉 — they had
+simply never been re-scanned.
+
+Still open: no recording download/delete endpoint; nothing decodes the
+`arib_caption` stream; watching A while recording B needs a 2nd tuner.
+
 ## 2026-06-18 — first real-hardware E2E run of the b25 pipeline
 
 End-to-end verified against the actual tuner through the **full isdbd
@@ -40,14 +187,13 @@ from the `isdbd/` dir so the relative bin/channels/storage paths resolve.
 
 1. Build: `go build -o /tmp/isdbd ./cmd/isdbd` (Go isn't on the non-login
    PATH — `export PATH=/usr/local/go/bin:$PATH` first).
-2. **Disable EPG for the run** (see open issue below) — point `-config`
-   at a copy of `configs/isdbd.toml` with `epg_channels = []`.
-3. From `isdbd/`: `/tmp/isdbd -config <that>.toml`.
-4. `curl /api/live/TOKYO%20MX1.m3u8`, wait ~10-15s for the first
+2. From the repo root: `/tmp/isdbd -config configs/isdbd.toml`
+   (EPG can stay enabled since 2026-07-30 — it yields the adapter).
+3. `curl /api/live/TOKYO%20MX1.m3u8`, wait ~10-15s for the first
    segment, fetch a `.ts` under `/api/live/`, then
    `ffmpeg -i seg.ts -an -f null -` should decode without errors.
 
-## OPEN ISSUE — EPG startup scan starves live HLS (single adapter)
+## ~~OPEN ISSUE~~ FIXED 2026-07-30 — EPG startup scan starves live HLS
 
 **Symptom:** first `GET /api/live/{ch}.m3u8` after boot returns 404 and
 "live looks broken."
@@ -62,12 +208,9 @@ b25 → ffmpeg ("Invalid data found"), no segment is written, and the
 playlist endpoint 404s (ServeFile on a missing m3u8). EIT `--schedule`
 scans run for minutes, so the whole window is blocked.
 
-**Fix options (not done):**
-- Route `dvbr epg` through `tuner.Pool` so EPG / live / recordings share
-  one adapter arbiter; or
-- Make EPG opportunistic — skip/defer the startup pass and yield the
-  adapter to live + recording demand. A single adapter can't do EPG and
-  live simultaneously.
+**Fixed by doing both** (see the 2026-07-30 entry at the top): `dvbr epg`
+now runs under a `tuner.Pool` reservation so EPG / live / recordings share
+one arbiter, *and* EPG is opportunistic — background priority, deferred
+first pass, preempted on demand, retried later.
 
-**Workaround until fixed:** `epg_channels = []` disables EPG (gate is
-`len(cfg.EPGChannels) > 0 && cfg.DvbrBin != ""` in `cmd/isdbd/main.go`).
+The `epg_channels = []` workaround is no longer needed.
