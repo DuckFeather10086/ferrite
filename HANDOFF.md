@@ -1,6 +1,46 @@
 # Handoff
 
-## 2026-07-30 (last) — recording download + delete
+## 2026-07-30 (last) — channel labels: `display_name`
+
+Reported from the TUI: "didn't we fix the mojibake channel list?" The
+`scan --merge` pass on 2026-07-30 put the real broadcast names into
+`aliases` and deliberately left `name` alone, so every client that
+rendered `name` still showed `NHKEFl1El5~` and `NHK7HBS2`. The web UI
+rendered `aliases[0]` instead, which is wrong just as often — for records
+migrated from the legacy conf the first alias *is* the mojibake
+(`J!'COM|ÆìÓ`).
+
+`config.Channel.DisplayName()` decides once, server-side, and rides on
+`/api/channels` as `display_name`. The rule: prefer the record's own name
+when it contains kana or kanji, else the first alias that does, else the
+name unchanged. Nothing tries to detect mojibake — picking the candidate
+that reads as Japanese gets all 32 records right:
+
+    asahi        → テレビ朝日      NHKEFl1El5~ → NHKEテレ1東京
+    NHK_G        → NHK総合         NHK7HBS2    → NHK携帯2
+    NTV          → 日テレ          FUJI        → フジテレビ
+    J：COMテレビ  → (unchanged)    TBS1        → (unchanged)
+
+Two traps it has to avoid, both pinned by tests: U+3000 must **not** count
+as Japanese (`TOKYO MX1` has an alias differing only by the ideographic
+space), and the `_2`/`_3` suffixes that keep four services of one mux
+apart live on `name` — preferring an alias would collapse them to four
+identical rows.
+
+`name` remains the identifier everywhere. The TUI keeps the canonical name
+visible next to the guide (`テレビ朝日  (asahi · sid 1064)`) since that is
+what curl and `dvb-rs tune` take, and relabels adapter status and
+recording rows through the same map — otherwise the status bar disagrees
+with the list. Its recordings table now lays columns out by display width
+instead of `%-Ns`: kana is 3 bytes and 2 cells per rune, and the state
+cell carries ANSI, so fmt sheared the table.
+
+Also: `ferrite-tui --host` now rejects a value containing `<` or `>`. A
+pasted `<tunerbox>` placeholder otherwise surfaced as
+`lookup <tunerbox>: no such host` beside an empty channel list, which
+reads like the daemon lost `channels.json`.
+
+## 2026-07-30 (later still) — recording download + delete
 
 The first "Still open" item below is done: recordings can now be watched
 back and thrown away, from all three front ends.

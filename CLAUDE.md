@@ -172,6 +172,15 @@ mid-recording finalizing as 'done'.
   starved live HLS for minutes at a time (the first `GET /api/live/{ch}`
   after boot 404'd). Code that needs the adapter without a fanout takes
   a `Pool.Reserve` instead of spawning dvb-rs itself.
+- **`name` is the identifier; `display_name` is the label.** Every request
+  takes `name`. What a UI *shows* is `config.Channel.DisplayName()`, served
+  as `display_name` on `/api/channels`, because `channels.json` mixes three
+  provenances: legacy mojibake names with the real name in `aliases`
+  (`NHKEFl1El5~` → `NHKEテレ1東京`), curated ASCII keys (`asahi` →
+  `テレビ朝日`), and scanned names that are already fine (`J：COMテレビ`,
+  whose *alias* is the mojibake). Clients render the field; they must not
+  re-derive a label from the alias list — the web UI used to take
+  `aliases[0]` and showed mojibake for half the list.
 - **Channel lookup is first-match-wins over each record's name *and* aliases,
   in file order** (`config.Channels.Find`). Two consequences: every record must
   be selectable by its own name (a name that is an earlier record's alias makes
