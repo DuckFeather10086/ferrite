@@ -6,6 +6,8 @@
 
 export interface Channel {
   name: string;
+  /** The daemon's human-readable label; `name` is what requests take. */
+  display_name?: string;
   aliases?: string[];
   service_id: number;
 }

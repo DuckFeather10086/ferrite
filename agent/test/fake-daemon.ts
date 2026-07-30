@@ -2,7 +2,12 @@
 // and JSON shapes without a tuner.
 
 export interface FakeState {
-  channels: Array<{ name: string; aliases?: string[]; service_id: number }>;
+  channels: Array<{
+    name: string;
+    display_name?: string;
+    aliases?: string[];
+    service_id: number;
+  }>;
   events: Record<number, Array<Record<string, unknown>>>;
   recording: number[];
   recordings: Array<Record<string, unknown>>;
@@ -24,8 +29,9 @@ export interface FakeDaemon {
 export function startFakeDaemon(overrides: Partial<FakeState> = {}): FakeDaemon {
   const state: FakeState = {
     channels: [
-      { name: "asahi", aliases: ["テレビ朝日"], service_id: 1064 },
-      { name: "NHK_G", aliases: ["NHK総合1東京"], service_id: 1024 },
+      { name: "asahi", display_name: "テレビ朝日", aliases: ["テレビ朝日"], service_id: 1064 },
+      { name: "NHK_G", display_name: "NHK総合1東京", aliases: ["NHK総合1東京"], service_id: 1024 },
+      // No display_name: the daemon sends the name when nothing reads better.
       { name: "TOKYO MX1", service_id: 23608 },
     ],
     events: {},

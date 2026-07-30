@@ -66,9 +66,17 @@ describe("tv_channels", () => {
     expect(data).toHaveLength(3);
     expect(data[0]).toEqual({
       channel: "asahi",
+      display: "テレビ朝日",
       aliases: ["テレビ朝日"],
       service_id: 1064,
     });
+  });
+
+  // The channel key is often a machine name or legacy mojibake, so the
+  // agent needs a name it can say out loud — and one to fall back on.
+  test("display falls back to the channel key", async () => {
+    const { data } = await call("tv_channels");
+    expect(data[2]).toMatchObject({ channel: "TOKYO MX1", display: "TOKYO MX1" });
   });
 });
 

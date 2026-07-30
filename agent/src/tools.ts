@@ -70,13 +70,17 @@ export const tools: Tool[] = [
       "List every channel the TV can tune, with its aliases and service id. " +
       "Any of the names or aliases may be used wherever a tool takes a " +
       "channel. Call this when the user names a station you have not seen " +
-      "yet, rather than guessing a name.",
+      "yet, rather than guessing a name. Pass `channel` to other tools, but " +
+      "say `display` when talking to the user — some channel keys are " +
+      "machine names or legacy mojibake, and `display` is the station's real " +
+      "name.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     async run(client) {
       const channels = await client.channels();
       return ok(
         channels.map((c) => ({
           channel: c.name,
+          display: c.display_name || c.name,
           aliases: c.aliases ?? [],
           service_id: c.service_id,
         })),
