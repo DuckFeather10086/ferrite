@@ -147,6 +147,33 @@ simply never been re-scanned.
 Still open: no recording download/delete endpoint; nothing decodes the
 `arib_caption` stream; watching A while recording B needs a 2nd tuner.
 
+## 2026-07-30 (later) — TUI remote
+
+`cmd/ferrite-tui`, Bubble Tea, a pure REST client. It keeps no TV state:
+everything comes from polling the daemon, which is what lets it and the web
+UI stay consistent.
+
+Two things about it are not obvious from the code alone:
+
+- **It is meant to run where you are sitting, not on the tuner box.**
+  `--host` / `FERRITE_HOST` points it at the daemon. Consequently the player
+  URL is built absolute against that host — the switch endpoint answers with
+  a *relative* playlist path, which a local mpv cannot open.
+- **No display means no spawn.** Run the TUI over ssh and mpv would open its
+  window on the tuner box, which is useless. Without
+  DISPLAY/WAYLAND_DISPLAY it reports the stream URL instead. `--player none`
+  takes the same path deliberately. Neither is treated as an error: the
+  stream is up, we simply aren't the ones showing it.
+
+Verified against the live daemon: `wire_live_test.go` (skipped unless
+`FERRITE_LIVE` is set) decodes all 32 channels, adapter status and a real
+EPG event, and the TUI renders under a pty.
+
+Next: the Bun + TypeScript agent, exposing the same operations as MCP tools
+plus a Telegram channel for scheduling from a phone. The API surface it
+needs already exists — /api/channels, /api/epg, /api/live/{ch}/switch,
+/api/record — so it should be a thin layer.
+
 ## 2026-06-18 — first real-hardware E2E run of the b25 pipeline
 
 End-to-end verified against the actual tuner through the **full isdbd
