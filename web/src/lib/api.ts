@@ -4,6 +4,9 @@ const BASE = ""; // same-origin
 
 export type Channel = {
   name: string;
+  // What to show a person. The daemon picks it (config.Channel.DisplayName)
+  // so this UI, the TUI and any agent label a channel the same way.
+  display_name?: string;
   aliases?: string[];
   service_id: number;
 };
@@ -207,11 +210,15 @@ export function epgEnd(e: EPGEvent) {
   return new Date(new Date(e.start).getTime() + e.duration_s * 1000).toISOString();
 }
 
-// Display name: prefer the first alias (human-readable Japanese service
-// name), fall back to the canonical machine key. The /api/live/{name}.m3u8
-// endpoint still receives c.name because the backend matches name+aliases.
+// Display name: whatever the daemon chose, falling back to the canonical
+// key. Requests still carry c.name.
+//
+// This used to take aliases[0], which is wrong as often as it is right —
+// for records migrated from the legacy dvbv5 conf the first alias is the
+// mojibake ("J!'COM|ÆìÓ"), and the readable name is either later in the
+// list or is c.name itself. The choice now lives in one place, in Go.
 export function displayName(c: Channel): string {
-  return c.aliases?.[0] || c.name;
+  return c.display_name || c.name;
 }
 
 export type ChannelGroup = "GR" | "BS" | "CS" | "SKY" | "Other";
