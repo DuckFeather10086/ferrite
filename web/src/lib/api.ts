@@ -29,16 +29,17 @@ export type Schedule = {
   state: string;
 };
 
+// Mirrors store.Recording's MarshalJSON. `end` and `size_bytes` are only
+// set once the row is finalized, so both are null while it is recording.
 export type Recording = {
   id: number;
-  schedule_id?: number;
+  schedule_id: number | null;
   channel: string;
-  service_id: number;
   title?: string;
   start: string;
-  end: string;
-  file_path?: string;
-  size_bytes: number;
+  end: string | null;
+  path: string;
+  size_bytes: number | null;
   state: string;
   error?: string;
 };
@@ -164,9 +165,27 @@ export async function stopLive(channel: string) {
   await fetch(BASE + "/api/live/" + encodeURIComponent(channel) + "/stop", { method: "POST" });
 }
 
+// The recorded TS itself. The endpoint honours Range, so this works as a
+// download link and as a URL to hand to mpv/VLC.
+export function recordingFileUrl(id: number) {
+  return BASE + "/api/recordings/" + id + "/file";
+}
+
+export async function deleteRecording(id: number) {
+  const r = await fetch(BASE + "/api/recordings/" + id, { method: "DELETE" });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({ error: r.statusText }));
+    throw new Error(e.error ?? r.statusText);
+  }
+  await mutate("/api/recordings");
+  return r.json() as Promise<{ id: number; file_deleted: boolean }>;
+}
+
 // ── helpers ──────────────────────────────────────────────────────
 
-export function fmtTime(iso: string) {
+// A recording in progress has no end yet, so null is an ordinary value here.
+export function fmtTime(iso: string | null | undefined) {
+  if (!iso) return "…";
   return new Date(iso).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
 }
 
@@ -174,7 +193,10 @@ export function fmtDate(iso: string) {
   return new Date(iso).toLocaleDateString("ja-JP", { month: "short", day: "numeric", weekday: "short" });
 }
 
-export function fmtBytes(n: number) {
+// null while a recording is still running — the size is only written when
+// the row is finalized.
+export function fmtBytes(n: number | null | undefined) {
+  if (n == null) return "—";
   if (n < 1024) return n + " B";
   if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
   if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MB";
