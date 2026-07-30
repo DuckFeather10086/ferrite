@@ -217,6 +217,24 @@ mid-recording finalizing as 'done'.
   `dvbr::config::find_entry`). Don't reinvent — the canonical
   matching rules live in dvb-rs.
 
+## Running it on this box
+
+`make install-service` installs `scripts/ferrite.service` as a systemd
+**user** unit (`@DIR@` substituted for the checkout) and symlinks
+`ferrite-tui` into `~/.local/bin`. `make status` / `logs` / `restart` are
+the day-to-day handles; `restart` rebuilds the Go binaries first.
+
+Two things the unit must keep: `WorkingDirectory` at the checkout — the
+config addresses `./target/release/dvbr`, `channels.json` and `./var`
+relatively — and `TimeoutStopSec` well above the shutdown path's own
+budget (`StopAllAndWait` 5s + HTTP 5s), or SIGTERM cuts off recording
+finalization and a row stays stuck in state 'recording'.
+
+A user unit is correct here rather than a system one: the DVB device and
+the B-CAS reader are reached through the invoking user's permissions
+(pcscd's polkit rule is per-user). `scripts/isdbd.service` remains for a
+real deployment with binaries in `/usr/local/bin` and config in `/etc`.
+
 ## External dependencies
 
 - `pcscd` running + polkit rule for the invoking user (B-CAS reader).

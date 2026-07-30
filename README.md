@@ -65,7 +65,7 @@ internal/
   api/               chi router + handlers
   web/               embedded static SPA
 configs/             example daemon config
-scripts/             systemd unit
+scripts/             systemd units (ferrite.service = --user, isdbd.service = system)
 libaribb24-rs/       ARIB B24 text decoder (Rust, submodule)
 libaribb25-rs/       ARIB B25 descrambler (Rust, submodule)
 dvb-rs/              DVB tuner frontend (Rust, submodule)
@@ -81,6 +81,28 @@ go run ./cmd/isdbd -config configs/isdbd.toml
 ```
 
 Open the web UI in a browser (Live / Guide / Schedules / Recordings).
+
+### Or leave it running
+
+```bash
+make install-service      # systemd --user unit + ferrite-tui on $PATH
+make status               # is it up, and what is the tuner doing
+make logs                 # journalctl -f
+make restart              # after a rebuild
+```
+
+The unit is a **user** service: the tuner and the B-CAS reader are reached
+with the invoking user's permissions, so running it as root would need a
+second set of polkit rules for nothing. `WorkingDirectory` is the
+checkout, because `isdbd.toml` addresses the Rust binaries, `channels.json`
+and `storage_root` relatively. `loginctl enable-linger $USER` makes it come
+up at boot rather than at login.
+
+Then, from anywhere:
+
+```bash
+ferrite-tui               # terminal remote (defaults to localhost:8010)
+```
 
 ## Build
 
