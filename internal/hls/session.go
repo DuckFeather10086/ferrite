@@ -26,12 +26,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/DuckFeather10086/ferrite/internal/fanout"
 	"github.com/DuckFeather10086/ferrite/internal/proc"
+	"github.com/DuckFeather10086/ferrite/internal/store"
 	"github.com/DuckFeather10086/ferrite/internal/tuner"
 )
 
@@ -52,6 +54,19 @@ type Acquirer interface {
 	Acquire(ctx context.Context, channel string) (*tuner.Lease, error)
 }
 
+// OffsetStore persists measured A/V skew per channel. *store.Store
+// implements it; tests use a map.
+type OffsetStore interface {
+	AudioOffsetFor(ctx context.Context, channel string) (store.AudioOffset, bool, error)
+	PutAudioOffset(ctx context.Context, channel string, offsetS float64) error
+}
+
+// DefaultOffsetMaxAge bounds how long a cached A/V measurement is
+// trusted. Long, because the skew comes from the broadcaster's encoder
+// and effectively never moves; the cap only exists so an equipment
+// change eventually gets picked up on its own.
+const DefaultOffsetMaxAge = 30 * 24 * time.Hour
+
 // Manager owns one HLS session per channel.
 type Manager struct {
 	Tuners      Acquirer
@@ -66,6 +81,24 @@ type Manager struct {
 	// added to the measured offset.
 	ProbeSeconds    float64
 	AudioOffsetBias float64
+
+	// Canonical maps a channel name or alias to the channel's canonical
+	// name. Sessions are keyed by the result, so /api/live/mx.m3u8 and
+	// /api/live/TOKYO%20MX1.m3u8 address one session instead of two
+	// aliases spawning two ffmpegs over the same output dir. Nil uses
+	// names verbatim.
+	Canonical func(string) string
+
+	// Offsets caches measured A/V skew across tunes. The ffprobe pass is
+	// the largest single component of channel-change latency (~5s), and
+	// the skew is a property of the broadcaster's mux rather than of the
+	// moment — so it is measured once per channel and reused. Nil probes
+	// every time (the pre-cache behaviour).
+	Offsets OffsetStore
+
+	// OffsetMaxAge re-probes a cached measurement older than this.
+	// 0 → DefaultOffsetMaxAge; negative → never expire.
+	OffsetMaxAge time.Duration
 
 	mu       sync.Mutex
 	sessions map[string]*Session
@@ -86,6 +119,55 @@ type openCall struct {
 	done chan struct{}
 	s    *Session
 	err  error
+}
+
+// key normalizes a requested channel name to its session key.
+func (m *Manager) key(channel string) string {
+	if m.Canonical == nil {
+		return channel
+	}
+	if c := m.Canonical(channel); c != "" {
+		return c
+	}
+	return channel
+}
+
+// cachedOffset returns the stored raw measurement for channel when one
+// exists and is fresh enough to trust. Cache trouble is never fatal:
+// a miss just means we measure again.
+func (m *Manager) cachedOffset(channel string) (float64, bool) {
+	if m.Offsets == nil {
+		return 0, false
+	}
+	rec, ok, err := m.Offsets.AudioOffsetFor(context.Background(), channel)
+	if err != nil {
+		slog.Warn("hls: reading cached A/V offset failed; will re-probe",
+			"channel", channel, "err", err)
+		return 0, false
+	}
+	if !ok {
+		return 0, false
+	}
+	maxAge := m.OffsetMaxAge
+	if maxAge == 0 {
+		maxAge = DefaultOffsetMaxAge
+	}
+	if maxAge > 0 && rec.Age() > maxAge {
+		slog.Info("hls: cached A/V offset is stale; re-probing",
+			"channel", channel, "age", rec.Age().Round(time.Hour), "max_age", maxAge)
+		return 0, false
+	}
+	return rec.OffsetS, true
+}
+
+func (m *Manager) storeOffset(channel string, rawOffset float64) {
+	if m.Offsets == nil {
+		return
+	}
+	if err := m.Offsets.PutAudioOffset(context.Background(), channel, rawOffset); err != nil {
+		slog.Warn("hls: caching A/V offset failed",
+			"channel", channel, "err", err)
+	}
 }
 
 func (m *Manager) probeSeconds() float64 {
@@ -114,6 +196,7 @@ func (m *Manager) Open(ctx context.Context, channel string) (*Session, error) {
 	if m.Tuners == nil || m.OutputRoot == "" || m.FFmpegBin == "" {
 		return nil, errors.New("hls: Tuners/OutputRoot/FFmpegBin required")
 	}
+	channel = m.key(channel)
 
 	m.mu.Lock()
 	if m.sessions == nil {
@@ -179,13 +262,24 @@ func (m *Manager) openSession(ctx context.Context, channel string) (*Session, er
 	_ = clearStaleSegments(dir)
 
 	// ISDB-T muxes interleave audio ahead of the first decodable video
-	// frame, so HLS otherwise comes up with a constant A/V skew. Sample
-	// the first audio + video PTS off the front of the stream and shift
-	// audio by their difference (mirrors legacy live_hls.py). The probe
-	// consumes a few seconds of lease.Sub; the main pump picks up where
-	// it leaves off. Failure is non-fatal — we just start uncorrected.
+	// frame, so HLS otherwise comes up with a constant A/V skew. Shift
+	// audio by the difference between the first audio and video PTS
+	// (mirrors legacy live_hls.py).
+	//
+	// Measuring costs an ffprobe pass over the head of the stream — the
+	// dominant term in channel-change latency — so a cached measurement
+	// is reused when there is one. Only the raw measurement is cached;
+	// AudioOffsetBias is applied here so config changes take effect
+	// without re-probing.
 	audioOffset := 0.0
-	if m.FFprobeBin != "" && m.probeSeconds() > 0 {
+	if raw, ok := m.cachedOffset(canonical); ok {
+		audioOffset = raw + m.AudioOffsetBias
+		slog.Info("hls: reusing cached A/V offset",
+			"channel", canonical, "offset_s", audioOffset)
+	} else if m.FFprobeBin != "" && m.probeSeconds() > 0 {
+		// The probe consumes a few seconds of lease.Sub; the main pump
+		// picks up where it leaves off. Failure is non-fatal — we just
+		// start uncorrected.
 		off, perr := probeAudioOffset(context.Background(), m.FFprobeBin, lease.Sub, m.probeSeconds())
 		if perr != nil {
 			slog.Warn("hls: A/V offset probe failed; starting without sync correction",
@@ -194,6 +288,7 @@ func (m *Manager) openSession(ctx context.Context, channel string) (*Session, er
 			audioOffset = off + m.AudioOffsetBias
 			slog.Info("hls: measured A/V offset",
 				"channel", canonical, "offset_s", audioOffset)
+			m.storeOffset(canonical, off)
 		}
 	}
 
@@ -211,7 +306,13 @@ func (m *Manager) openSession(ctx context.Context, channel string) (*Session, er
 		// limited). Keeps a long-running session from flooding the log.
 		"-hide_banner", "-loglevel", "error", "-nostats",
 		"-fflags", "+genpts+discardcorrupt",
-		"-probesize", "10M", "-analyzeduration", "10M",
+		// analyzeduration is in MICROseconds: the old 10M meant ffmpeg
+		// spent up to 10 *seconds* in find_stream_info before emitting
+		// anything, which measured as ~9.7s of the ~14s channel change
+		// (the tune itself is ~2.3s). The service PID tap carries one
+		// program with a known shape — mpeg2video + AAC (+ caption) —
+		// so a 1s window is plenty to identify it.
+		"-probesize", "5M", "-analyzeduration", "1M",
 		"-i", "pipe:0",
 		"-sn", "-dn",
 	)
@@ -226,7 +327,17 @@ func (m *Manager) openSession(ctx context.Context, channel string) (*Session, er
 		// 30p, superfast+zerolatency runs ~2.5× realtime on an Intel
 		// N100, and -g 60 keys every ~2s so segments (hls_time 2)
 		// each start on an IDR frame.
-		"-vf", "yadif=0",
+		//
+		// ISDB-T HD is coded 1440x1080 with *non-square* pixels
+		// (SAR 4:3 → DAR 16:9). Passing that through relies on the
+		// player honouring the SAR in the H.264 VUI, and hls.js/MSE
+		// does not do so reliably — the picture comes out horizontally
+		// squished. Normalize to square pixels instead, which yields
+		// the standard 1920x1080 for HD and leaves an already-square
+		// 1920x1080 or a 4:3 SD subchannel geometrically correct:
+		//   scale width by SAR (rounded to even), keep height, SAR 1:1.
+		// Deinterlace first — scaling interlaced fields would smear them.
+		"-vf", "yadif=0,scale=trunc(iw*sar/2)*2:ih,setsar=1",
 		"-c:v", "libx264", "-preset", "superfast", "-tune", "zerolatency",
 		"-b:v", "6M", "-maxrate", "7M", "-bufsize", "12M",
 		"-g", "60", "-pix_fmt", "yuv420p",
@@ -271,6 +382,7 @@ func (m *Manager) openSession(ctx context.Context, channel string) (*Session, er
 // Touch bumps last-seen without opening a new session. Returns nil
 // if no session exists for channel.
 func (m *Manager) Touch(channel string) *Session {
+	channel = m.key(channel)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if s, ok := m.sessions[channel]; ok && !s.closed {
@@ -297,8 +409,35 @@ func (m *Manager) LastOpened() *Session {
 	return s
 }
 
+// CloseOthers tears down every session except channel, returning the
+// channels it closed (canonical keys, sorted).
+//
+// This is what makes "change channel" work on a single adapter: two
+// live sessions never outrank each other, so the tune holding the
+// frontend has to be told to let go before the new one can start.
+func (m *Manager) CloseOthers(channel string) []string {
+	keep := m.key(channel)
+	m.mu.Lock()
+	var others []string
+	for ch := range m.sessions {
+		if ch != keep {
+			others = append(others, ch)
+		}
+	}
+	m.mu.Unlock()
+
+	sort.Strings(others)
+	for _, ch := range others {
+		slog.Info("hls: closing session to free the adapter",
+			"channel", ch, "switching_to", keep)
+		m.Close(ch)
+	}
+	return others
+}
+
 // Close tears down a specific session. Idempotent.
 func (m *Manager) Close(channel string) {
+	channel = m.key(channel)
 	m.mu.Lock()
 	s, ok := m.sessions[channel]
 	if !ok {
