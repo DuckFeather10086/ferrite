@@ -10,10 +10,13 @@
 //   POST /api/schedule                  create schedule
 //   DELETE /api/schedule/{id}           cancel schedule
 //   GET  /api/recordings                list recordings
-//
-// Future:
+//   POST /api/record                    start recording now
+//   POST /api/record/{id}/stop          stop an in-progress recording
 //   GET  /api/live/{channel}.m3u8       live HLS playlist
 //   GET  /api/live/{channel}/{seg}.ts   live HLS segment
+//   POST /api/live/{channel}/stop       tear down a live session
+//
+// Future:
 //   GET  /api/recordings/{id}/file      stream a recorded file
 package api
 
@@ -25,6 +28,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -37,6 +41,7 @@ import (
 
 	"github.com/DuckFeather10086/ferrite/internal/config"
 	"github.com/DuckFeather10086/ferrite/internal/hls"
+	"github.com/DuckFeather10086/ferrite/internal/recorder"
 	"github.com/DuckFeather10086/ferrite/internal/store"
 	"github.com/DuckFeather10086/ferrite/internal/tuner"
 )
@@ -45,10 +50,13 @@ import (
 // value with the fields you have — tests can leave Store / Tuners nil
 // and only exercise the static endpoints.
 type Deps struct {
-	Channels  *config.Channels
-	Store     *store.Store
-	Tuners    *tuner.Pool
-	HLS       *hls.Manager
+	Channels *config.Channels
+	Store    *store.Store
+	Tuners   *tuner.Pool
+	HLS      *hls.Manager
+	// Recorder serves the "record now" endpoints. Nil disables them
+	// (scheduled recordings still run — those go through the scheduler).
+	Recorder  *recorder.Manager
 	StartedAt time.Time
 	Version   string // build-time injected, optional
 	// Web is the embedded static UI (e.g. web.FS()). When non-nil it is
@@ -84,10 +92,16 @@ func NewRouter(d Deps) http.Handler {
 		r.Delete("/schedule/{id}", d.handleCancelSchedule)
 
 		r.Get("/recordings", d.handleListRecordings)
+		r.Post("/record", d.handleRecordNow)
+		r.Post("/record/{id}/stop", d.handleRecordStop)
+
+		r.Get("/av-offsets", d.handleListAVOffsets)
+		r.Delete("/av-offsets/{channel}", d.handleForgetAVOffset)
 
 		r.Get("/live/{channel}.m3u8", d.handleLivePlaylist)
 		r.Get("/live/{channel}/{segment}", d.handleLiveSegment)
 		r.Post("/live/{channel}/stop", d.handleLiveStop)
+		r.Post("/live/{channel}/switch", d.handleLiveSwitch)
 	})
 
 	// Static web UI: everything not matched above falls through to the
@@ -139,6 +153,10 @@ func (d Deps) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if d.Tuners != nil {
 		resp["adapters"] = d.Tuners.Status()
+	}
+	if d.Recorder != nil {
+		// Ad-hoc recordings only; scheduled ones are in /api/recordings.
+		resp["recording"] = d.Recorder.Active()
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -314,6 +332,140 @@ func (d Deps) handleListRecordings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, list)
 }
 
+// handleListAVOffsets exposes the cached A/V skew measurements. Mostly
+// a debugging window: if one channel's lip-sync looks wrong, this is
+// the number to blame, and DELETE forces a fresh measurement.
+func (d Deps) handleListAVOffsets(w http.ResponseWriter, r *http.Request) {
+	if d.Store == nil {
+		writeErr(w, http.StatusServiceUnavailable, "store not ready")
+		return
+	}
+	list, err := d.Store.ListAudioOffsets(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	type out struct {
+		Channel  string    `json:"channel"`
+		OffsetS  float64   `json:"offset_s"`
+		Measured time.Time `json:"measured"`
+	}
+	rows := make([]out, 0, len(list))
+	for _, a := range list {
+		rows = append(rows, out{Channel: a.Channel, OffsetS: a.OffsetS, Measured: a.Measured})
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
+func (d Deps) handleForgetAVOffset(w http.ResponseWriter, r *http.Request) {
+	if d.Store == nil {
+		writeErr(w, http.StatusServiceUnavailable, "store not ready")
+		return
+	}
+	channel := chi.URLParam(r, "channel")
+	if d.Channels != nil {
+		if ch := d.Channels.Find(channel); ch != nil {
+			channel = ch.Name
+		}
+	}
+	if err := d.Store.ForgetAudioOffset(r.Context(), channel); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type recordNowReq struct {
+	Channel string `json:"channel"`
+	Title   string `json:"title"`
+	// DurationS bounds the recording. 0 means open-ended — it runs until
+	// POST /api/record/{id}/stop, capped at recorder.MaxAdhocDuration.
+	DurationS int64 `json:"duration_s"`
+}
+
+// handleRecordNow starts recording immediately. Returns the recording
+// row id, which is also the handle for stopping it.
+//
+// 201 does not mean bytes are on disk: the tuner is acquired
+// asynchronously, and a failure lands in the row's state/error. The
+// upfront CanServe check only rejects the case we can already see is
+// hopeless, so the caller gets a clean 409 instead of a row that fails
+// a second later.
+func (d Deps) handleRecordNow(w http.ResponseWriter, r *http.Request) {
+	if d.Recorder == nil {
+		writeErr(w, http.StatusServiceUnavailable, "recorder not ready")
+		return
+	}
+	var req recordNowReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Channel == "" {
+		writeErr(w, http.StatusBadRequest, "channel required")
+		return
+	}
+
+	channel := req.Channel
+	var serviceID uint16
+	if d.Channels != nil {
+		ch := d.Channels.Find(req.Channel)
+		if ch == nil {
+			writeErr(w, http.StatusNotFound, "unknown channel "+req.Channel)
+			return
+		}
+		channel = ch.Name
+		serviceID = ch.ServiceID()
+	}
+
+	if d.Tuners != nil && !d.Tuners.CanServe(channel, tuner.PrioRecord) {
+		writeErr(w, http.StatusConflict,
+			"tuner busy: every adapter is held by a recording — stop one first")
+		return
+	}
+
+	// Name the file after what's on air when the caller didn't say.
+	title := req.Title
+	if title == "" && d.Store != nil && serviceID != 0 {
+		if e, err := d.Store.NowPlaying(r.Context(), serviceID, time.Now()); err == nil && e != nil {
+			title = e.Title
+		}
+	}
+
+	id, err := d.Recorder.Start(r.Context(), channel,
+		title, time.Duration(req.DurationS)*time.Second)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id":      id,
+		"channel": channel,
+		"title":   title,
+	})
+}
+
+func (d Deps) handleRecordStop(w http.ResponseWriter, r *http.Request) {
+	if d.Recorder == nil {
+		writeErr(w, http.StatusServiceUnavailable, "recorder not ready")
+		return
+	}
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	if err := d.Recorder.Stop(id); err != nil {
+		if errors.Is(err, recorder.ErrNotRecording) {
+			writeErr(w, http.StatusNotFound, "recording not in progress")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (d Deps) handleLivePlaylist(w http.ResponseWriter, r *http.Request) {
 	if d.HLS == nil {
 		writeErr(w, http.StatusServiceUnavailable, "hls not ready")
@@ -322,7 +474,7 @@ func (d Deps) handleLivePlaylist(w http.ResponseWriter, r *http.Request) {
 	channel := chi.URLParam(r, "channel")
 	s, err := d.HLS.Open(r.Context(), channel)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, err.Error())
+		writeTunerErr(w, err)
 		return
 	}
 	// ffmpeg writes stream.m3u8 only once the first segment completes —
@@ -393,6 +545,43 @@ func (d Deps) handleLiveStop(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleLiveSwitch is the whole "change channel" step: drop whatever
+// else is playing, tune this channel, and don't answer until its
+// playlist is on disk so the caller can hand the URL straight to a
+// player.
+//
+// A client can do this by hand (POST the old channel's /stop, then GET
+// the new .m3u8), but with a single adapter getting that order wrong
+// deadlocks on ErrNoAdapter — two live sessions have equal priority and
+// won't evict each other. One endpoint, one correct order.
+func (d Deps) handleLiveSwitch(w http.ResponseWriter, r *http.Request) {
+	channel := chi.URLParam(r, "channel")
+	if d.Channels != nil && d.Channels.Find(channel) == nil {
+		writeErr(w, http.StatusNotFound, "unknown channel "+channel)
+		return
+	}
+	if d.HLS == nil {
+		writeErr(w, http.StatusServiceUnavailable, "hls not ready")
+		return
+	}
+
+	closed := d.HLS.CloseOthers(channel)
+	s, err := d.HLS.Open(r.Context(), channel)
+	if err != nil {
+		writeTunerErr(w, err)
+		return
+	}
+	if err := waitForFile(r.Context(), s.PlaylistPath, 45*time.Second); err != nil {
+		writeErr(w, http.StatusGatewayTimeout, "stream did not start: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"channel":  s.Channel,
+		"playlist": "/api/live/" + url.PathEscape(s.Channel) + ".m3u8",
+		"closed":   closed,
+	})
+}
+
 func (d Deps) handleStreamM3U8(w http.ResponseWriter, r *http.Request) {
 	if d.HLS == nil {
 		writeErr(w, http.StatusServiceUnavailable, "hls not ready")
@@ -450,6 +639,17 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+// writeTunerErr maps a tune failure onto a status code: a busy tuner is
+// 409 (the caller can stop something and retry), anything else is a
+// real fault worth surfacing as 502.
+func writeTunerErr(w http.ResponseWriter, err error) {
+	if errors.Is(err, tuner.ErrNoAdapter) {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeErr(w, http.StatusBadGateway, err.Error())
 }
 
 func slogRequestLogger(next http.Handler) http.Handler {
