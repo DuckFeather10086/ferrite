@@ -15,4 +15,5 @@ web/tsconfig.tsbuildinfo
 .env
 *.log
 /isdbd
+/ferrite-tui
 /target/

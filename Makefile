@@ -41,6 +41,8 @@ go:
 	@echo "=== go build ==="
 	@export PATH="$${GOROOT:-/usr/local/go}/bin:$$PATH" && go build -o isdbd ./cmd/isdbd/
 	@test -x isdbd || (echo "ERROR: go build failed" && exit 1)
+	@export PATH="$${GOROOT:-/usr/local/go}/bin:$$PATH" && go build -o ferrite-tui ./cmd/ferrite-tui/
+	@test -x ferrite-tui || (echo "ERROR: tui build failed" && exit 1)
 
 # ── clean ─────────────────────────────────────────────────────────
 

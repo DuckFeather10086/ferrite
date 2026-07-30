@@ -29,7 +29,13 @@ dvb-rs stdout → b25-rs stdin → b25-rs stdout → fanout.Broadcaster
 
 ## Layout
 
-- `cmd/isdbd/` — entrypoint.
+- `cmd/isdbd/` — daemon entrypoint.
+- `cmd/ferrite-tui/` — terminal remote control (Bubble Tea). A pure REST
+  client with no TV state of its own, so it stays consistent with the web
+  UI. Runs on the machine you are sitting at (`--host` points it at the
+  tuner box) and spawns a local mpv for video; with no display it declines
+  to spawn and reports the stream URL instead, since over ssh the window
+  would open on the tuner box.
 - `internal/`:
   - `config/` — load channels.json (shared format with `dvb-rs`) + daemon TOML.
   - `proc/` — subprocess helpers: `setpgid`, kill-by-pgrp, stderr→slog.
