@@ -176,6 +176,24 @@ func (c *Client) Recordings(ctx context.Context) ([]Recording, error) {
 	return out, err
 }
 
+// DeleteRecording removes a recording and its file, reporting whether a
+// file was actually there to delete. A recording still in progress is
+// refused (409) until it is stopped.
+func (c *Client) DeleteRecording(ctx context.Context, id int64) (bool, error) {
+	var out struct {
+		FileDeleted bool `json:"file_deleted"`
+	}
+	err := c.do(ctx, http.MethodDelete, "/api/recordings/"+strconv.FormatInt(id, 10), nil, &out)
+	return out.FileDeleted, err
+}
+
+// RecordingFileURL is the absolute URL of a recording's TS. Absolute for
+// the same reason as PlaylistURL: the player runs here, the file is over
+// there. The endpoint honours Range, so mpv can seek in it.
+func (c *Client) RecordingFileURL(id int64) string {
+	return c.BaseURL + "/api/recordings/" + strconv.FormatInt(id, 10) + "/file"
+}
+
 // PlaylistURL is the absolute URL a player should open for channel.
 func (c *Client) PlaylistURL(channel string) string {
 	return c.BaseURL + "/api/live/" + url.PathEscape(channel) + ".m3u8"

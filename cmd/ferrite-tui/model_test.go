@@ -195,6 +195,140 @@ func TestRecordingsCursorClampsWhenListShrinks(t *testing.T) {
 	_ = m.View()
 }
 
+func withRecordings(m Model, recs ...Recording) Model {
+	m.view = viewRecordings
+	next, _ := m.Update(recordingsMsg{recordings: recs})
+	return next.(Model)
+}
+
+// Deleting unlinks a file, so it takes two keystrokes. The first only arms
+// the prompt — no request may leave until y.
+func TestDeleteAsksBeforeDeleting(t *testing.T) {
+	m := withRecordings(newTestModel(), Recording{ID: 42, State: "done", Channel: "mx"})
+
+	m, cmd := key(m, "d")
+	if cmd != nil {
+		t.Fatal("d alone must not issue a delete")
+	}
+	if m.pendingDelete != 42 {
+		t.Fatalf("pendingDelete = %d, want 42", m.pendingDelete)
+	}
+	if !strings.Contains(m.View(), "delete recording 42") {
+		t.Fatalf("the prompt is not on screen:\n%s", m.View())
+	}
+
+	m, cmd = key(m, "y")
+	if cmd == nil {
+		t.Fatal("y should issue the delete")
+	}
+	if m.pendingDelete != 0 {
+		t.Fatalf("pendingDelete = %d, want cleared", m.pendingDelete)
+	}
+}
+
+// Any other key cancels — and is swallowed, so answering the prompt with
+// "r" can't start a recording by accident.
+func TestDeleteConfirmSwallowsOtherKeys(t *testing.T) {
+	m := withRecordings(newTestModel(), Recording{ID: 42, State: "done"})
+	m = withChannels(m, "asahi")
+	m.view = viewRecordings
+
+	m, _ = key(m, "d")
+	m, cmd := key(m, "r")
+	if cmd != nil {
+		t.Fatal("the cancel keystroke must not also run a command")
+	}
+	if m.pendingDelete != 0 {
+		t.Fatal("pendingDelete should be cleared")
+	}
+	if m.message != "delete canceled" {
+		t.Fatalf("message = %q", m.message)
+	}
+}
+
+// d only means anything where a recording is visible; in the channel list
+// the cursor is on a channel.
+func TestDeleteIsInertInChannelsView(t *testing.T) {
+	m := withChannels(newTestModel(), "asahi")
+	m = withRecordings(m, Recording{ID: 42, State: "done"})
+	m.view = viewChannels
+
+	m, cmd := key(m, "d")
+	if cmd != nil || m.pendingDelete != 0 {
+		t.Fatalf("d armed a delete from the channels view: pending=%d", m.pendingDelete)
+	}
+}
+
+// The daemon refuses to delete a running recording; that refusal is the
+// actionable one, so it is shown verbatim.
+func TestDeleteConflictIsExplained(t *testing.T) {
+	m := withRecordings(newTestModel(), Recording{ID: 42, State: "recording"})
+	m.busy = "deleting recording 42"
+
+	err := &APIError{Status: http.StatusConflict, Message: "recording 42 is still running — POST /api/record/42/stop first"}
+	next, _ := m.Update(deleteRecMsg{id: 42, err: err})
+	m = next.(Model)
+
+	if !strings.HasPrefix(m.failure, "cannot delete:") ||
+		!strings.Contains(m.failure, "/stop") {
+		t.Fatalf("failure = %q", m.failure)
+	}
+	if m.busy != "" {
+		t.Fatalf("busy = %q, want cleared", m.busy)
+	}
+}
+
+// A row whose file was already gone still counts as deleted — the message
+// says which so the file isn't left looking lost.
+func TestDeleteReportsWhetherAFileWentWithIt(t *testing.T) {
+	m := withRecordings(newTestModel(), Recording{ID: 42, State: "done"})
+
+	next, _ := m.Update(deleteRecMsg{id: 42, fileDeleted: false})
+	got := next.(Model)
+	if got.failure != "" || !strings.Contains(got.message, "no file") {
+		t.Fatalf("message = %q failure = %q", got.message, got.failure)
+	}
+
+	next, _ = m.Update(deleteRecMsg{id: 42, fileDeleted: true})
+	got = next.(Model)
+	if !strings.Contains(got.message, "and its file") {
+		t.Fatalf("message = %q", got.message)
+	}
+}
+
+// In the recordings view enter plays the highlighted file — it must not
+// fall through to tuning whatever the channel cursor is on.
+func TestEnterInRecordingsViewPlaysTheFile(t *testing.T) {
+	m := withChannels(newTestModel(), "asahi")
+	m = withRecordings(m, Recording{ID: 7, State: "done", Channel: "mx", Title: "報道ステーション"})
+
+	m, cmd := key(m, "enter")
+	if cmd != nil {
+		t.Fatal("playing a file is local; no daemon request should be issued")
+	}
+	if m.busy != "" {
+		t.Fatalf("busy = %q — enter must not have started a tune", m.busy)
+	}
+	// No display in tests, so the URL is reported instead of spawned.
+	if !strings.Contains(m.message, "http://tuner.test:8010/api/recordings/7/file") {
+		t.Fatalf("message = %q, want the absolute file URL", m.message)
+	}
+}
+
+// An empty recording has nothing to play; say why rather than opening a
+// player on zero bytes.
+func TestPlayEmptyRecordingIsRefused(t *testing.T) {
+	var zero int64
+	m := withRecordings(newTestModel(), Recording{
+		ID: 8, State: "failed", SizeBytes: &zero, Error: "startup watchdog: no chunks within 15s",
+	})
+
+	m, _ = key(m, "enter")
+	if !strings.Contains(m.failure, "empty") || !strings.Contains(m.failure, "watchdog") {
+		t.Fatalf("failure = %q", m.failure)
+	}
+}
+
 func TestNowNextSplitsTheSchedule(t *testing.T) {
 	m := withChannels(newTestModel(), "asahi")
 	now := time.Now()

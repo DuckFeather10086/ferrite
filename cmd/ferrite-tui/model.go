@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -40,11 +41,15 @@ type Model struct {
 	recordings []Recording
 	recCursor  int
 
-	view    view
-	busy    string // in-flight long operation, shown in the status bar
-	frame   int    // animation frame for the busy indicator
-	message string
-	failure string
+	view view
+	// pendingDelete is the recording awaiting a y/n confirmation. Deleting
+	// unlinks the file, which is not undoable, so it never happens on a
+	// single keystroke. 0 means nothing is pending.
+	pendingDelete int64
+	busy          string // in-flight long operation, shown in the status bar
+	frame         int    // animation frame for the busy indicator
+	message       string
+	failure       string
 
 	width, height int
 	ready         bool
@@ -84,6 +89,11 @@ type stopRecMsg struct {
 type recordingsMsg struct {
 	recordings []Recording
 	err        error
+}
+type deleteRecMsg struct {
+	id          int64
+	fileDeleted bool
+	err         error
 }
 type tickMsg time.Time
 
@@ -148,6 +158,15 @@ func (m Model) stopRecording(id int64) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		return stopRecMsg{id: id, err: m.client.StopRecording(ctx, id)}
+	}
+}
+
+func (m Model) deleteRecording(id int64) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		fileDeleted, err := m.client.DeleteRecording(ctx, id)
+		return deleteRecMsg{id: id, fileDeleted: fileDeleted, err: err}
 	}
 }
 
@@ -269,12 +288,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.failure = ""
 		m.message = fmt.Sprintf("stopped recording %d", msg.id)
 		return m, tea.Batch(m.fetchStatus(), m.fetchRecordings())
+
+	case deleteRecMsg:
+		m.busy = ""
+		if msg.err != nil {
+			m.failure = deleteFailure(msg.err)
+			return m, m.fetchRecordings()
+		}
+		m.failure = ""
+		if msg.fileDeleted {
+			m.message = fmt.Sprintf("deleted recording %d and its file", msg.id)
+		} else {
+			// The row is gone either way; say which, so "where did my file
+			// go" has an answer.
+			m.message = fmt.Sprintf("deleted recording %d (no file was on disk)", msg.id)
+		}
+		return m, tea.Batch(m.fetchStatus(), m.fetchRecordings())
 	}
 
 	return m, nil
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// A pending delete swallows the next keystroke: only y confirms, and
+	// anything else cancels rather than falling through to a command the
+	// user thought they were answering a question with.
+	if m.pendingDelete != 0 {
+		id := m.pendingDelete
+		m.pendingDelete = 0
+		if msg.String() == "y" {
+			m.busy = fmt.Sprintf("deleting recording %d", id)
+			m.message, m.failure = "", ""
+			return m, m.deleteRecording(id)
+		}
+		m.message = "delete canceled"
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "q", "esc", "ctrl+c":
 		m.player.Stop()
@@ -289,13 +339,31 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.scheduleForSelectionIfNeeded()
 
 	case "enter":
+		if m.busy != "" {
+			return m, nil
+		}
+		// In the recordings view the cursor is on a recording, not a
+		// channel — enter plays that file instead of tuning whatever the
+		// channel list happened to be left on.
+		if m.view == viewRecordings {
+			return m.playSelectedRecording()
+		}
 		ch, ok := m.selected()
-		if !ok || m.busy != "" {
+		if !ok {
 			return m, nil
 		}
 		m.busy = "tuning " + ch.Name
 		m.message, m.failure = "", ""
 		return m, m.switchTo(ch.Name)
+
+	case "d":
+		rec, ok := m.selectedRecording()
+		if !ok || m.busy != "" {
+			return m, nil
+		}
+		m.pendingDelete = rec.ID
+		m.message, m.failure = "", ""
+		return m, nil
 
 	case "r":
 		ch, ok := m.selected()
@@ -359,6 +427,46 @@ func (m Model) scheduleForSelectionIfNeeded() tea.Cmd {
 	return m.fetchSchedule(ch.ServiceID)
 }
 
+// playSelectedRecording sends the highlighted recording to the local
+// player. The daemon serves the file over HTTP (Range included), so
+// nothing is copied here first — and no tuner is involved, so watching a
+// recording never interrupts live TV or another recording.
+func (m Model) playSelectedRecording() (tea.Model, tea.Cmd) {
+	rec, ok := m.selectedRecording()
+	if !ok {
+		return m, nil
+	}
+	if rec.SizeBytes != nil && *rec.SizeBytes == 0 {
+		m.failure = fmt.Sprintf("recording %d is empty", rec.ID)
+		if rec.Error != "" {
+			m.failure += ": " + rec.Error
+		}
+		return m, nil
+	}
+
+	url := m.client.RecordingFileURL(rec.ID)
+	label := fmt.Sprintf("rec %d %s", rec.ID, firstLine(rec.Title))
+	if err := m.player.PlayFile(label, url); err != nil {
+		switch {
+		case errors.Is(err, ErrNoDisplay):
+			m.message = "no display here — open: " + url
+		case errors.Is(err, ErrPlaybackDisabled):
+			m.message = url
+		default:
+			m.failure = "player: " + err.Error()
+		}
+		return m, nil
+	}
+	m.failure = ""
+	m.message = "playing " + label
+	if rec.State == "recording" {
+		// The endpoint serves the bytes written so far, so playback ends at
+		// whatever the file was when mpv opened it.
+		m.message += " (still recording — plays up to the current end)"
+	}
+	return m, nil
+}
+
 func (m Model) selected() (Channel, bool) {
 	if m.cursor < 0 || m.cursor >= len(m.channels) {
 		return Channel{}, false
@@ -366,15 +474,25 @@ func (m Model) selected() (Channel, bool) {
 	return m.channels[m.cursor], true
 }
 
+// selectedRecording is the highlighted row, and only in the recordings
+// view — the channel list has its own cursor, and acting on a recording
+// the user cannot see is how you delete the wrong one.
+func (m Model) selectedRecording() (Recording, bool) {
+	if m.view != viewRecordings {
+		return Recording{}, false
+	}
+	if m.recCursor < 0 || m.recCursor >= len(m.recordings) {
+		return Recording{}, false
+	}
+	return m.recordings[m.recCursor], true
+}
+
 // stopTarget picks which recording "R" ends: the selected row in the
 // recordings view, otherwise the most recently started active one.
 func (m Model) stopTarget() (int64, bool) {
 	if m.view == viewRecordings {
-		if m.recCursor >= 0 && m.recCursor < len(m.recordings) {
-			rec := m.recordings[m.recCursor]
-			if rec.State == "recording" {
-				return rec.ID, true
-			}
+		if rec, ok := m.selectedRecording(); ok && rec.State == "recording" {
+			return rec.ID, true
 		}
 		return 0, false
 	}
@@ -417,6 +535,16 @@ func recordFailure(err error) string {
 		return "cannot record: " + apiErr.Message
 	}
 	return "record: " + err.Error()
+}
+
+// deleteFailure surfaces the daemon's own text for the one refusal that is
+// actionable: a recording still in progress has to be stopped first.
+func deleteFailure(err error) string {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.Status == http.StatusConflict {
+		return "cannot delete: " + apiErr.Message
+	}
+	return "delete: " + err.Error()
 }
 
 func clamp(v, lo, hi int) int {
@@ -568,7 +696,7 @@ func (m Model) viewRecordings() string {
 		}
 	}
 	return b.String() + "\n" + m.renderStatusBar() + "\n" +
-		styleDim.Render("j/k select  R stop selected  l back  g refresh  q quit")
+		styleDim.Render("j/k select  ⏎ play  d delete  R stop selected  l back  g refresh  q quit")
 }
 
 func (m Model) renderStatusBar() string {
@@ -599,6 +727,10 @@ func (m Model) renderStatusBar() string {
 	bar := styleStatusBr.Render(strings.Join(parts, " │ "))
 
 	switch {
+	case m.pendingDelete != 0:
+		return bar + "\n" + styleFailure.Render(
+			fmt.Sprintf("delete recording %d and its file?  y / any other key",
+				m.pendingDelete))
 	case m.busy != "":
 		frame := string(busyFrames[m.frame%len(busyFrames)])
 		return bar + "\n" + frame + " " + m.busy + "…"

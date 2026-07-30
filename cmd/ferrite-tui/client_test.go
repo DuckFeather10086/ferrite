@@ -189,6 +189,31 @@ func TestStopRecordingAcceptsNoContent(t *testing.T) {
 	}
 }
 
+func TestDeleteRecordingReportsWhetherAFileWent(t *testing.T) {
+	c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/api/recordings/12" {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		io.WriteString(w, `{"id":12,"file_deleted":true}`)
+	})
+	fileDeleted, err := c.DeleteRecording(context.Background(), 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fileDeleted {
+		t.Fatal("file_deleted was not decoded")
+	}
+}
+
+// The player runs here and the file is on the daemon, so this URL has to be
+// absolute — the same trap PlaylistURL exists for.
+func TestRecordingFileURLIsAbsolute(t *testing.T) {
+	c := NewClient("http://tuner.lan:8010/")
+	if got := c.RecordingFileURL(7); got != "http://tuner.lan:8010/api/recordings/7/file" {
+		t.Fatalf("RecordingFileURL = %q", got)
+	}
+}
+
 // A daemon that answers with plain text (a proxy error page, say) must not
 // produce an empty, unactionable message.
 func TestNonJSONErrorBodyIsKept(t *testing.T) {

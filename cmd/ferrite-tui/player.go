@@ -46,6 +46,15 @@ var DefaultPlayerArgs = []string{
 	"--force-window=immediate",
 }
 
+// DefaultFileArgs play a finished recording. Deliberately *not* the
+// low-latency profile: that exists to stay near the live edge and shrinks
+// the cache mpv wants for seeking, which is the whole point of playing
+// back a file.
+var DefaultFileArgs = []string{
+	"--cache=yes",
+	"--force-window=immediate",
+}
+
 // HasDisplay reports whether a graphical session is available.
 func (p *Player) HasDisplay() bool {
 	env := p.Env
@@ -74,6 +83,17 @@ func (p *Player) Playing() string {
 
 // Play stops any current playback and starts channel from url.
 func (p *Player) Play(channel, url string) error {
+	return p.play(channel, url, p.argsFor(DefaultPlayerArgs))
+}
+
+// PlayFile plays a recording. label is what the UI shows as "playing";
+// it is not a channel name, so nothing matches it against the channel
+// list.
+func (p *Player) PlayFile(label, url string) error {
+	return p.play(label, url, p.argsFor(DefaultFileArgs))
+}
+
+func (p *Player) play(label, url string, playerArgs []string) error {
 	if p.Bin == "" {
 		return ErrPlaybackDisabled
 	}
@@ -83,7 +103,7 @@ func (p *Player) Play(channel, url string) error {
 
 	p.Stop()
 
-	args := append([]string{}, p.playerArgs()...)
+	args := append([]string{}, playerArgs...)
 	args = append(args, url)
 	cmd := exec.Command(p.Bin, args...)
 	// Own process group: killing the group takes any helper mpv spawned
@@ -96,7 +116,7 @@ func (p *Player) Play(channel, url string) error {
 	go func() { _ = cmd.Wait() }()
 
 	p.mu.Lock()
-	p.cmd, p.channel = cmd, channel
+	p.cmd, p.channel = cmd, label
 	p.mu.Unlock()
 	return nil
 }
@@ -115,9 +135,11 @@ func (p *Player) Stop() {
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 }
 
-func (p *Player) playerArgs() []string {
+// argsFor prefers an explicit Args override; otherwise the profile that
+// suits what is being played.
+func (p *Player) argsFor(def []string) []string {
 	if p.Args != nil {
 		return p.Args
 	}
-	return DefaultPlayerArgs
+	return def
 }

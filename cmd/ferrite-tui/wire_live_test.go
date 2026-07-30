@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"os"
 	"testing"
 	"time"
@@ -56,7 +58,39 @@ func TestLiveWireTypes(t *testing.T) {
 		t.Log("no channel had now-playing data (empty EPG?)")
 	}
 
-	if _, err := c.Recordings(ctx); err != nil {
+	recs, err := c.Recordings(ctx)
+	if err != nil {
 		t.Fatalf("recordings: %v", err)
+	}
+	t.Logf("recordings: %d", len(recs))
+
+	// The file endpoint, without downloading a whole recording: one Range
+	// request proves the URL resolves and that seeking will work, which is
+	// what playback from the TUI depends on.
+	for _, rec := range recs {
+		if rec.State != "done" || rec.SizeBytes == nil || *rec.SizeBytes == 0 {
+			continue
+		}
+		url := c.RecordingFileURL(rec.ID)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Range", "bytes=0-187")
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", url, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusPartialContent {
+			t.Fatalf("%s: %d, want 206 (Range unsupported?)", url, resp.StatusCode)
+		}
+		if len(body) != 188 || body[0] != 0x47 {
+			t.Fatalf("%s: %d bytes, first = %#x, want 188 starting with a TS sync byte",
+				url, len(body), body[0])
+		}
+		t.Logf("file endpoint ok: recording %d, %d bytes on disk", rec.ID, *rec.SizeBytes)
+		break
 	}
 }
