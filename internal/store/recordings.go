@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -94,10 +95,14 @@ func (s *Store) FinalizeRecording(ctx context.Context, id int64, end time.Time, 
 	return err
 }
 
+// recordingColumns is shared by every read so the scan order below stays
+// valid for all of them.
+const recordingColumns = `id, schedule_id, channel, COALESCE(title,''),
+               start_utc, end_utc, path, size_bytes, state, COALESCE(error,'')`
+
 func (s *Store) ListRecordings(ctx context.Context) ([]Recording, error) {
 	rows, err := s.db.QueryContext(ctx, `
-        SELECT id, schedule_id, channel, COALESCE(title,''),
-               start_utc, end_utc, path, size_bytes, state, COALESCE(error,'')
+        SELECT `+recordingColumns+`
         FROM recordings
         ORDER BY start_utc DESC
     `)
@@ -108,22 +113,62 @@ func (s *Store) ListRecordings(ctx context.Context) ([]Recording, error) {
 
 	var out []Recording
 	for rows.Next() {
-		var (
-			r       Recording
-			startU  int64
-			endU    sql.NullInt64
-			state   string
-		)
-		if err := rows.Scan(&r.ID, &r.ScheduleID, &r.Channel, &r.Title,
-			&startU, &endU, &r.Path, &r.SizeBytes, &state, &r.Error); err != nil {
+		r, err := scanRecording(rows)
+		if err != nil {
 			return nil, err
 		}
-		r.Start = time.Unix(startU, 0).UTC()
-		if endU.Valid {
-			r.End = sql.NullTime{Time: time.Unix(endU.Int64, 0).UTC(), Valid: true}
-		}
-		r.State = RecordingState(state)
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// GetRecording returns one recording, or (nil, nil) when no such row
+// exists — "not found" is an ordinary answer here, not a failure.
+func (s *Store) GetRecording(ctx context.Context, id int64) (*Recording, error) {
+	row := s.db.QueryRowContext(ctx, `
+        SELECT `+recordingColumns+`
+        FROM recordings WHERE id = ?
+    `, id)
+	r, err := scanRecording(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// DeleteRecording removes the row and reports whether one was actually
+// there. It does not touch the file on disk — the caller owns that,
+// because only it knows which paths it is willing to unlink.
+func (s *Store) DeleteRecording(ctx context.Context, id int64) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM recordings WHERE id = ?`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// rowScanner covers both *sql.Row and *sql.Rows.
+type rowScanner interface{ Scan(dest ...any) error }
+
+func scanRecording(sc rowScanner) (Recording, error) {
+	var (
+		r      Recording
+		startU int64
+		endU   sql.NullInt64
+		state  string
+	)
+	if err := sc.Scan(&r.ID, &r.ScheduleID, &r.Channel, &r.Title,
+		&startU, &endU, &r.Path, &r.SizeBytes, &state, &r.Error); err != nil {
+		return Recording{}, err
+	}
+	r.Start = time.Unix(startU, 0).UTC()
+	if endU.Valid {
+		r.End = sql.NullTime{Time: time.Unix(endU.Int64, 0).UTC(), Valid: true}
+	}
+	r.State = RecordingState(state)
+	return r, nil
 }

@@ -198,3 +198,68 @@ func TestRecordings_RoundTrip(t *testing.T) {
 		t.Fatal("End/SizeBytes not set after Finalize")
 	}
 }
+
+func TestRecordings_GetAndDelete(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+
+	start := time.Now().UTC().Truncate(time.Second)
+	id, err := s.CreateRecording(ctx, Recording{
+		Channel: "mx",
+		Title:   "報道ステーション",
+		Start:   start,
+		Path:    "/var/recordings/2026-07-30/mx_2130.ts",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec, err := s.GetRecording(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec == nil {
+		t.Fatal("GetRecording returned nil for a row that exists")
+	}
+	if rec.Channel != "mx" || rec.Title != "報道ステーション" ||
+		rec.Path != "/var/recordings/2026-07-30/mx_2130.ts" ||
+		rec.State != RecordingStateRecording || !rec.Start.Equal(start) {
+		t.Fatalf("rec = %+v", rec)
+	}
+	if rec.End.Valid || rec.SizeBytes.Valid {
+		t.Fatalf("unfinalized row has End/SizeBytes: %+v", rec)
+	}
+
+	// A missing row is an ordinary answer, not an error — callers 404 on it.
+	missing, err := s.GetRecording(ctx, id+999)
+	if err != nil {
+		t.Fatalf("GetRecording(missing): %v", err)
+	}
+	if missing != nil {
+		t.Fatalf("GetRecording(missing) = %+v, want nil", missing)
+	}
+
+	deleted, err := s.DeleteRecording(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !deleted {
+		t.Fatal("DeleteRecording reported nothing deleted")
+	}
+	// The second delete must report false so the API can answer 404
+	// instead of pretending it removed something.
+	deleted, err = s.DeleteRecording(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted {
+		t.Fatal("DeleteRecording deleted the same row twice")
+	}
+	list, err := s.ListRecordings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("rows after delete: %+v", list)
+	}
+}
