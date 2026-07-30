@@ -172,6 +172,27 @@ mid-recording finalizing as 'done'.
   starved live HLS for minutes at a time (the first `GET /api/live/{ch}`
   after boot 404'd). Code that needs the adapter without a fanout takes
   a `Pool.Reserve` instead of spawning dvb-rs itself.
+- **EPG covers a mux, not a channel.** `dvb-rs epg` taps both EIT PIDs —
+  0x0012, plus **0x0027** for one-seg / 携帯 services, whose guide ARIB
+  STD-B10 puts on its own PID — and returns every service in the tuned
+  transport stream, each event carrying its own `service_id`. Two
+  consequences: `epg.Parse` files events by that field, never by the
+  channel the pass asked for, and `epg_channels` wants **one entry per
+  distinct FREQUENCY** (the refresher skips a channel whose mux it already
+  covered this pass). Services still empty after a pass are data services
+  (`Gガイド`) or simulcast subchannels the broadcaster only publishes
+  present/following for — the broadcast, not a bug.
+- **A PAT entry is not necessarily a channel.** `515.14MHz#23864` was in
+  the PAT (so `dvbr tune` accepted it and tapped 11 PIDs) but absent from
+  the SDT, had no EIT, and delivered zero bytes — it has been dropped. Let
+  the SDT decide what belongs in `channels.json`; the runtime watchdogs
+  (`recorder` startup 15s, dvb-rs `DVR_STALL_TIMEOUT` 30s) are the backstop
+  for anything that locks and then delivers nothing.
+- **`dvb-rs scan` without `--merge` writes only the mux it scanned** and
+  `--output` defaults to `channels.json`, so a bare `scan` used to replace a
+  whole curated list. It now refuses when the target is an existing channel
+  list (`--force` overrides). Auditing means scanning to a scratch path and
+  diffing, or `--merge`.
 - **`name` is the identifier; `display_name` is the label.** Every request
   takes `name`. What a UI *shows* is `config.Channel.DisplayName()`, served
   as `display_name` on `/api/channels`, because `channels.json` mixes three

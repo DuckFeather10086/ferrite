@@ -1,6 +1,66 @@
 # Handoff
 
-## 2026-07-30 (last) — channel labels: `display_name`
+## 2026-07-30 (last) — EPG coverage 9 → 38 services, and a list that matches the air
+
+Reported: "quite a lot of channels still have no EPG, and what is
+`515.14MHz#23864`?" Both were real, and neither was what it looked like.
+
+**Why the guide was empty.** `dvb-rs epg` filtered EIT sections to the
+service named on the command line, and `epg.Parse` stamped every event with
+that service. But EIT actual-TS describes the *whole* transport stream: the
+tune was already paying for a mux's worth of guide and throwing all but one
+service away. Now the harvest keeps every service, each event carries its
+own `service_id`, and the ingest files by it. Two dedup keys had to widen
+with that — sections by (service, table, section), since section numbering
+restarts per service and table, and events by (service, event), since
+event_id is unique only within a service.
+
+**One-seg needed a second PID.** ARIB STD-B10 puts the guide for
+partial-reception (ワンセグ / 携帯) services on **PID 0x0027**, not 0x0012.
+That single omission was every one-seg service's empty schedule. Both PIDs
+are tapped now, one assembler each (continuity counters are per PID).
+
+**`epg_channels` is now one entry per mux**, and gained the two frequencies
+nobody had ever scanned (473.14 J：COM, 485.14 テレ玉). The refresher skips a
+channel whose frequency it already covered this pass — a second entry on
+one mux just re-collects the same EIT for another minute of tuner time.
+
+Result on this box: **38 of 39 services carry a guide, up from 9 of 32**;
+10562 events. The one holdout is `Gガイド` (sid 1183), which is a data
+service broadcasting guide data *for other receivers* — it has no
+programmes of its own. Subchannels that simulcast their parent legitimately
+carry only 2–10 events; that is what the broadcaster sends.
+
+**What `515.14MHz#23864` was.** Not a dead mux — 515.14 is the TOKYO MX
+transport and it is healthy (1624 events on MX1). Service 23864 was in the
+**PAT**, which is why `dvbr tune` accepted it and started 11 PID taps, but
+absent from the **SDT**, so it had no name (hence the placeholder) and no
+EIT — and its PIDs delivered **zero bytes in 12 seconds**. Dropped. The
+rule going forward: let the SDT decide what is a channel; the runtime
+watchdogs (recorder startup 15s, dvb-rs `DVR_STALL_TIMEOUT` 30s) already
+handle "locks, then delivers nothing" by failing loudly.
+
+**The list was also missing real services.** An audit of all ten muxes
+against their SDT found eight on air but absent from `channels.json`:
+フジテレビ ×3 more, 日テレ2, 日本テレビ_2, NHK総合2東京, NHK携帯G東京,
+tvkワンセグ2. Added, with tuning maps derived from a sibling on the same
+frequency (every DVBv5 key except SERVICE_ID belongs to the mux) and names
+from the SDT, `_2`/`_3`-suffixed where they would otherwise collide with an
+earlier record's name *or* alias. The three 「臨時」 event-only services were
+left out on purpose: real SDT entries, but empty except during special
+broadcasts.
+
+### Near-miss worth remembering
+
+While investigating I ran `dvbr scan --frequency 515142857` with no `-o`.
+`--output` defaults to `channels.json` and a non-`--merge` scan writes
+*only* the transport it scanned — so a 32-record curated list became 5 bare
+records. Recovered with `git checkout channels.json`, which only worked
+because it was committed. `scan` now **refuses** to overwrite an existing
+channel list and names the three ways forward (`--merge`, `-o` elsewhere,
+`--force`). The old docs' `scan -o channels.json` example was a loaded gun.
+
+## 2026-07-30 (later) — channel labels: `display_name`
 
 Reported from the TUI: "didn't we fix the mojibake channel list?" The
 `scan --merge` pass on 2026-07-30 put the real broadcast names into
