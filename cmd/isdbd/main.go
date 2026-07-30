@@ -106,21 +106,39 @@ func run(cfgPath, logLevel string) error {
 		FFprobeBin:      cfg.FFprobeBin,
 		ProbeSeconds:    cfg.ProbeSeconds,
 		AudioOffsetBias: cfg.AudioOffsetBias,
+		// Persist the measured A/V skew so a channel only pays the
+		// ~5s ffprobe pass once, not on every tune.
+		Offsets: st,
+		Canonical: func(name string) string {
+			if ch := channels.Find(name); ch != nil {
+				return ch.Name
+			}
+			return name
+		},
 	}
+
+	ctx, stop := signal.NotifyContext(context.Background(),
+		syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Ad-hoc ("record now") recordings outlive the HTTP request that
+	// started them. Base is deliberately *not* the signal context: on
+	// SIGTERM that would cancel the job before StopAllAndWait below can
+	// ask it to stop gracefully, and the row would land as 'failed' with
+	// its bytes already on disk. Shutdown reaches these jobs only
+	// through StopAllAndWait.
+	adhoc := &recorder.Manager{Runner: recRunner, Base: context.Background()}
 
 	handler := api.NewRouter(api.Deps{
 		Channels:  channels,
 		Store:     st,
 		Tuners:    tunerPool,
 		HLS:       hlsMgr,
+		Recorder:  adhoc,
 		StartedAt: time.Now(),
 		Version:   version,
 		Web:       web.FS(),
 	})
-
-	ctx, stop := signal.NotifyContext(context.Background(),
-		syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	go func() {
 		if err := sched.Run(ctx); err != nil && ctx.Err() == nil {
@@ -146,6 +164,10 @@ func run(cfgPath, logLevel string) error {
 			Channels:     channels,
 			ChannelNames: cfg.EPGChannels,
 			Store:        st,
+			// Route EPG through the pool at background priority: live
+			// viewing and recordings evict it instead of dying on dvbr's
+			// flock (which is what starved live HLS before).
+			Tuners: tunerPool,
 		}
 		go func() {
 			if err := refresher.Run(ctx); err != nil && ctx.Err() == nil {
@@ -187,6 +209,12 @@ func run(cfgPath, logLevel string) error {
 	case <-ctx.Done():
 		slog.Info("shutdown signal received", "sig", ctx.Err())
 	}
+
+	// Let in-flight "record now" jobs close their file and write their
+	// row before the store goes away (deferred st.Close runs after this
+	// function returns). Without the wait the row stays stuck in state
+	// 'recording' forever.
+	adhoc.StopAllAndWait(5 * time.Second)
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
