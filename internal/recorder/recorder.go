@@ -292,10 +292,27 @@ func slugify(s string) string {
 	s = strings.TrimSpace(s)
 	s = slugSubst.ReplaceAllString(s, "_")
 	s = strings.Trim(s, "_")
-	if len(s) > 80 {
-		s = s[:80]
+	return strings.Trim(truncateRunes(s, 80), "_")
+}
+
+// truncateRunes cuts s to at most maxBytes, on a rune boundary.
+//
+// Programme titles are Japanese, so a plain s[:maxBytes] lands in the
+// middle of a multi-byte sequence and the filename ends in an invalid
+// byte — which then travels into the download's Content-Disposition and
+// anywhere else the name is displayed.
+func truncateRunes(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
 	}
-	return s
+	cut := 0
+	for i := range s { // rune start offsets
+		if i > maxBytes {
+			break
+		}
+		cut = i
+	}
+	return s[:cut]
 }
 
 func sanitize(s string) string {

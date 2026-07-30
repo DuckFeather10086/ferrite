@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/DuckFeather10086/ferrite/internal/config"
 	"github.com/DuckFeather10086/ferrite/internal/store"
@@ -266,6 +267,31 @@ func TestRunner_RespectsLeadIn(t *testing.T) {
 	recs, _ := st.ListRecordings(context.Background())
 	if recs[0].State != store.RecordingStateDone {
 		t.Fatalf("state: %s", recs[0].State)
+	}
+}
+
+// A long Japanese title is the normal case, and the filename it produces
+// has to stay valid UTF-8 — it ends up in a download's
+// Content-Disposition, in the web UI and in a shell.
+func TestNamePath_TruncatesOnRuneBoundaries(t *testing.T) {
+	r := &Runner{StorageRoot: "/var"}
+	title := strings.Repeat("報道ステーション", 20) // 3 bytes per rune, well over the cap
+	name := filepath.Base(r.namePath(Job{Channel: "asahi", Title: title}))
+
+	if !utf8.ValidString(name) {
+		t.Fatalf("filename is not valid UTF-8: %q", name)
+	}
+	if len(name) > 80+len("asahi_0000_.ts") {
+		t.Fatalf("filename not truncated: %q (%d bytes)", name, len(name))
+	}
+	if !strings.HasSuffix(name, ".ts") || !strings.HasPrefix(name, "asahi_") {
+		t.Fatalf("filename lost its shape: %q", name)
+	}
+
+	// A title that is exactly at the limit must survive whole.
+	short := "報道ステーション"
+	if got := slugify(short); got != short {
+		t.Fatalf("slugify(%q) = %q", short, got)
 	}
 }
 
