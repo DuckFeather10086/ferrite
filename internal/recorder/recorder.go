@@ -40,8 +40,12 @@ const (
 
 // Acquirer is the seam between Runner and a real tuner.Pool. Tests
 // pass a hand-rolled implementation backed by a fake tuner.
+//
+// Recordings claim the adapter at tuner.PrioRecord: with a single
+// tuner, a due recording evicts live viewing (a missed recording is
+// unrecoverable; interrupted playback is a nuisance).
 type Acquirer interface {
-	Acquire(ctx context.Context, channel string) (*tuner.Lease, error)
+	AcquireAt(ctx context.Context, channel string, prio tuner.Priority) (*tuner.Lease, error)
 }
 
 // Runner executes recording jobs.
@@ -62,6 +66,18 @@ type Job struct {
 	End        time.Time
 	Lead       time.Duration
 	Trail      time.Duration
+
+	// OnStart, when non-nil, is called with the new recording row's id
+	// as soon as it exists — before the tuner is acquired. Callers that
+	// need to address the job later (stop it, show it in a UI) get their
+	// handle here; Run itself only returns an error.
+	OnStart func(recordingID int64)
+
+	// Stop, when non-nil, requests a graceful early finish. Closing it
+	// ends the recording and finalizes the row as 'done' (as opposed to
+	// canceling ctx, which finalizes as 'failed') — provided at least
+	// one chunk made it to disk. This is the "stop recording" button.
+	Stop <-chan struct{}
 }
 
 // Run executes j synchronously. The recording row is created up
@@ -90,6 +106,9 @@ func (r *Runner) Run(ctx context.Context, j Job) error {
 	if err != nil {
 		return fmt.Errorf("recorder: create row: %w", err)
 	}
+	if j.OnStart != nil {
+		j.OnStart(recID)
+	}
 
 	// Finalize the row no matter how we return.
 	finalState := store.RecordingStateFailed
@@ -117,7 +136,7 @@ func (r *Runner) Run(ctx context.Context, j Job) error {
 		}
 	}
 
-	lease, err := r.Tuners.Acquire(ctx, j.Channel)
+	lease, err := r.Tuners.AcquireAt(ctx, j.Channel, tuner.PrioRecord)
 	if err != nil {
 		finalErr = fmt.Sprintf("acquire: %v", err)
 		return err
@@ -163,8 +182,45 @@ func (r *Runner) Run(ctx context.Context, j Job) error {
 				endActual = time.Now().UTC()
 				return nil
 			}
+			// A stop request racing a canceled context — process
+			// shutdown signals both at once and select picks either.
+			// Honour the stop: bytes on disk are a recording.
+			if signaled(j.Stop) && gotFirst {
+				slog.Info("recorder: stopped during shutdown",
+					"id", recID, "bytes", bytesWritten)
+				finalState = store.RecordingStateDone
+				endActual = time.Now().UTC()
+				return nil
+			}
 			finalErr = "canceled"
 			return deadlineCtx.Err()
+
+		case <-j.Stop:
+			// Operator pressed stop. Whatever is on disk is a real
+			// recording, so this is 'done', not 'failed'.
+			if !gotFirst {
+				finalErr = "stopped before any data was written"
+				return errors.New(finalErr)
+			}
+			slog.Info("recorder: stopped by request",
+				"id", recID, "bytes", bytesWritten)
+			finalState = store.RecordingStateDone
+			endActual = time.Now().UTC()
+			return nil
+
+		case <-lease.Preempted():
+			// A higher-priority claim took the adapter. Sub.Ch closes as
+			// well, but naming the cause beats "source closed".
+			if !gotFirst {
+				finalErr = "preempted before any data was written"
+				return errors.New(finalErr)
+			}
+			slog.Warn("recorder: preempted mid-recording",
+				"id", recID, "bytes", bytesWritten)
+			finalState = store.RecordingStateDone
+			finalErr = "truncated: adapter preempted by a higher-priority claim"
+			endActual = time.Now().UTC()
+			return nil
 
 		case chunk, ok := <-lease.Sub.Ch:
 			if !ok {
@@ -200,6 +256,20 @@ func (r *Runner) Run(ctx context.Context, j Job) error {
 				return errors.New(finalErr)
 			}
 		}
+	}
+}
+
+// signaled reports whether ch is already closed, without blocking. A
+// nil channel is never signaled.
+func signaled(ch <-chan struct{}) bool {
+	if ch == nil {
+		return false
+	}
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
 	}
 }
 
