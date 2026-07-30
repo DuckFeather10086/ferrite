@@ -11,15 +11,13 @@
 //	POST /api/schedule                  create schedule
 //	DELETE /api/schedule/{id}           cancel schedule
 //	GET  /api/recordings                list recordings
+//	GET  /api/recordings/{id}/file      download/stream a recorded file
+//	DELETE /api/recordings/{id}         delete a recording and its file
 //	POST /api/record                    start recording now
 //	POST /api/record/{id}/stop          stop an in-progress recording
 //	GET  /api/live/{channel}.m3u8       live HLS playlist
 //	GET  /api/live/{channel}/{seg}.ts   live HLS segment
 //	POST /api/live/{channel}/stop       tear down a live session
-//
-// Future:
-//
-//	GET  /api/recordings/{id}/file      stream a recorded file
 package api
 
 import (
@@ -58,9 +56,14 @@ type Deps struct {
 	HLS      *hls.Manager
 	// Recorder serves the "record now" endpoints. Nil disables them
 	// (scheduled recordings still run — those go through the scheduler).
-	Recorder  *recorder.Manager
-	StartedAt time.Time
-	Version   string // build-time injected, optional
+	Recorder *recorder.Manager
+	// StorageRoot is the daemon's storage_root. Recording files are served
+	// (and deleted) only from inside it, so a bad `path` column can't turn
+	// the download endpoint into an arbitrary-file read. Empty skips that
+	// check — leave it unset only in tests that never touch files.
+	StorageRoot string
+	StartedAt   time.Time
+	Version     string // build-time injected, optional
 	// Web is the embedded static UI (e.g. web.FS()). When non-nil it is
 	// served for all non-/api routes with an index.html SPA fallback;
 	// nil disables UI serving (tests, headless deployments).
@@ -94,6 +97,8 @@ func NewRouter(d Deps) http.Handler {
 		r.Delete("/schedule/{id}", d.handleCancelSchedule)
 
 		r.Get("/recordings", d.handleListRecordings)
+		r.Get("/recordings/{id}/file", d.handleRecordingFile)
+		r.Delete("/recordings/{id}", d.handleDeleteRecording)
 		r.Post("/record", d.handleRecordNow)
 		r.Post("/record/{id}/stop", d.handleRecordStop)
 

@@ -130,14 +130,17 @@ func run(cfgPath, logLevel string) error {
 	adhoc := &recorder.Manager{Runner: recRunner, Base: context.Background()}
 
 	handler := api.NewRouter(api.Deps{
-		Channels:  channels,
-		Store:     st,
-		Tuners:    tunerPool,
-		HLS:       hlsMgr,
-		Recorder:  adhoc,
-		StartedAt: time.Now(),
-		Version:   version,
-		Web:       web.FS(),
+		Channels: channels,
+		Store:    st,
+		Tuners:   tunerPool,
+		HLS:      hlsMgr,
+		Recorder: adhoc,
+		// Bounds which files /api/recordings/{id}/file will serve and
+		// DELETE will unlink — same root the recorder writes under.
+		StorageRoot: cfg.StorageRoot,
+		StartedAt:   time.Now(),
+		Version:     version,
+		Web:         web.FS(),
 	})
 
 	go func() {
