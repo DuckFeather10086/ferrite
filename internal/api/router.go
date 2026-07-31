@@ -15,12 +15,14 @@
 //	DELETE /api/recordings/{id}         delete a recording and its file
 //	POST /api/record                    start recording now
 //	POST /api/record/{id}/stop          stop an in-progress recording
-//	GET  /api/live/{channel}.m3u8       live HLS playlist
+//	GET  /stream.m3u8                   live HLS, whatever is tuned
+//	GET  /api/live/{channel}.m3u8       live HLS playlist for one channel
 //	GET  /api/live/{channel}/{seg}.ts   live HLS segment
 //	POST /api/live/{channel}/stop       tear down a live session
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -41,10 +43,20 @@ import (
 
 	"github.com/DuckFeather10086/ferrite/internal/config"
 	"github.com/DuckFeather10086/ferrite/internal/hls"
+	"github.com/DuckFeather10086/ferrite/internal/netaddr"
 	"github.com/DuckFeather10086/ferrite/internal/recorder"
 	"github.com/DuckFeather10086/ferrite/internal/store"
 	"github.com/DuckFeather10086/ferrite/internal/tuner"
 )
+
+// StreamPath is the one live URL clients are told about. There is
+// deliberately only one: a bookmark must not have to change when the channel
+// does. Reported on /api/status as "stream".
+const StreamPath = "/stream.m3u8"
+
+// livePrefix is where per-channel playlists and segments live, relative to
+// the daemon root (no leading slash — see rebaseSegments).
+const livePrefix = "api/live/"
 
 // Deps is what the router needs from the rest of the daemon. Pass a
 // value with the fields you have — tests can leave Store / Tuners nil
@@ -62,8 +74,13 @@ type Deps struct {
 	// the download endpoint into an arbitrary-file read. Empty skips that
 	// check — leave it unset only in tests that never touch files.
 	StorageRoot string
-	StartedAt   time.Time
-	Version     string // build-time injected, optional
+	// HTTPPort is the port this daemon listens on. /api/status reports the
+	// addresses it can be reached at, and only the daemon can: a remote is
+	// looking at its *own* interfaces, and a phone is looking at a screen.
+	// 0 omits the list.
+	HTTPPort  int
+	StartedAt time.Time
+	Version   string // build-time injected, optional
 	// Web is the embedded static UI (e.g. web.FS()). When non-nil it is
 	// served for all non-/api routes with an index.html SPA fallback;
 	// nil disables UI serving (tests, headless deployments).
@@ -81,10 +98,9 @@ func NewRouter(d Deps) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 
-	// /stream.m3u8 is a convenience shortcut that serves the most
-	// recently opened/touched HLS session. Bookmark this in VLC/iPad
-	// for one-tap live TV without browsing to the web UI.
-	r.Get("/stream.m3u8", d.handleStreamM3U8)
+	// The one live URL: bookmark it in VLC or on an iPad and it plays
+	// whatever is tuned, now and after the next channel change.
+	r.Get(StreamPath, d.handleStreamM3U8)
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/status", d.handleStatus)
@@ -157,6 +173,15 @@ func (d Deps) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"version": d.Version,
 		"started": d.StartedAt.Format(time.RFC3339),
 		"uptime":  time.Since(d.StartedAt).Round(time.Second).String(),
+		// The single live URL, relative to any of the addresses below.
+		// One playlist, whatever is tuned — see handleStreamM3U8.
+		"stream": StreamPath,
+	}
+	if d.HTTPPort > 0 {
+		// Recomputed per request rather than cached at boot: an interface
+		// can come up later (tailscaled starting after the daemon, DHCP
+		// renewing into a new subnet), and this costs one netlink read.
+		resp["addresses"] = netaddr.Addresses(d.HTTPPort)
 	}
 	if d.Tuners != nil {
 		resp["adapters"] = d.Tuners.Status()
@@ -589,12 +614,23 @@ func (d Deps) handleLiveSwitch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"channel":  s.Channel,
-		"playlist": "/api/live/" + url.PathEscape(s.Channel) + ".m3u8",
+		"channel": s.Channel,
+		// Both URLs now serve this channel. "stream" is the one to hand a
+		// player: it is stable across channel changes. "playlist" addresses
+		// this channel specifically, which is what the web UI's <video> needs.
+		"stream":   StreamPath,
+		"playlist": "/" + livePrefix + url.PathEscape(s.Channel) + ".m3u8",
 		"closed":   closed,
 	})
 }
 
+// handleStreamM3U8 serves live TV as one fixed URL, whatever is tuned.
+//
+// This is the contract the legacy live_hls.py had and the one a viewer wants:
+// a single bookmark in VLC, on an iPad, in mpv, that keeps working when the
+// channel changes. Per-channel playlists still exist at
+// /api/live/{channel}.m3u8 — the web UI needs to address a specific channel —
+// but nothing outside needs to know a channel name to watch TV.
 func (d Deps) handleStreamM3U8(w http.ResponseWriter, r *http.Request) {
 	if d.HLS == nil {
 		writeErr(w, http.StatusServiceUnavailable, "hls not ready")
@@ -602,12 +638,46 @@ func (d Deps) handleStreamM3U8(w http.ResponseWriter, r *http.Request) {
 	}
 	s := d.HLS.LastOpened()
 	if s == nil {
-		writeErr(w, http.StatusNotFound, "no active HLS session — open /api/live/{channel}.m3u8 first")
+		writeErr(w, http.StatusNotFound, "no active HLS session — tune a channel first")
+		return
+	}
+	// A viewer that only polls this URL never touches
+	// /api/live/{channel}.m3u8, so without this the idle janitor would
+	// close the session under a player that is actively watching it.
+	d.HLS.Touch(s.Channel)
+
+	playlist, err := os.ReadFile(s.PlaylistPath)
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "stream not started yet")
 		return
 	}
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "no-store")
-	http.ServeFile(w, r, s.PlaylistPath)
+	_, _ = w.Write(rebaseSegments(playlist))
+}
+
+// rebaseSegments rewrites the segment URIs of a playlist written for
+// /api/live/{channel}.m3u8 so they still resolve when it is served from the
+// root as /stream.m3u8.
+//
+// ffmpeg writes each URI as "{channel}/streamN.ts" (hls_base_url), resolved
+// against the playlist's own URL: correct under /api/live/, but from the root
+// it would resolve to /{channel}/streamN.ts, which is not a route — the SPA
+// fallback would answer HTML and the player would report a corrupt segment.
+// The rewritten URI stays *relative* so the daemon still survives being
+// mounted behind a path prefix.
+func rebaseSegments(playlist []byte) []byte {
+	lines := bytes.Split(playlist, []byte("\n"))
+	for i, line := range lines {
+		uri := bytes.TrimSpace(line)
+		// Tags, blanks, and anything already absolute or fully qualified.
+		if len(uri) == 0 || uri[0] == '#' || uri[0] == '/' ||
+			bytes.Contains(uri, []byte("://")) {
+			continue
+		}
+		lines[i] = append([]byte(livePrefix), uri...)
+	}
+	return bytes.Join(lines, []byte("\n"))
 }
 
 // ── helpers ────────────────────────────────────────────────────────

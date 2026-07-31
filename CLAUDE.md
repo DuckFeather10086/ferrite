@@ -37,7 +37,10 @@ dvb-rs stdout → b25-rs stdin → b25-rs stdout → fanout.Broadcaster
   to spawn and reports the stream URL instead, since over ssh the window
   would open on the tuner box. The recordings view plays a recording
   (mpv against the file endpoint — no tuner involved) and deletes one
-  behind a y/n confirmation.
+  behind a y/n confirmation. `banner.go` is the header — wordmark plus the
+  watch URLs from `/api/status`; `View` counts every row the frame draws
+  (see `countLines`) so a new header line cannot push the key hints off
+  screen.
 - `internal/`:
   - `config/` — load channels.json (shared format with `dvb-rs`) + daemon TOML.
   - `proc/` — subprocess helpers: `setpgid`, kill-by-pgrp, stderr→slog.
@@ -65,6 +68,10 @@ dvb-rs stdout → b25-rs stdin → b25-rs stdout → fanout.Broadcaster
     cache miss pays the ffprobe pass. Output is normalized to square
     pixels (1440x1080 SAR 4:3 → 1920x1080 SAR 1:1) because hls.js does
     not reliably honour the SAR in the H.264 VUI.
+  - `netaddr/` — the addresses a viewer can reach this daemon at, labelled
+    `local` / `lan` / `tailscale` / `public`. Only the daemon can answer
+    this (a remote would be enumerating its own interfaces), so it is
+    reported on `/api/status` rather than derived by clients.
   - `api/` — chi router for `/api/...` + serves `internal/web/dist`.
     **List endpoints must answer `[]`, not `null`** — wrap them in `orEmpty`.
     A nil slice is invisible in Go and crashes every other client.
@@ -112,8 +119,9 @@ Implemented and tested (race-clean):
   janitor, m3u8 + segments on disk. A/V offset cache (`Offsets`,
   `OffsetMaxAge`; raw measurement stored, `AudioOffsetBias` applied at
   use time so config changes need no re-probe).
-- `api` (chi) — `/health`, `/stream.m3u8` (shortcut to last-opened
-  HLS session), `/api/status` (with adapter occupancy), `/api/channels`,
+- `api` (chi) — `/health`, `/stream.m3u8` (the single live URL: serves
+  whatever is tuned, segment URIs rebased — see the invariant below),
+  `/api/status` (adapter occupancy + the addresses to watch at), `/api/channels`,
   `/api/epg`, `/api/now`, `/api/schedule` (CRUD), `/api/recordings`
   + `/api/recordings/{id}/file` (download/stream, Range-capable) and
   `DELETE /api/recordings/{id}` (file + row),
@@ -193,6 +201,17 @@ mid-recording finalizing as 'done'.
   whole curated list. It now refuses when the target is an existing channel
   list (`--force` overrides). Auditing means scanning to a scratch path and
   diffing, or `--merge`.
+- **Live TV is one URL, and a playlist's segment URIs are relative to
+  where the playlist is served.** `/stream.m3u8` is what any player or
+  bookmark gets (the `live_hls.py` contract): a channel change must not
+  invalidate it, so no channel name appears in it. ffmpeg writes the segment
+  URIs with `-hls_base_url {channel}/`, which resolves correctly under
+  `/api/live/` and would resolve to the unrouted `/{channel}/streamN.ts`
+  from the root — where the SPA fallback answers *HTML*, which a player
+  reports as a corrupt stream rather than a 404. `api.rebaseSegments`
+  rewrites them to `api/live/{channel}/…`, still relative so the daemon
+  survives being mounted behind a path prefix. Serving the same playlist
+  file from a third path means rebasing again.
 - **`name` is the identifier; `display_name` is the label.** Every request
   takes `name`. What a UI *shows* is `config.Channel.DisplayName()`, served
   as `display_name` on `/api/channels`, because `channels.json` mixes three

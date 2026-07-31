@@ -24,6 +24,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 	"github.com/DuckFeather10086/ferrite/internal/config"
 	"github.com/DuckFeather10086/ferrite/internal/epg"
 	"github.com/DuckFeather10086/ferrite/internal/hls"
+	"github.com/DuckFeather10086/ferrite/internal/netaddr"
 	"github.com/DuckFeather10086/ferrite/internal/recorder"
 	"github.com/DuckFeather10086/ferrite/internal/scheduler"
 	"github.com/DuckFeather10086/ferrite/internal/store"
@@ -138,9 +140,12 @@ func run(cfgPath, logLevel string) error {
 		// Bounds which files /api/recordings/{id}/file will serve and
 		// DELETE will unlink — same root the recorder writes under.
 		StorageRoot: cfg.StorageRoot,
-		StartedAt:   time.Now(),
-		Version:     version,
-		Web:         web.FS(),
+		// Lets /api/status report the addresses a viewer can reach the
+		// stream at. Only this process can see its own interfaces.
+		HTTPPort:  cfg.HTTPPort,
+		StartedAt: time.Now(),
+		Version:   version,
+		Web:       web.FS(),
 	})
 
 	go func() {
@@ -197,8 +202,15 @@ func run(cfgPath, logLevel string) error {
 
 	serveErr := make(chan error, 1)
 	go func() {
+		// Every address the stream can be opened from, not just loopback:
+		// after a boot on the tuner box this log line is what you read to
+		// know what to paste into a phone.
+		var watch []string
+		for _, a := range netaddr.Addresses(cfg.HTTPPort) {
+			watch = append(watch, string(a.Kind)+"="+a.URL(api.StreamPath))
+		}
 		slog.Info("http listening", "addr", srv.Addr,
-			"local", "http://localhost"+srv.Addr,
+			"watch", strings.Join(watch, " "),
 			"endpoints", "/health /api/status /api/channels /api/epg /api/schedule /api/recordings")
 		serveErr <- srv.ListenAndServe()
 	}()

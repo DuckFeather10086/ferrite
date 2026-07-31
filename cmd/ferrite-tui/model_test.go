@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -110,7 +111,7 @@ func TestNoDisplayReportsURLInsteadOfFailing(t *testing.T) {
 	if m.failure != "" {
 		t.Fatalf("failure = %q, want none", m.failure)
 	}
-	if !strings.Contains(m.message, "http://tuner.test:8010/api/live/asahi.m3u8") {
+	if !strings.Contains(m.message, "http://tuner.test:8010/stream.m3u8") {
 		t.Fatalf("message = %q, want the absolute stream URL", m.message)
 	}
 	if m.busy != "" {
@@ -226,10 +227,18 @@ func TestChannelListShowsDisplayNamesButActsOnNames(t *testing.T) {
 	if !strings.Contains(m2.busy, "NHKEテレ1東京") {
 		t.Fatalf("busy = %q, want the readable name", m2.busy)
 	}
-	// switchTo got the canonical name — the daemon would 404 on the label
-	// unless it happens to be an alias.
-	if got := m.client.PlaylistURL(m.channels[0].Name); !strings.Contains(got, "NHKEFl1El5") {
-		t.Fatalf("request URL = %q", got)
+	// And the request carries the canonical name, not the label: the daemon
+	// would 404 on a display name unless it happens to also be an alias.
+	var gotPath string
+	m.client = testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		io.WriteString(w, `{"channel":"NHKEFl1El5~"}`)
+	})
+	if cmd := m.switchTo(m.channels[0].Name); cmd != nil {
+		cmd()
+	}
+	if !strings.Contains(gotPath, "NHKEFl1El5") {
+		t.Fatalf("switch path = %q, want the canonical name", gotPath)
 	}
 }
 
@@ -463,7 +472,7 @@ func TestPlaybackDisabledReportsURL(t *testing.T) {
 	if m.failure != "" {
 		t.Fatalf("failure = %q, want none", m.failure)
 	}
-	if !strings.Contains(m.message, "/api/live/asahi.m3u8") {
+	if !strings.Contains(m.message, "/stream.m3u8") {
 		t.Fatalf("message = %q", m.message)
 	}
 }

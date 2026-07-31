@@ -246,12 +246,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.failure = ""
-		url := m.client.PlaylistURL(msg.result.Channel)
+		// One URL for live TV, whatever is tuned — see Client.StreamURL.
+		url := m.client.StreamURL(m.status.Stream)
 		shown := m.displayFor(msg.result.Channel)
 		if err := m.player.Play(msg.result.Channel, url); err != nil {
 			// Not a failure of the TV: the stream is up, we just aren't the
 			// ones showing it. Hand over the URL so it can be opened
-			// wherever the user actually is.
+			// wherever the user actually is — and the watch block below
+			// lists the same playlist on every address of the daemon.
 			switch {
 			case errors.Is(err, ErrNoDisplay):
 				m.message = "now on " + shown + " — no display here, open: " + url
@@ -592,27 +594,60 @@ func (m Model) View() string {
 	if !m.ready {
 		return "connecting to " + m.client.BaseURL + "…\n"
 	}
+
+	header := m.renderHeader()
+	footerParts := []string{m.renderStatusBar(), m.renderKeys()}
+	if m.view == viewChannels {
+		// The watch URLs belong to the live view; the recordings list would
+		// rather have the rows.
+		footerParts = append([]string{m.renderWatchURLs()}, footerParts...)
+	}
+	footer := strings.Join(footerParts, "\n")
+
+	// Everything the frame draws is counted here — header, the blank line
+	// under it, footer — so adding a line to any of them cannot silently
+	// push the cursor, or the key hints, off the bottom of the screen.
+	rows := m.height - m.headerHeight() - 1 - countLines(footer)
+	if rows < 3 {
+		rows = 3
+	}
+
+	var body string
 	if m.view == viewRecordings {
-		return m.viewRecordings()
+		body = m.renderRecordings(rows)
+	} else {
+		listWidth := m.width / 3
+		if listWidth < 24 {
+			listWidth = 24
+		}
+		guideWidth := m.width - listWidth - 3
+		if guideWidth < 20 {
+			guideWidth = 20
+		}
+		left := lipgloss.NewStyle().Width(listWidth).Render(m.renderChannels(rows))
+		right := lipgloss.NewStyle().Width(guideWidth).Render(m.renderGuide(rows))
+		body = lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
 	}
 
-	listWidth := m.width / 3
-	if listWidth < 24 {
-		listWidth = 24
-	}
-	guideWidth := m.width - listWidth - 3
-	if guideWidth < 20 {
-		guideWidth = 20
-	}
+	// Height pins the footer to the bottom of the terminal instead of
+	// letting it float under a short list; MaxHeight is the backstop that
+	// keeps a long guide from pushing it off.
+	body = lipgloss.NewStyle().Height(rows).MaxHeight(rows).
+		Render(strings.TrimRight(body, "\n"))
 
-	left := lipgloss.NewStyle().Width(listWidth).Render(m.renderChannels())
-	right := lipgloss.NewStyle().Width(guideWidth).Render(m.renderGuide())
-	body := lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
-
-	return body + "\n" + m.renderStatusBar() + "\n" + m.renderKeys()
+	return strings.Join([]string{header, "", body, footer}, "\n")
 }
 
-func (m Model) renderChannels() string {
+// countLines is how many terminal rows s occupies. An empty string is one
+// row (a blank line), which is what the status bar renders when it has
+// nothing to say.
+func countLines(s string) int {
+	return strings.Count(s, "\n") + 1
+}
+
+// renderChannels draws the channel list in rows terminal rows, title
+// included.
+func (m Model) renderChannels(rows int) string {
 	live := m.status.LiveChannel()
 	playing := m.player.Playing()
 
@@ -623,8 +658,9 @@ func (m Model) renderChannels() string {
 		return b.String()
 	}
 
-	// Keep the cursor on screen for long lists.
-	visible := m.height - 6
+	// Keep the cursor on screen for long lists. Two rows of the budget are
+	// already spent: the title above, and the "… N more" line below.
+	visible := rows - 2
 	if visible < 3 {
 		visible = 3
 	}
@@ -655,7 +691,9 @@ func (m Model) renderChannels() string {
 	return b.String()
 }
 
-func (m Model) renderGuide() string {
+// renderGuide draws now-and-next for the selected channel, bounded to rows
+// so a channel with a dense schedule can't shove the footer off screen.
+func (m Model) renderGuide(rows int) string {
 	ch, ok := m.selected()
 	if !ok {
 		return ""
@@ -681,8 +719,10 @@ func (m Model) renderGuide() string {
 			b.WriteString(styleDim.Render("     "+truncate(current.Synopsis, 200)) + "\n")
 		}
 	}
+	// The title line plus NOW and its synopsis are already spent.
+	next := min(rows-3, 8)
 	for i, ev := range upcoming {
-		if i >= 8 {
+		if i >= next {
 			break
 		}
 		b.WriteString(styleDim.Render("next ") + timeRange(ev) + "  " + ev.Title + "\n")
@@ -690,14 +730,15 @@ func (m Model) renderGuide() string {
 	return b.String()
 }
 
-func (m Model) viewRecordings() string {
+// renderRecordings draws the recordings list in rows terminal rows.
+func (m Model) renderRecordings(rows int) string {
 	var b strings.Builder
 	b.WriteString(styleTitle.Render("Recordings") + "\n")
 	if len(m.recordings) == 0 {
 		b.WriteString(styleDim.Render("  (none)") + "\n")
 	}
 	for i, rec := range m.recordings {
-		if i >= m.height-6 {
+		if i >= rows-2 {
 			b.WriteString(styleDim.Render(fmt.Sprintf("  … %d more", len(m.recordings)-i)) + "\n")
 			break
 		}
@@ -719,8 +760,7 @@ func (m Model) viewRecordings() string {
 			b.WriteString(styleDim.Render("       "+rec.Error) + "\n")
 		}
 	}
-	return b.String() + "\n" + m.renderStatusBar() + "\n" +
-		styleDim.Render("j/k select  ⏎ play  d delete  R stop selected  l back  g refresh  q quit")
+	return b.String()
 }
 
 func (m Model) renderStatusBar() string {
@@ -768,6 +808,9 @@ func (m Model) renderStatusBar() string {
 }
 
 func (m Model) renderKeys() string {
+	if m.view == viewRecordings {
+		return styleDim.Render("j/k select  ⏎ play  d delete  R stop selected  l back  g refresh  q quit")
+	}
 	return styleDim.Render("j/k select  ⏎ watch  r rec  R stop rec  s stop player  l recordings  g refresh  q quit")
 }
 

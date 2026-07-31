@@ -74,12 +74,56 @@ func TestChannelNamesAreEscapedInPaths(t *testing.T) {
 	if gotPath != "/api/live/TOKYO%20MX1/switch" {
 		t.Fatalf("path = %q", gotPath)
 	}
+}
 
-	// And the URL handed to a player must be absolute, not the relative
-	// playlist path the daemon reports — mpv runs on this machine.
-	want := c.BaseURL + "/api/live/%E3%83%86%E3%83%AC%E3%83%93%E6%9C%9D%E6%97%A5.m3u8"
-	if got := c.PlaylistURL("テレビ朝日"); got != want {
-		t.Fatalf("PlaylistURL = %q, want %q", got, want)
+// The URL handed to a player is one fixed path — no channel in it, so a
+// channel change never invalidates it — and absolute, because mpv runs on
+// this machine while the daemon is somewhere else on the LAN.
+func TestStreamURLIsOneFixedAbsolutePath(t *testing.T) {
+	c := NewClient("http://tuner.test:8010/")
+	if got, want := c.StreamURL(""), "http://tuner.test:8010/stream.m3u8"; got != want {
+		t.Fatalf("StreamURL = %q, want %q", got, want)
+	}
+
+	// The same playlist, reached at an address the daemon reported.
+	a := Address{Kind: "lan", Host: "192.168.1.42", Base: "http://192.168.1.42:8010"}
+	want := "http://192.168.1.42:8010/stream.m3u8"
+	if got := a.StreamURL("/stream.m3u8"); got != want {
+		t.Fatalf("Address.StreamURL = %q, want %q", got, want)
+	}
+	// A daemon too old to report the path still yields a usable URL.
+	if got := a.StreamURL(""); got != want {
+		t.Fatalf("Address.StreamURL with no path = %q, want %q", got, want)
+	}
+}
+
+// The addresses a viewer should use come from the daemon, so they have to
+// survive the wire.
+func TestStatusDecodesWatchAddresses(t *testing.T) {
+	c := testServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"version":"dev","uptime":"1m","stream":"/stream.m3u8",
+          "addresses":[
+            {"kind":"local","host":"localhost","base":"http://localhost:8010"},
+            {"kind":"lan","host":"192.168.1.42","base":"http://192.168.1.42:8010","iface":"br0"},
+            {"kind":"tailscale","host":"100.101.102.103","base":"http://100.101.102.103:8010","iface":"tailscale0"}],
+          "adapters":[{"adapter":0}]}`)
+	})
+
+	st, err := c.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Stream != "/stream.m3u8" {
+		t.Fatalf("stream = %q", st.Stream)
+	}
+	if len(st.Addresses) != 3 {
+		t.Fatalf("addresses = %+v", st.Addresses)
+	}
+	if st.Addresses[2].Kind != "tailscale" || st.Addresses[2].Iface != "tailscale0" {
+		t.Fatalf("tailscale address = %+v", st.Addresses[2])
+	}
+	if got := st.Addresses[1].StreamURL(st.Stream); got != "http://192.168.1.42:8010/stream.m3u8" {
+		t.Fatalf("lan watch URL = %q", got)
 	}
 }
 

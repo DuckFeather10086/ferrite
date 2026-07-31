@@ -62,6 +62,7 @@ internal/
   recorder/          recording job lifecycle
   scheduler/         cron-driven recording trigger
   hls/               ffmpeg subprocess + m3u8 serving
+  netaddr/           which addresses a viewer can reach this box at
   api/               chi router + handlers
   web/               embedded static SPA
 configs/             example daemon config
@@ -81,6 +82,12 @@ go run ./cmd/isdbd -config configs/isdbd.toml
 ```
 
 Open the web UI in a browser (Live / Guide / Schedules / Recordings).
+
+Live TV is one URL — `http://<host>:8010/stream.m3u8` — and it plays
+whatever is tuned, so a bookmark in VLC or on an iPad survives every channel
+change. The startup log prints it for every address the box answers on
+(loopback, LAN, tailnet); `/api/status` reports the same list, which is what
+`ferrite-tui` shows in its header.
 
 ### Or leave it running
 

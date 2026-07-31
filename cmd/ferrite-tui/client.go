@@ -64,9 +64,24 @@ type Adapter struct {
 	Reserved bool   `json:"reserved,omitempty"`
 }
 
+// Address is one way to reach the daemon: loopback on the tuner box itself,
+// the address the router handed it, the tailnet address from outside the
+// house. The daemon reports its own — this remote usually runs on another
+// machine, so its interfaces say nothing about where the TV is.
+type Address struct {
+	Kind  string `json:"kind"` // local | lan | tailscale | public
+	Host  string `json:"host"`
+	Base  string `json:"base"` // "http://192.168.1.42:8010"
+	Iface string `json:"iface,omitempty"`
+}
+
 type Status struct {
-	Version   string    `json:"version"`
-	Uptime    string    `json:"uptime"`
+	Version string `json:"version"`
+	Uptime  string `json:"uptime"`
+	// Stream is the live playlist path ("/stream.m3u8"). Read from the
+	// daemon rather than hardcoded so the two can't drift apart.
+	Stream    string    `json:"stream"`
+	Addresses []Address `json:"addresses"`
 	Adapters  []Adapter `json:"adapters"`
 	Recording []int64   `json:"recording"`
 }
@@ -209,9 +224,34 @@ func (c *Client) RecordingFileURL(id int64) string {
 	return c.BaseURL + "/api/recordings/" + strconv.FormatInt(id, 10) + "/file"
 }
 
-// PlaylistURL is the absolute URL a player should open for channel.
-func (c *Client) PlaylistURL(channel string) string {
-	return c.BaseURL + "/api/live/" + url.PathEscape(channel) + ".m3u8"
+// DefaultStreamPath is the live playlist when the daemon hasn't said (an
+// older build, or before the first /api/status answer lands).
+const DefaultStreamPath = "/stream.m3u8"
+
+// StreamURL is the absolute URL a local player opens to watch live TV, and
+// there is deliberately only one of it: /stream.m3u8 serves whatever is
+// tuned, which is the contract the legacy live_hls.py had. A bookmark in VLC
+// or on the iPad then survives every channel change — per-channel playlists
+// still exist at /api/live/{channel}.m3u8, but only the web UI needs to name
+// a channel in a URL.
+//
+// path is what the daemon advertises (Status.Stream); empty falls back to
+// DefaultStreamPath.
+func (c *Client) StreamURL(path string) string {
+	return streamURL(c.BaseURL, path)
+}
+
+// StreamURL is the same playlist, reached at one of the daemon's own
+// addresses instead of the one this remote was pointed at.
+func (a Address) StreamURL(path string) string {
+	return streamURL(a.Base, path)
+}
+
+func streamURL(base, path string) string {
+	if path == "" {
+		path = DefaultStreamPath
+	}
+	return strings.TrimRight(base, "/") + path
 }
 
 // ── plumbing ───────────────────────────────────────────────────────
