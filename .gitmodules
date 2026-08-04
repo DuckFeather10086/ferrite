@@ -13,3 +13,8 @@
 	url = https://github.com/DuckFeather10086/dvb-rs.git
 	branch = fix/sdt-arib-b24
 	ignore = untracked
+[submodule "libaribcaption-rs"]
+	path = libaribcaption-rs
+	url = https://github.com/DuckFeather10086/libaribcaption-rs.git
+	branch = main
+	ignore = untracked

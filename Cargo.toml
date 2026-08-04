@@ -1,4 +1,4 @@
 [workspace]
 resolver = "2"
-members = ["libaribb24-rs", "dvb-rs"]
+members = ["libaribb24-rs", "libaribcaption-rs", "dvb-rs"]
 exclude = ["libaribb25-rs"]
