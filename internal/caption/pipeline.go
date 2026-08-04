@@ -32,7 +32,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -103,13 +102,10 @@ type Pipeline struct {
 // error inside a video frame or two, and costs one ffprobe per ten seconds.
 const reanchorEvery = 5
 
-// SubsPlaylist is the name of the subtitle media playlist, and MasterPlaylist
-// the multivariant playlist that ties it to the video. Both live in Dir and are
-// served like segments.
-const (
-	SubsPlaylist   = "subs.m3u8"
-	MasterPlaylist = "master.m3u8"
-)
+// SubsPlaylist is the name of the subtitle media playlist. It lives in Dir and
+// is served like a segment; the multivariant playlist that points at it is
+// composed by the API, which knows the URL it is being served from.
+const SubsPlaylist = "subs.m3u8"
 
 // Run decodes captions until ctx is done or the source ends.
 //
@@ -518,36 +514,6 @@ func readPlaylist(path string) ([]segment, int, error) {
 	_ = seq
 	sort.SliceStable(segments, func(i, j int) bool { return segments[i].seq < segments[j].seq })
 	return segments, target, nil
-}
-
-// WriteMaster writes the multivariant playlist that offers the subtitle
-// rendition alongside the video.
-//
-// The video playlist is referenced as ../{channel}.m3u8 rather than the
-// stream.m3u8 sitting right here: that file's segment URIs are written relative
-// to /api/live/, and only the playlist endpoint rebases them. Pointing at the
-// file directly would produce segment URLs one directory too deep.
-func WriteMaster(dir, channel string, withSubs bool) error {
-	var b strings.Builder
-	b.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n")
-	if withSubs {
-		// DEFAULT=NO: captions are the viewer's choice, and a Japanese
-		// broadcast's captions are off by default on a real television too.
-		fmt.Fprintf(&b, "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"日本語\",LANGUAGE=\"ja\",DEFAULT=NO,AUTOSELECT=YES,URI=\"%s\"\n", SubsPlaylist)
-	}
-	b.WriteString("#EXT-X-STREAM-INF:BANDWIDTH=6500000,CODECS=\"avc1.640028,mp4a.40.2\"")
-	if withSubs {
-		b.WriteString(",SUBTITLES=\"subs\"")
-	}
-	b.WriteString("\n")
-	fmt.Fprintf(&b, "../%s.m3u8\n", pathEscape(channel))
-	return writeFileAtomic(filepath.Join(dir, MasterPlaylist), []byte(b.String()))
-}
-
-// pathEscape escapes a channel name for use in a playlist URI. Channel names
-// are Japanese and contain characters a player would otherwise mis-resolve.
-func pathEscape(channel string) string {
-	return (&url.URL{Path: channel}).EscapedPath()
 }
 
 // writeFileAtomic writes via a temp file and renames, so a player never reads

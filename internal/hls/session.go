@@ -298,8 +298,12 @@ func (m *Manager) openSession(ctx context.Context, channel string) (*Session, er
 	}
 	playlist := filepath.Join(dir, "stream.m3u8")
 
-	// Clear any leftover segments from a previous run on the same dir.
+	// Clear any leftover segments from a previous run on the same dir. The
+	// master playlist used to be written here and is now composed per request
+	// by the API; remove a stale one so nothing serves a manifest describing a
+	// stream that no longer exists.
 	_ = clearStaleSegments(dir)
+	_ = os.Remove(filepath.Join(dir, "master.m3u8"))
 
 	// ISDB-T muxes interleave audio ahead of the first decodable video
 	// frame, so HLS otherwise comes up with a constant A/V skew. Shift
@@ -444,12 +448,6 @@ func (m *Manager) openSession(ctx context.Context, channel string) (*Session, er
 			}
 		}()
 	}
-	if err := caption.WriteMaster(dir, canonical, withSubs); err != nil {
-		// The master playlist is how a client finds the subtitle rendition;
-		// without it the per-channel media playlist still plays.
-		slog.Warn("hls: write master playlist", "channel", canonical, "err", err)
-	}
-
 	m.mu.Lock()
 	m.sessions[canonical] = s
 	m.lastOpen = canonical

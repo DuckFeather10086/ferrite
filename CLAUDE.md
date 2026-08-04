@@ -230,6 +230,20 @@ mid-recording finalizing as 'done'.
   whole curated list. It now refuses when the target is an existing channel
   list (`--force` overrides). Auditing means scanning to a scratch path and
   diffing, or `--merge`.
+- **Both live URLs are multivariant playlists, composed per request.**
+  `/stream.m3u8` and `/api/live/{ch}.m3u8` are the same manifest — video plus
+  the WebVTT caption rendition — differing only in how far their URIs reach back
+  to `/api/live/`, so `masterPlaylist(channel, prefix, …)` builds it rather than
+  anything writing one to disk. Both carry the captions on purpose: Safari and
+  iOS play HLS natively and pick a subtitle rendition out of the manifest, so an
+  iPad bookmark gets captions with nothing of ours running in the browser. The
+  media playlist therefore needs a URL of its own (`{ch}/video.m3u8`) — a master
+  that referenced itself is not something a player can follow — and it is served
+  with ffmpeg's `-hls_base_url` prefix *stripped*, since from inside the
+  channel's path those URIs would resolve one directory too deep. A rendition is
+  announced only when `subs.m3u8` exists: naming a playlist that 404s makes some
+  players abandon the stream. `{ch}/video.m3u8` only ever *serves* a session, it
+  never opens one.
 - **Live TV is one URL, and a playlist's segment URIs are relative to
   where the playlist is served.** `/stream.m3u8` is what any player or
   bookmark gets (the `live_hls.py` contract): a channel change must not

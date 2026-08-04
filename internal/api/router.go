@@ -41,6 +41,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/DuckFeather10086/ferrite/internal/caption"
 	"github.com/DuckFeather10086/ferrite/internal/config"
 	"github.com/DuckFeather10086/ferrite/internal/hls"
 	"github.com/DuckFeather10086/ferrite/internal/netaddr"
@@ -122,6 +123,7 @@ func NewRouter(d Deps) http.Handler {
 		r.Delete("/av-offsets/{channel}", d.handleForgetAVOffset)
 
 		r.Get("/live/{channel}.m3u8", d.handleLivePlaylist)
+		r.Get("/live/{channel}/"+videoPlaylistName, d.handleLiveVideoPlaylist)
 		r.Get("/live/{channel}/{segment}", d.handleLiveSegment)
 		r.Post("/live/{channel}/stop", d.handleLiveStop)
 		r.Post("/live/{channel}/switch", d.handleLiveSwitch)
@@ -537,15 +539,44 @@ func (d Deps) handleLivePlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 	// ffmpeg writes stream.m3u8 only once the first segment completes —
 	// several seconds after Open returns on a cold tune. Hold the
-	// request until the playlist exists; an immediate ServeFile would
-	// 404 and most players treat a missing manifest as fatal.
+	// request until the playlist exists; an immediate answer would
+	// describe a stream with nothing in it, and most players treat that
+	// as fatal.
 	if err := waitForFile(r.Context(), s.PlaylistPath, 30*time.Second); err != nil {
 		writeErr(w, http.StatusGatewayTimeout, "stream did not start: "+err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-	w.Header().Set("Cache-Control", "no-store")
-	http.ServeFile(w, r, s.PlaylistPath)
+	writePlaylist(w, masterPlaylist(s.Channel, "", subsReady(s.Dir)))
+}
+
+// handleLiveVideoPlaylist serves the media playlist the master points at.
+//
+// It exists because the two playlists cannot be the same URL: the master
+// references the video rendition, and a master that referenced itself is not a
+// playlist a player can follow. ffmpeg writes the segment URIs with its
+// -hls_base_url prefix ("{channel}/streamN.ts"), which is correct one directory
+// up; served from inside the channel's own path they resolve one level too
+// deep, so the prefix comes off here.
+func (d Deps) handleLiveVideoPlaylist(w http.ResponseWriter, r *http.Request) {
+	if d.HLS == nil {
+		writeErr(w, http.StatusServiceUnavailable, "hls not ready")
+		return
+	}
+	channel := chi.URLParam(r, "channel")
+	// Touch, not Open: a player only learns this URL from a master playlist,
+	// which means the session already exists. Opening here would let a stale
+	// player re-tune a channel nobody asked for.
+	s := d.HLS.Touch(channel)
+	if s == nil {
+		http.NotFound(w, r)
+		return
+	}
+	playlist, err := os.ReadFile(s.PlaylistPath)
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "stream not started yet")
+		return
+	}
+	writePlaylist(w, stripSegmentBase(playlist))
 }
 
 // waitForFile polls until path exists and is non-empty, the context is
@@ -691,27 +722,62 @@ func (d Deps) handleStreamM3U8(w http.ResponseWriter, r *http.Request) {
 	// close the session under a player that is actively watching it.
 	d.HLS.Touch(s.Channel)
 
-	playlist, err := os.ReadFile(s.PlaylistPath)
-	if err != nil {
+	if _, err := os.Stat(s.PlaylistPath); err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "stream not started yet")
 		return
 	}
-	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write(rebaseSegments(playlist))
+	writePlaylist(w, masterPlaylist(s.Channel, livePrefix, subsReady(s.Dir)))
 }
 
-// rebaseSegments rewrites the segment URIs of a playlist written for
-// /api/live/{channel}.m3u8 so they still resolve when it is served from the
-// root as /stream.m3u8.
+// videoPlaylistName is where a channel's media playlist is served, under the
+// channel's own path so its segment URIs resolve beside it.
+const videoPlaylistName = "video.m3u8"
+
+// masterPlaylist composes the multivariant playlist: the video rendition, and
+// the WebVTT subtitle rendition when internal/caption has produced one.
 //
-// ffmpeg writes each URI as "{channel}/streamN.ts" (hls_base_url), resolved
-// against the playlist's own URL: correct under /api/live/, but from the root
-// it would resolve to /{channel}/streamN.ts, which is not a route — the SPA
-// fallback would answer HTML and the player would report a corrupt segment.
-// The rewritten URI stays *relative* so the daemon still survives being
-// mounted behind a path prefix.
-func rebaseSegments(playlist []byte) []byte {
+// Composed here rather than written to disk because it is the same manifest
+// from two URLs — /stream.m3u8 and /api/live/{channel}.m3u8 — differing only in
+// how far the URIs have to reach back to /api/live/. prefix is that distance:
+// "" when already under /api/live/, livePrefix from the root. The URIs stay
+// relative so the daemon survives being mounted behind a path prefix.
+//
+// Both URLs carry the captions on purpose: Safari and iOS play HLS natively and
+// pick up a subtitle rendition from the manifest, so a bookmark on an iPad
+// gets captions without anything of ours running in the browser.
+func masterPlaylist(channel, prefix string, withSubs bool) []byte {
+	base := prefix + url.PathEscape(channel) + "/"
+	var b bytes.Buffer
+	b.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n")
+	if withSubs {
+		// DEFAULT=NO: captions are the viewer's choice, as they are on a
+		// television. AUTOSELECT=YES lets a player turn them on when the
+		// system asks for Japanese subtitles.
+		fmt.Fprintf(&b, "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=%q,NAME=%q,LANGUAGE=%q,DEFAULT=NO,AUTOSELECT=YES,URI=%q\n",
+			"subs", "日本語", "ja", base+caption.SubsPlaylist)
+	}
+	// The bitrate and codecs the HLS session encodes to (see internal/hls).
+	b.WriteString(`#EXT-X-STREAM-INF:BANDWIDTH=6500000,CODECS="avc1.640028,mp4a.40.2"`)
+	if withSubs {
+		b.WriteString(`,SUBTITLES="subs"`)
+	}
+	b.WriteString("\n")
+	b.WriteString(base + videoPlaylistName + "\n")
+	return b.Bytes()
+}
+
+// subsReady reports whether a session has a subtitle rendition to announce.
+// Captions can be disabled, and a session that has just started has not written
+// one yet — announcing a rendition that 404s makes some players give up on the
+// stream entirely.
+func subsReady(dir string) bool {
+	st, err := os.Stat(filepath.Join(dir, caption.SubsPlaylist))
+	return err == nil && st.Size() > 0
+}
+
+// stripSegmentBase removes ffmpeg's -hls_base_url prefix from each segment URI,
+// so they resolve beside the playlist rather than one directory deeper.
+func stripSegmentBase(playlist []byte) []byte {
 	lines := bytes.Split(playlist, []byte("\n"))
 	for i, line := range lines {
 		uri := bytes.TrimSpace(line)
@@ -720,9 +786,15 @@ func rebaseSegments(playlist []byte) []byte {
 			bytes.Contains(uri, []byte("://")) {
 			continue
 		}
-		lines[i] = append([]byte(livePrefix), uri...)
+		lines[i] = []byte(path.Base(string(uri)))
 	}
 	return bytes.Join(lines, []byte("\n"))
+}
+
+func writePlaylist(w http.ResponseWriter, body []byte) {
+	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(body)
 }
 
 // ── helpers ────────────────────────────────────────────────────────
