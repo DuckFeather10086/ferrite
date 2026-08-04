@@ -49,10 +49,15 @@ import (
 // Cue is one subtitle line as `arib-caption cues` prints it. Times are
 // milliseconds on the broadcast PTS timeline.
 type Cue struct {
-	StartMs int64  `json:"start_ms"`
-	EndMs   int64  `json:"end_ms"`
-	Top     bool   `json:"top"`
-	Text    string `json:"text"`
+	StartMs int64 `json:"start_ms"`
+	EndMs   int64 `json:"end_ms"`
+	// Open marks a caption that is still on screen: its start is real, its end
+	// provisional. The decoder prints it twice — open on arrival, closed when
+	// the following caption says where it ended — and the second one replaces
+	// the first by StartMs.
+	Open bool   `json:"open"`
+	Top  bool   `json:"top"`
+	Text string `json:"text"`
 }
 
 // How many cues to keep. At one line every two seconds this is over an hour,
@@ -186,12 +191,36 @@ func (p *Pipeline) readCues(r io.Reader) {
 			continue
 		}
 		p.mu.Lock()
-		p.cues = append(p.cues, cue)
+		p.upsert(cue)
 		if len(p.cues) > maxCues {
 			p.cues = append([]Cue(nil), p.cues[len(p.cues)-maxCues:]...)
 		}
 		p.mu.Unlock()
 	}
+}
+
+// upsert adds a cue, or replaces the provisional version of one already held.
+//
+// Publishing a caption while it is still on screen is what keeps the subtitle
+// track level with the picture: its real end only arrives with the next
+// caption, 2 to 8 seconds later, by which time the segment it belonged in has
+// been fetched and a correct-but-late cue is worth nothing. Cues arrive in
+// start order, so the match is always among the last few.
+//
+// Caller holds p.mu.
+func (p *Pipeline) upsert(cue Cue) {
+	for i := len(p.cues) - 1; i >= 0 && i > len(p.cues)-8; i-- {
+		if p.cues[i].StartMs != cue.StartMs {
+			continue
+		}
+		// Never let a provisional end overwrite a known one: the decoder emits
+		// open-then-closed, but a restarted decoder could repeat itself.
+		if !cue.Open || p.cues[i].Open {
+			p.cues[i] = cue
+		}
+		return
+	}
+	p.cues = append(p.cues, cue)
 }
 
 // pumpTS feeds the tune's chunks to the decoder's stdin. Same policy as the
@@ -319,9 +348,21 @@ func (p *Pipeline) writeSegment(name string, startMs, endMs int64) error {
 		(startMs*90)&0x1_FFFF_FFFF, vttTimestamp(startMs))
 	if endMs > startMs {
 		for _, cue := range p.cues {
-			if cue.EndMs <= startMs || cue.StartMs >= endMs {
+			// A caption still on screen runs to the end of whatever segment is
+			// being written: it is on screen *now*, and its real end has not
+			// been broadcast yet. Segment by segment this covers the caption
+			// continuously however long it lasts, and stops within one segment
+			// of the real end once that arrives — where trusting the
+			// provisional end would drop a long caption out of the segments
+			// past it, leaving a hole a player never refetches.
+			end := cue.EndMs
+			if cue.Open && endMs > end {
+				end = endMs
+			}
+			if end <= startMs || cue.StartMs >= endMs {
 				continue
 			}
+			cue.EndMs = end
 			body.WriteString(formatCue(cue))
 			body.WriteString("\n")
 		}

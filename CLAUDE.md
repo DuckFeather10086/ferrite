@@ -268,6 +268,15 @@ mid-recording finalizing as 'done'.
   `X-TIMESTAMP-MAP` by subtracting the video's first PTS — which only works
   because `-copyts` keeps the broadcast timestamps on the segments. Remove it
   and every cue lands hours away from the frame it belongs to.
+- **A caption is published while it is still on screen.** An ARIB caption's end
+  arrives with the *next* caption — 2 to 8 seconds later on NHK — so a rendition
+  built from finished cues runs that far behind the picture, which is how the
+  first working version behaved. `arib-caption cues` therefore emits each
+  caption twice (`"open":true` with a provisional end, then the real one, keyed
+  on `start_ms`), and a still-open cue is written out to the end of whatever
+  segment is being produced: on screen *now*, for as long as it stays. Trusting
+  the provisional end instead would drop a long caption out of the segments past
+  it, and a player never refetches a segment it already has.
 - **A subtitle rendition mirrors the video playlist, and `#EXTINF` lies.** A
   player fetches the subtitle fragment covering the position it is playing, so
   segment N of `subs.m3u8` must cover the same window as segment N of the video
