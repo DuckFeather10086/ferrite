@@ -62,6 +62,14 @@ export default function LivePage() {
     setFatal(null);
     setPlayUrl(null);
     setTuning(true);
+    // Let the player actually go away before asking the daemon to change
+    // channel. hls.js polls the live playlist it is on every couple of
+    // seconds, and a GET on a channel's playlist *tunes* that channel — so a
+    // poll landing between the daemon closing the old session and claiming the
+    // adapter for the new one takes the tuner straight back, and the switch
+    // fails with "no adapter available". Clearing src above destroys the hls.js
+    // instance, but only once React has run the effect: one frame.
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
     try {
       await switchLive(name);
       setPlayUrl(playlistFor(name));

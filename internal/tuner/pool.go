@@ -193,6 +193,32 @@ func (l *Lease) Release() {
 	l.pool.release(l.Adapter, l.session, l.Sub, l.prio)
 }
 
+// Subscribe adds a second consumer to the tune this lease already holds,
+// without a second claim on the adapter.
+//
+// This is for work that reads the same bytes for a different purpose — the
+// caption decode beside the HLS encode. Acquiring a second lease would also
+// work (same channel joins the same tune) but has two costs that matter: the
+// adapter reports two live claims where there is one viewer, and if the tune
+// happened to have just died, the second Acquire would *start a new one*,
+// leaving the first consumer attached to a dead broadcaster while a second
+// dvb-rs fights the flock. A subscription cannot do either: it lives and dies
+// with the tune this lease is on.
+//
+// Unsubscribe when done. Releasing the lease closes the broadcaster anyway, so
+// a missed Unsubscribe leaks nothing beyond the lease's own lifetime.
+func (l *Lease) Subscribe() *fanout.Sub {
+	return l.session.broadcaster.Subscribe(l.pool.bufChunks)
+}
+
+// Unsubscribe drops a Sub taken with Subscribe.
+func (l *Lease) Unsubscribe(sub *fanout.Sub) {
+	if sub == nil {
+		return
+	}
+	l.session.broadcaster.Unsubscribe(sub)
+}
+
 // Preempted is closed when a higher-priority claim evicts this lease's
 // tune. Sub.Ch closes too, so a plain read loop already terminates;
 // watch this when you need to tell "we were bumped" apart from "the

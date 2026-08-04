@@ -635,6 +635,21 @@ func (d Deps) handleLiveSwitch(w http.ResponseWriter, r *http.Request) {
 
 	closed := d.HLS.CloseOthers(channel)
 	s, err := d.HLS.Open(r.Context(), channel)
+	if errors.Is(err, tuner.ErrNoAdapter) {
+		// Between closing the others and claiming the adapter, something can
+		// take it back: a player still polling the channel it was watching
+		// re-tunes it through GET /api/live/{ch}.m3u8, and live never evicts
+		// live. Close again — this time whatever just appeared — and make one
+		// more attempt, since the viewer asking for a channel outranks a page
+		// nobody is looking at.
+		again := d.HLS.CloseOthers(channel)
+		if len(again) > 0 {
+			slog.Info("live: adapter was taken back mid-switch; closing and retrying",
+				"channel", channel, "closed", again)
+			closed = append(closed, again...)
+			s, err = d.HLS.Open(r.Context(), channel)
+		}
+	}
 	if err != nil {
 		writeTunerErr(w, err)
 		return

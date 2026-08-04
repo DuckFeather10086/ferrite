@@ -260,6 +260,22 @@ mid-recording finalizing as 'done'.
   not. Changing channel then goes through `POST /api/live/{ch}/switch`, not
   a hand-rolled stop-then-open: equal priorities do not evict each other,
   so the wrong order deadlocks on `ErrNoAdapter`.
+- **A `GET` on a channel playlist tunes that channel, so a player left polling
+  one can take the adapter back.** `GET /api/live/{ch}.m3u8` opens a session,
+  and live never evicts live — so between `CloseOthers` and `Acquire` inside a
+  switch, one poll from the player being replaced re-tunes the old channel and
+  the switch fails with `ErrNoAdapter` (this is what "Cannot play this channel /
+  no adapter available" was). Two things guard it: the switch endpoint closes
+  again and retries once, since a viewer asking for a channel outranks a page
+  nobody is looking at, and the Live page waits a frame for hls.js to be
+  destroyed before asking for the change. A failed acquire also logs what holds
+  the adapter — it used to reach the browser and leave nothing in the journal.
+- **Extra consumers of a tune take a `Lease.Subscribe`, not a second lease.**
+  Same-channel `Acquire` does share the tune, but it makes one viewer look like
+  two live claims, and if that tune had just died it would start a *new* one —
+  leaving the first consumer on a dead broadcaster while a second dvb-rs fights
+  the flock. The caption decode therefore subscribes to the HLS session's own
+  lease and dies with it.
 - **Captions are decoded by us, and `-copyts` is load-bearing.** ffmpeg has no
   ARIB caption decoder, so the HLS session drops the caption PID (`-sn -dn`)
   and `internal/caption` decodes it out of a *second* lease on the same tune

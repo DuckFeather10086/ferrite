@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/DuckFeather10086/ferrite/internal/config"
+	"github.com/DuckFeather10086/ferrite/internal/fanout"
 )
 
 // fakeTuner returns scripted TsStreams instead of spawning dvbr.
@@ -285,4 +286,53 @@ type failingTuner struct{}
 
 func (failingTuner) Tune(context.Context, int, string) (TsStream, error) {
 	return nil, errors.New("tune boom")
+}
+
+// An extra subscription reads the same tune without becoming a second claim on
+// the adapter — the shape the caption decode needs beside a live HLS encode.
+// A second Acquire would also share the tune, but it would report two live
+// claims for one viewer and, if the tune had just died, would start another.
+func TestLease_SubscribeSharesTheTuneWithoutAClaim(t *testing.T) {
+	ft := &fakeTuner{makeStream: func(ctx context.Context, _ int, _ string) TsStream {
+		return newHoldStream(ctx, bytes.Repeat([]byte{0x47}, 1<<16))
+	}}
+	p := newPool(t, 1, ft)
+
+	lease, err := p.Acquire(context.Background(), "mx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	extra := lease.Subscribe()
+
+	// Both consumers see bytes from the one tune.
+	for _, c := range []struct {
+		name string
+		sub  *fanout.Sub
+	}{{"lease", lease.Sub}, {"extra", extra}} {
+		name, sub := c.name, c.sub
+		select {
+		case chunk, ok := <-sub.Ch:
+			if !ok || len(chunk.Data) == 0 {
+				t.Fatalf("%s: no data", name)
+			}
+			chunk.Release()
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: nothing arrived", name)
+		}
+	}
+	if got := ft.tuneCount.Load(); got != 1 {
+		t.Fatalf("tuned %d times, want 1", got)
+	}
+
+	// One viewer, one claim: the adapter must not look doubly occupied.
+	st := p.Status()
+	if len(st) != 1 || st[0].Refs != 1 {
+		t.Fatalf("status = %+v, want a single ref", st)
+	}
+
+	lease.Unsubscribe(extra)
+	lease.Release()
+	if st := p.Status(); st[0].Refs != 0 || st[0].Channel != "" {
+		t.Fatalf("adapter still busy after release: %+v", st)
+	}
 }

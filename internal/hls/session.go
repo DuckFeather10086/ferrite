@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -184,6 +185,27 @@ func (m *Manager) probeSeconds() float64 {
 	return m.ProbeSeconds
 }
 
+// occupancy describes the sessions this manager is holding, for the log line
+// that accompanies a failed acquire. The pool knows about recordings and EPG
+// too, but a live session on another channel is the case a viewer can act on —
+// and the one the switch endpoint exists to clear.
+func (m *Manager) occupancy() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.sessions) == 0 && len(m.opening) == 0 {
+		return "no live sessions (a recording or EPG pass has it)"
+	}
+	var parts []string
+	for ch, s := range m.sessions {
+		parts = append(parts, fmt.Sprintf("%s(idle %s)", ch, s.IdleFor().Round(time.Second)))
+	}
+	for ch := range m.opening {
+		parts = append(parts, ch+"(opening)")
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, " ")
+}
+
 // Session is one live ffmpeg pipeline for one channel.
 type Session struct {
 	Channel      string
@@ -196,10 +218,9 @@ type Session struct {
 	lastSeen time.Time
 	closed   bool
 
-	// The caption decode, when one is running: a second lease on the same
-	// tune (equal priority, so it joins rather than evicting) and the
-	// context that stops it.
-	capLease  *tuner.Lease
+	// The caption decode, when one is running: an extra subscription to this
+	// session's own tune, and the context that stops it.
+	capSub    *fanout.Sub
 	capCancel context.CancelFunc
 }
 
@@ -260,6 +281,12 @@ func (m *Manager) openSession(ctx context.Context, channel string) (*Session, er
 	// frontend lock.
 	lease, err := m.Tuners.Acquire(ctx, channel)
 	if err != nil {
+		// Say who has the adapter. This failure is the one a viewer sees as
+		// "cannot play this channel", and until now it reached the browser
+		// without leaving a trace in the log — so there was no way to tell a
+		// recording from another viewer from a stale player.
+		slog.Warn("hls: cannot acquire the adapter",
+			"channel", channel, "err", err, "occupancy", m.occupancy())
 		return nil, fmt.Errorf("hls: acquire %q: %w", channel, err)
 	}
 	canonical := lease.Channel
@@ -391,35 +418,31 @@ func (m *Manager) openSession(ctx context.Context, channel string) (*Session, er
 
 	go pumpToFFmpeg(lease.Sub, ff.Stdin)
 
-	// Captions ride the same tune. A second Acquire on the same channel joins
-	// the existing tuneSession — equal priority does not evict — so this is a
-	// second fanout subscription, not a second tune.
+	// Captions read the same bytes as the encode, so they take another
+	// subscription to this session's tune rather than a second claim on the
+	// adapter: one viewer should look like one live claim, and a second Acquire
+	// could tune again if this tune had just died.
 	withSubs := false
 	if m.CaptionBin != "" && m.FFprobeBin != "" {
-		capLease, cerr := m.Tuners.Acquire(context.Background(), canonical)
-		if cerr != nil {
-			slog.Warn("hls: no lease for captions; continuing without them",
-				"channel", canonical, "err", cerr)
-		} else {
-			capCtx, cancel := context.WithCancel(context.Background())
-			pipeline := &caption.Pipeline{
-				Bin:           m.CaptionBin,
-				FFprobeBin:    m.FFprobeBin,
-				Channel:       canonical,
-				Dir:           dir,
-				VideoPlaylist: playlist,
-				Sub:           capLease.Sub,
-			}
-			s.capLease = capLease
-			s.capCancel = cancel
-			withSubs = true
-			go func() {
-				if err := pipeline.Run(capCtx); err != nil && capCtx.Err() == nil {
-					slog.Warn("hls: caption pipeline stopped",
-						"channel", canonical, "err", err)
-				}
-			}()
+		capSub := lease.Subscribe()
+		capCtx, cancel := context.WithCancel(context.Background())
+		pipeline := &caption.Pipeline{
+			Bin:           m.CaptionBin,
+			FFprobeBin:    m.FFprobeBin,
+			Channel:       canonical,
+			Dir:           dir,
+			VideoPlaylist: playlist,
+			Sub:           capSub,
 		}
+		s.capSub = capSub
+		s.capCancel = cancel
+		withSubs = true
+		go func() {
+			if err := pipeline.Run(capCtx); err != nil && capCtx.Err() == nil {
+				slog.Warn("hls: caption pipeline stopped",
+					"channel", canonical, "err", err)
+			}
+		}()
 	}
 	if err := caption.WriteMaster(dir, canonical, withSubs); err != nil {
 		// The master playlist is how a client finds the subtitle rendition;
@@ -566,13 +589,13 @@ func (s *Session) tearDown() {
 	if s.ff != nil {
 		_ = s.ff.Close()
 	}
-	// Stop the caption decode before releasing its lease: cancelling kills the
-	// child, and the release is what lets the tune go.
+	// Stop the caption decode before releasing the lease: cancelling kills the
+	// child, then the subscription goes, then the tune.
 	if s.capCancel != nil {
 		s.capCancel()
 	}
-	if s.capLease != nil {
-		s.capLease.Release()
+	if s.capSub != nil && s.lease != nil {
+		s.lease.Unsubscribe(s.capSub)
 	}
 	if s.lease != nil {
 		s.lease.Release()
