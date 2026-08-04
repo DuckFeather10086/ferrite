@@ -212,6 +212,16 @@ mid-recording finalizing as 'done'.
   rewrites them to `api/live/{channel}/…`, still relative so the daemon
   survives being mounted behind a path prefix. Serving the same playlist
   file from a third path means rebasing again.
+- **A route's page is the `.html` file, never the directory beside it.**
+  The Next export writes both: `guide.html` *and* a `guide/` holding the RSC
+  payloads client-side navigation fetches. `staticHandler` therefore cannot
+  treat a successful `fsys.Open(name)` as "found it" — a directory opens
+  fine, and serving it produced an autoindex listing of `__next.*.txt`
+  where the page belonged. It tests `isFile` and falls through to
+  `name + ".html"`. This only bit a *direct* load (a bookmark, a reload,
+  the URL typed in), because a tab click is handled entirely by the client
+  router and never asks the server for the route — which is how it survived
+  in the committed `dist` unnoticed.
 - **`name` is the identifier; `display_name` is the label.** Every request
   takes `name`. What a UI *shows* is `config.Channel.DisplayName()`, served
   as `display_name` on `/api/channels`, because `channels.json` mixes three

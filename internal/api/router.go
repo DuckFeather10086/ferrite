@@ -138,10 +138,10 @@ func NewRouter(d Deps) http.Handler {
 }
 
 // staticHandler serves the embedded UI bundle. Real files are served
-// as-is. For paths that don't match an exact file, it also tries the
-// .html suffix (Next.js static export). Everything else falls back to
-// index.html for client-side SPA routing. Unknown /api/* paths still
-// get a JSON 404 rather than the SPA shell.
+// as-is. For paths that don't match a file, it tries the .html suffix
+// (Next.js static export). Everything else falls back to index.html for
+// client-side SPA routing. Unknown /api/* paths still get a JSON 404
+// rather than the SPA shell.
 func staticHandler(fsys fs.FS) http.HandlerFunc {
 	fileServer := http.FileServer(http.FS(fsys))
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -153,19 +153,39 @@ func staticHandler(fsys fs.FS) http.HandlerFunc {
 		// change across restarts.
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
-		if name != "" {
-			if _, err := fsys.Open(name); err != nil {
-				// Try .html suffix for static-export routes (e.g. /guide → guide.html).
-				if _, err2 := fsys.Open(name + ".html"); err2 == nil {
-					r.URL.Path = "/" + name + ".html"
-				} else {
-					// Not a real asset → serve the SPA shell.
-					r.URL.Path = "/"
-				}
+		if name != "" && !isFile(fsys, name) {
+			// Try .html suffix for static-export routes (e.g. /guide → guide.html).
+			if isFile(fsys, name+".html") {
+				r.URL.Path = "/" + name + ".html"
+			} else {
+				// Not a real asset → serve the SPA shell.
+				r.URL.Path = "/"
 			}
 		}
 		fileServer.ServeHTTP(w, r)
 	}
+}
+
+// isFile reports whether name is a regular file in fsys.
+//
+// The directory case is the whole reason this is not a bare Open: the
+// export puts the page for /guide in guide.html *and* a sibling directory
+// guide/ holding the RSC payloads that client-side navigation fetches.
+// Open("guide") therefore succeeds, and a handler that took that as "the
+// asset exists" served the directory — which, having no index.html of its
+// own, came back as an autoindex listing of __next.*.txt files. Loading
+// /guide, /schedules or /recordings straight from the address bar (a
+// bookmark, or a reload) got that listing instead of the page; only
+// arriving via a tab click worked, because then the router never asks the
+// server for the route at all.
+func isFile(fsys fs.FS, name string) bool {
+	f, err := fsys.Open(name)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	return err == nil && !st.IsDir()
 }
 
 func (d Deps) handleStatus(w http.ResponseWriter, r *http.Request) {

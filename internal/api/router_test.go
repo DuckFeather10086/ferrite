@@ -228,6 +228,33 @@ func TestWebUI_ServesAndFallsBack(t *testing.T) {
 	}
 }
 
+// A route whose .html page has a same-named directory beside it must serve
+// the page. The Next.js export lays every route out exactly this way —
+// guide.html plus a guide/ of RSC payloads — so a handler that treats a
+// successful Open("guide") as "found the asset" serves the directory, and
+// with no index.html inside, the client gets an autoindex listing of
+// __next.*.txt where the page should be.
+func TestWebUI_RouteWithSiblingDirectory(t *testing.T) {
+	web := fstest.MapFS{
+		"index.html":             {Data: []byte("<html>SPA-SHELL</html>")},
+		"guide.html":             {Data: []byte("<html>GUIDE-PAGE</html>")},
+		"guide/__next.guide.txt": {Data: []byte("rsc-payload")},
+		"guide/__next._tree.txt": {Data: []byte("rsc-payload")},
+	}
+	h := NewRouter(Deps{Channels: &config.Channels{}, StartedAt: time.Now(), Web: web})
+
+	rr := get(t, h, "/guide")
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "GUIDE-PAGE") {
+		t.Fatalf("/guide: %d %s", rr.Code, rr.Body.String())
+	}
+	// The payloads themselves are still reachable — client-side navigation
+	// fetches them by their real paths.
+	if rr := get(t, h, "/guide/__next.guide.txt"); rr.Code != 200 ||
+		!strings.Contains(rr.Body.String(), "rsc-payload") {
+		t.Fatalf("rsc payload: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestRecordings_Empty(t *testing.T) {
 	h, _ := newTestRouter(t, true)
 	rr := get(t, h, "/api/recordings")
