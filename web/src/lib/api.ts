@@ -1,4 +1,5 @@
 import useSWR, { mutate } from "swr";
+import { useEffect, useMemo, useState } from "react";
 
 const BASE = ""; // same-origin
 
@@ -51,13 +52,35 @@ export type AdapterStatus = {
   adapter: number;
   channel?: string;
   refs: number;
+  // The claim's priority — "record" | "live" | "background". Absent when
+  // the adapter is idle.
+  prio?: string;
+  // Held without a fanout: an EPG pass has the adapter but no channel to
+  // report. Without this the UI reads a reserved adapter as idle.
+  reserved?: boolean;
+};
+
+// One address the daemon answers on, labelled by reach: local | lan |
+// tailscale | public. Only the daemon can enumerate these — a browser
+// would be listing the viewer's own interfaces — so they arrive on
+// /api/status rather than being derived here.
+export type Address = {
+  kind: string;
+  host: string;
+  base: string; // "http://192.168.1.42:8010"
+  iface?: string;
 };
 
 export type StatusResp = {
   version: string;
   started: string;
   uptime: string;
+  // The single live playlist path, whatever is tuned ("/stream.m3u8").
+  stream?: string;
+  addresses?: Address[];
   adapters?: AdapterStatus[];
+  // Row ids of recordings in progress.
+  recording?: number[];
 };
 
 // ── hooks ────────────────────────────────────────────────────────
@@ -120,6 +143,42 @@ export function useNextEvent(serviceId?: number) {
   return { data: next, ...rest };
 }
 
+// Re-render on the minute, returning the current minute as epoch ms.
+//
+// Both the guide's "on now" highlight and the sidebar's now-playing line
+// are derived from Date.now() during render, which makes them only as
+// fresh as the last render React happened to do for some other reason.
+// This is the clock they need. Ticking faster than a minute and letting
+// the state bail out on an unchanged value keeps it near the boundary
+// without a render a second.
+export function useMinuteTick(): number {
+  const [minute, setMinute] = useState(() => Math.floor(Date.now() / 60_000));
+  useEffect(() => {
+    const id = setInterval(() => setMinute(Math.floor(Date.now() / 60_000)), 15_000);
+    return () => clearInterval(id);
+  }, []);
+  return minute * 60_000;
+}
+
+// What is airing right now on every service, keyed by service_id.
+//
+// The channel sidebar wants a now-playing line per row, which it used to
+// get by mounting one useNow() per channel — 39 requests to /api/now on
+// every page load. This derives all of them from the one all-services
+// window the guide already fetches (same SWR key, so visiting either page
+// warms the other): 312 events, ~180 KB, once.
+export function useNowByService() {
+  const { data } = useEPG();
+  const at = useMinuteTick();
+  return useMemo(() => {
+    const m = new Map<number, EPGEvent>();
+    for (const e of data ?? []) {
+      if (isAiring(e, at)) m.set(e.service_id, e);
+    }
+    return m;
+  }, [data, at]);
+}
+
 export function useStatus() {
   return useSWR<StatusResp>("/api/status", fetcher, {
     refreshInterval: 15_000,
@@ -132,10 +191,91 @@ export function useSchedules() {
 }
 
 export function useRecordings() {
-  return useSWR<Recording[]>("/api/recordings", fetcher, { revalidateOnFocus: false });
+  // A running recording's size only lands in the row when it finalizes,
+  // but its state does change under us — poll while the page is open.
+  return useSWR<Recording[]>("/api/recordings", fetcher, {
+    refreshInterval: 30_000,
+    revalidateOnFocus: false,
+  });
+}
+
+// ── channel labelling ────────────────────────────────────────────
+
+// Lookup by the two keys the rest of the API hands out: a channel `name`
+// (schedules, recordings, adapter status) and a `service_id` (EPG rows).
+//
+// Every page needs this. The guide, the schedule list and the recordings
+// list each used to print the raw key, which for a record migrated from
+// the legacy dvbv5 conf is mojibake — "NHKEFl1El5~" where the label is
+// "NHKEテレ1東京". Only the Live sidebar had been fixed. One index, so a
+// new page cannot regress it again.
+export type ChannelIndex = {
+  channels: Channel[];
+  byName: Map<string, Channel>;
+  byServiceId: Map<number, Channel>;
+  // Label for a channel name; the name itself if it is not in the list
+  // (a recording of a channel since removed from channels.json).
+  label: (name: string) => string;
+  // Label for a service id; "SID 1024" if unknown, which is what an EPG
+  // row for a service not in channels.json deserves.
+  labelForServiceId: (sid: number) => string;
+};
+
+export function useChannelIndex(): ChannelIndex {
+  const { data } = useChannels();
+  return useMemo(() => {
+    const channels = data ?? [];
+    const byName = new Map(channels.map((c) => [c.name, c]));
+    // First wins, mirroring config.Channels.Find's file order: several
+    // services on a mux share a name, and the first is the one a bare
+    // request resolves to.
+    const byServiceId = new Map<number, Channel>();
+    for (const c of channels) {
+      if (!byServiceId.has(c.service_id)) byServiceId.set(c.service_id, c);
+    }
+    return {
+      channels,
+      byName,
+      byServiceId,
+      label: (name) => {
+        const c = byName.get(name);
+        return c ? displayName(c) : name;
+      },
+      labelForServiceId: (sid) => {
+        const c = byServiceId.get(sid);
+        return c ? displayName(c) : `SID ${sid}`;
+      },
+    };
+  }, [data]);
+}
+
+// Display name: whatever the daemon chose, falling back to the canonical
+// key. Requests still carry c.name.
+//
+// This used to take aliases[0], which is wrong as often as it is right —
+// for records migrated from the legacy dvbv5 conf the first alias is the
+// mojibake ("J!'COM|ÆìÓ"), and the readable name is either later in the
+// list or is c.name itself. The choice now lives in one place, in Go.
+export function displayName(c: Channel): string {
+  return c.display_name || c.name;
 }
 
 // ── actions ──────────────────────────────────────────────────────
+
+async function post<T>(path: string, body?: unknown): Promise<T | null> {
+  const r = await fetch(BASE + path, {
+    method: "POST",
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({ error: r.statusText }));
+    throw new Error(e.error ?? r.statusText);
+  }
+  // 204 on the stop endpoints.
+  if (r.status === 204) return null;
+  return r.json() as Promise<T>;
+}
 
 export async function createSchedule(body: {
   channel: string;
@@ -145,17 +285,9 @@ export async function createSchedule(body: {
   lead_s?: number;
   trail_s?: number;
 }) {
-  const r = await fetch(BASE + "/api/schedule", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) {
-    const e = await r.json().catch(() => ({ error: r.statusText }));
-    throw new Error(e.error ?? r.statusText);
-  }
+  const out = await post<{ id: number }>("/api/schedule", body);
   await mutate("/api/schedule");
-  return r.json() as Promise<{ id: number }>;
+  return out!;
 }
 
 export async function cancelSchedule(id: number) {
@@ -164,8 +296,40 @@ export async function cancelSchedule(id: number) {
   await mutate("/api/schedule");
 }
 
+// Change the live channel. The daemon closes any other session, tunes
+// this one, and does not answer until the playlist is on disk.
+//
+// This must not be done by hand as stop-then-open: two live sessions
+// have equal priority and will not evict each other, so with a single
+// adapter the wrong order deadlocks on ErrNoAdapter. The endpoint exists
+// to own that order — see api.handleLiveSwitch.
+export async function switchLive(channel: string) {
+  const out = await post<{ channel: string; playlist: string; closed: string[] }>(
+    "/api/live/" + encodeURIComponent(channel) + "/switch",
+  );
+  await mutate("/api/status");
+  return out!;
+}
+
 export async function stopLive(channel: string) {
-  await fetch(BASE + "/api/live/" + encodeURIComponent(channel) + "/stop", { method: "POST" });
+  await post("/api/live/" + encodeURIComponent(channel) + "/stop");
+  await mutate("/api/status");
+}
+
+// Record now, open-ended (the daemon caps it at MaxAdhocDuration). 201
+// does not mean bytes are on disk — the tuner is acquired
+// asynchronously and a failure lands in the row's state.
+export async function recordNow(channel: string) {
+  const out = await post<{ id: number; channel: string; title: string }>("/api/record", { channel });
+  await Promise.all([mutate("/api/recordings"), mutate("/api/status")]);
+  return out!;
+}
+
+// The graceful early finish: the row goes to 'done' with the bytes
+// written. Canceling instead would mark it 'failed'.
+export async function stopRecording(id: number) {
+  await post("/api/record/" + id + "/stop");
+  await Promise.all([mutate("/api/recordings"), mutate("/api/status")]);
 }
 
 // The recorded TS itself. The endpoint honours Range, so this works as a
@@ -210,15 +374,17 @@ export function epgEnd(e: EPGEvent) {
   return new Date(new Date(e.start).getTime() + e.duration_s * 1000).toISOString();
 }
 
-// Display name: whatever the daemon chose, falling back to the canonical
-// key. Requests still carry c.name.
-//
-// This used to take aliases[0], which is wrong as often as it is right —
-// for records migrated from the legacy dvbv5 conf the first alias is the
-// mojibake ("J!'COM|ÆìÓ"), and the readable name is either later in the
-// list or is c.name itself. The choice now lives in one place, in Go.
-export function displayName(c: Channel): string {
-  return c.display_name || c.name;
+export function isAiring(e: EPGEvent, at = Date.now()) {
+  const start = new Date(e.start).getTime();
+  return start <= at && new Date(epgEnd(e)).getTime() > at;
+}
+
+// "1h30m" — a duration in the same shape the daemon's uptime uses.
+export function fmtDuration(seconds: number) {
+  const m = Math.round(seconds / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return m % 60 === 0 ? `${h}h` : `${h}h${m % 60}m`;
 }
 
 export type ChannelGroup = "GR" | "BS" | "CS" | "SKY" | "Other";

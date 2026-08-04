@@ -1,51 +1,54 @@
 "use client";
 
-import { useStatus } from "@/lib/api";
+import { useChannelIndex, useStatus } from "@/lib/api";
 
-// Header tuner-occupancy badge. Uses `refs > 0` (not a non-existent
-// `busy` field) to decide whether an adapter is in use. Turns red and
-// pulses when every adapter is busy — the Live page also gates channel
-// switching on this so the user gets a clear "no free tuner" signal.
+// The adapter strip, which is the same sentence the TUI's status bar
+// writes: what each adapter is doing, and whether anything is recording.
+//
+// It reports occupancy per adapter rather than a "2/3 busy" count. On a
+// one-tuner box the count says nothing you can act on — "busy" is only
+// useful once you know *what* has it, because that decides whether your
+// next click will succeed (an EPG pass yields to live; another
+// recording does not).
 export function TunerStatus() {
   const { data } = useStatus();
+  const { label } = useChannelIndex();
   const adapters = data?.adapters ?? [];
-  const total = adapters.length;
-  const busy = adapters.filter((a) => a.refs > 0).length;
-  const saturated = total > 0 && busy >= total;
+  const recording = data?.recording ?? [];
 
-  if (total === 0) {
-    return (
-      <span
-        className="text-xs px-2 py-0.5 rounded-full"
-        style={{ background: "var(--color-surface)", color: "var(--color-text-muted)" }}
-        title="No DVB adapters configured"
-      >
-        no tuners
-      </span>
-    );
+  if (!adapters.length) {
+    return <span className="font-mono text-[11px] text-faint">no tuners</span>;
   }
 
   return (
-    <span
-      className={`text-xs px-2 py-0.5 rounded-full ${saturated ? "animate-pulse" : ""}`}
-      style={{
-        background: "var(--color-surface)",
-        color: saturated ? "var(--color-danger)" : "var(--color-text-muted)",
-        border: saturated ? "1px solid var(--color-danger)" : "1px solid var(--color-border)",
-      }}
-      title={saturated ? "All tuners busy — stop a stream or recording to free one" : `${busy} of ${total} tuners in use`}
-    >
-      tuners {busy}/{total}
-    </span>
-  );
-}
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px]">
+      {adapters.map((a) => (
+        <span key={a.adapter} className="flex items-center gap-1">
+          <span className="text-faint">a{a.adapter}</span>
+          {a.reserved ? (
+            // Held without a fanout: an EPG pass has the adapter and no
+            // channel to name. Reading this as idle is how the UI came to
+            // claim a free tuner while the next tune waited on a lock.
+            <span className="text-dim">EPG</span>
+          ) : a.channel ? (
+            <>
+              <span className="text-fg">{label(a.channel)}</span>
+              <span className="text-faint">
+                ×{a.refs}
+                {a.prio ? `/${a.prio}` : ""}
+              </span>
+            </>
+          ) : (
+            <span className="text-faint">idle</span>
+          )}
+        </span>
+      ))}
 
-// Non-hook helper exported for the Live page to decide whether channel
-// switching should be gated. Returns the live AdapterStatus snapshot.
-export function useTunersFree(): { total: number; busy: number; free: number } {
-  const { data } = useStatus();
-  const adapters = data?.adapters ?? [];
-  const total = adapters.length;
-  const busy = adapters.filter((a) => a.refs > 0).length;
-  return { total, busy, free: Math.max(0, total - busy) };
+      {recording.length > 0 && (
+        <span className="text-rec">
+          ● REC{recording.length > 1 ? ` ×${recording.length}` : ""}
+        </span>
+      )}
+    </div>
+  );
 }

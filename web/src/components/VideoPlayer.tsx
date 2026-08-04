@@ -7,6 +7,10 @@ export type PlayerStatus = "idle" | "loading" | "playing" | "error";
 
 export type VideoPlayerProps = {
   src: string | null;
+  // Shown over a dead player instead of a spinner: on a one-tuner box a
+  // channel change can legitimately fail (a recording holds the adapter),
+  // and the reason comes from the switch call, not from hls.js.
+  fatal?: string | null;
   onPrev?: () => void;
   onNext?: () => void;
 };
@@ -56,20 +60,27 @@ const HLS_CONFIG = {
 };
 
 // Live HLS player. Wraps <video> + hls.js and surfaces a coarse status
-// so the parent can render an overlay (spinner / error + retry). Fatal
-// hls.js errors get up to 3 automatic recoveries (recoverMediaError for
-// media errors, startLoad for network errors); after that the overlay
-// shows a manual retry button.
+// so it can render an overlay (spinner / error + retry). Fatal hls.js
+// errors get up to 3 automatic recoveries (recoverMediaError for media
+// errors, startLoad for network errors); after that the overlay shows a
+// manual retry button.
 //
 // Autoplay policy: start muted (browser-compliant), unmute after the
 // first play() resolves. enableWorker=true offloads remuxing from the
 // main thread (the previous `false` caused stutter on high-bitrate CS).
-export function VideoPlayer({ src, onPrev, onNext }: VideoPlayerProps) {
+export function VideoPlayer({ src, fatal, onPrev, onNext }: VideoPlayerProps) {
+  const boxRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const recoveriesRef = useRef(0);
   const [status, setStatus] = useState<PlayerStatus>("idle");
   const [error, setError] = useState<string | null>(null);
+  // Bumped by the retry button. Attaching hls.js lives in exactly one
+  // place — the effect below — and retry re-runs it. It used to be a
+  // second copy of the same setup, which had already drifted: the copy
+  // never installed the recovery path, so the first hiccup after a
+  // manual retry was fatal.
+  const [reload, setReload] = useState(0);
 
   const destroy = useCallback(() => {
     if (hlsRef.current) {
@@ -111,9 +122,7 @@ export function VideoPlayer({ src, onPrev, onNext }: VideoPlayerProps) {
       hlsRef.current = h;
       h.loadSource(src);
       h.attachMedia(video);
-      h.on(Hls.Events.MANIFEST_PARSED, () => {
-        playThenUnmute(video);
-      });
+      h.on(Hls.Events.MANIFEST_PARSED, () => playThenUnmute(video));
       h.on(Hls.Events.ERROR, (_evt, data) => {
         if (!data.fatal) return;
         // Cold tunes start mid-GOP: the first segment can carry
@@ -151,38 +160,18 @@ export function VideoPlayer({ src, onPrev, onNext }: VideoPlayerProps) {
       video.removeEventListener("loadstart", onWaiting);
       destroy();
     };
-  }, [src, destroy]);
+  }, [src, reload, destroy]);
 
-  const retry = useCallback(() => {
-    // Force the effect to re-run by toggling status; the src prop is
-    // unchanged, so we re-trigger via a state-driven remount pattern.
-    setStatus("loading");
-    setError(null);
-    recoveriesRef.current = 0;
-    const v = videoRef.current;
-    if (!v || !src) return;
-    if (hlsRef.current) {
-      hlsRef.current.destroy();
-      hlsRef.current = null;
-    }
-    if (!Hls.isSupported()) {
-      v.src = src;
-      playThenUnmute(v);
-    } else {
-      const h = new Hls(HLS_CONFIG);
-      hlsRef.current = h;
-      h.loadSource(src);
-      h.attachMedia(v);
-      h.on(Hls.Events.MANIFEST_PARSED, () => playThenUnmute(v));
-      h.on(Hls.Events.ERROR, (_e, data) => {
-        if (!data.fatal) return;
-        setStatus("error");
-        setError(describeHlsError(data));
-      });
-    }
-  }, [src]);
+  // Fullscreen the container rather than the <video>, so the overlays
+  // ("Tuning…", an error) are still visible in fullscreen.
+  const fullscreen = useCallback(() => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else boxRef.current?.requestFullscreen?.();
+  }, []);
 
-  // Keyboard shortcuts (only when this player region is focused/hovered).
+  // Keyboard shortcuts, live only while the player has focus — arrow keys
+  // change channel, and stealing those from the rest of the page would
+  // make the channel list unusable.
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -195,14 +184,13 @@ export function VideoPlayer({ src, onPrev, onNext }: VideoPlayerProps) {
           else v.pause();
           break;
         case "ArrowLeft":
-          if (onPrev) onPrev();
+          onPrev?.();
           break;
         case "ArrowRight":
-          if (onNext) onNext();
+          onNext?.();
           break;
         case "f":
-          if (document.fullscreenElement) document.exitFullscreen();
-          else v.requestFullscreen?.();
+          fullscreen();
           break;
         case "m":
           v.muted = !v.muted;
@@ -211,64 +199,50 @@ export function VideoPlayer({ src, onPrev, onNext }: VideoPlayerProps) {
     };
     v.addEventListener("keydown", onKey);
     return () => v.removeEventListener("keydown", onKey);
-  }, [onPrev, onNext]);
+  }, [onPrev, onNext, fullscreen]);
 
-  const fullscreen = useCallback(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    if (document.fullscreenElement) document.exitFullscreen();
-    else v.requestFullscreen?.();
-  }, []);
+  const shown = fatal ? "error" : status;
 
   return (
-    <div className="relative bg-black rounded-xl overflow-hidden aspect-video group">
+    // 16:9, but capped so the programme title and the record button stay
+    // above the fold on a laptop. Past the cap the box is wider than the
+    // picture and the video letterboxes inside it — invisibly, the bars
+    // being the same black.
+    <div
+      ref={boxRef}
+      className="relative aspect-video max-h-[70vh] overflow-hidden rounded-lg bg-black"
+    >
       <video
         ref={videoRef}
-        controls
+        // No source means no timeline to scrub and no volume to set: with
+        // `controls` always on, an idle player showed a native control bar
+        // reading 0:00 under the Watch button.
+        controls={Boolean(src)}
         playsInline
         muted
         tabIndex={0}
-        className="w-full h-full"
-        poster="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 9'><rect fill='%23111827' width='16' height='9'/></svg>"
+        className="h-full w-full"
       />
 
-      {/* Loading overlay */}
-      {status === "loading" && src && (
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-          <div className="flex flex-col items-center gap-2" style={{ color: "var(--color-text-muted)" }}>
-            <div className="w-8 h-8 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-            <span className="text-xs">チューニング中…</span>
-          </div>
+      {shown === "loading" && src && (
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2">
+          <div className="h-6 w-6 animate-spin rounded-full border border-white/25 border-t-white" />
+          <span className="font-mono text-[11px] text-white/70">Tuning…</span>
         </div>
       )}
 
-      {/* Error overlay */}
-      {status === "error" && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/70">
-          <div className="text-center px-4">
-            <div className="text-sm font-medium mb-1" style={{ color: "var(--color-danger)" }}>
-              再生エラー
-            </div>
-            <div className="text-xs" style={{ color: "var(--color-text-muted)" }}>
-              {error ?? "ストリームを開けませんでした"}
-            </div>
+      {shown === "error" && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/80 px-6 text-center">
+          <div>
+            <p className="text-sm font-medium text-rec">Cannot play this channel</p>
+            <p className="mt-1 text-xs text-dim">{fatal ?? error ?? "The stream did not open."}</p>
           </div>
-          <button onClick={retry} className="btn btn-accent text-xs">
-            再試行
-          </button>
+          {!fatal && (
+            <button onClick={() => setReload((n) => n + 1)} className="btn">
+              Retry
+            </button>
+          )}
         </div>
-      )}
-
-      {/* Fullscreen button (top-right, fades in on hover) */}
-      {src && status !== "error" && (
-        <button
-          onClick={fullscreen}
-          className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity px-2 py-1 rounded-md text-xs"
-          style={{ background: "rgba(0,0,0,0.6)", color: "#fff" }}
-          title="全画面 (F)"
-        >
-          ⛶
-        </button>
       )}
     </div>
   );
@@ -277,7 +251,7 @@ export function VideoPlayer({ src, onPrev, onNext }: VideoPlayerProps) {
 function describeHlsError(data: { type?: string; details?: string }): string {
   const t = data.type ?? "";
   const d = data.details ?? "";
-  if (t === Hls.ErrorTypes.NETWORK_ERROR) return `ネットワークエラー (${d})`;
-  if (t === Hls.ErrorTypes.MEDIA_ERROR) return `メディアエラー (${d})`;
+  if (t === Hls.ErrorTypes.NETWORK_ERROR) return `Network error (${d})`;
+  if (t === Hls.ErrorTypes.MEDIA_ERROR) return `Media error (${d})`;
   return `${t} ${d}`.trim();
 }

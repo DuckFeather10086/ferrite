@@ -1,87 +1,180 @@
 @import "tailwindcss";
 
+/* ── theme ───────────────────────────────────────────────────────────
+   Near-monochrome, deliberately. This UI is the sibling of a terminal
+   remote that has only bold, faint and reverse to work with, and the
+   restraint reads better than the neon cyan and the gradient glows this
+   page used to carry: in a room where you are watching television, the
+   picture should be the only thing that glows.
+
+   So chroma is spent only where missing a state costs something — red
+   for recording, and the three badge colours a table needs to be
+   scannable. Emphasis everywhere else is inversion, which is what the
+   TUI's cursor does.
+
+   Tailwind v4 derives utilities from these (--color-dim → text-dim,
+   --color-line → border-line), which is why components can use class
+   names rather than the inline style={{ color: "var(--color-…)" }} that
+   was on nearly every element here. */
+@theme {
+  /* "canvas", not "base": Tailwind spends `text-base` on a font size, so a
+     --color-base would generate a utility that silently loses to it. */
+  --color-canvas: #0b0b0c;
+  --color-panel: #131316;
+  --color-raised: #1d1d21;
+  --color-line: #2b2b30;
+  --color-fg: #e9e9e7;
+  --color-dim: #8d8d93;
+  --color-faint: #5b5b61;
+
+  --color-rec: #e5484d;
+  --color-ok: #6faa6f;
+  --color-warn: #c2a02f;
+
+  /* No webfont is bundled — this UI has to work on a LAN with no
+     internet — so the stack must resolve to something real on the
+     device. The CJK families matter: programme titles and channel
+     names arrive from the broadcast in Japanese. */
+  --font-sans: system-ui, -apple-system, "Hiragino Kaku Gothic ProN",
+    "Noto Sans JP", "Yu Gothic UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "DejaVu Sans Mono",
+    monospace;
+}
+
 @layer base {
-  :root {
-    --color-bg: #0a0e1a;
-    --color-surface: #141b2e;
-    --color-surface-hi: #1d2742;
-    --color-border: #2a3a5c;
-    --color-text: #f2f6ff;
-    --color-text-muted: #9fadc8;
-    --color-accent: #22d3ee;
-    --color-accent-dim: #06b6d4;
-    --color-accent-soft: rgba(34, 211, 238, 0.14);
-    --color-danger: #ff6b8a;
-    --color-success: #4ade80;
-    --color-warn: #facc15;
+  body {
+    background: var(--color-canvas);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
   }
 
-  body {
-    background:
-      radial-gradient(1100px 600px at 12% -10%, rgba(34, 211, 238, 0.08), transparent 60%),
-      radial-gradient(900px 500px at 100% 0%, rgba(99, 102, 241, 0.07), transparent 55%),
-      var(--color-bg);
-    color: var(--color-text);
-    font-family: "Inter", system-ui, -apple-system, sans-serif;
+  /* Clock times, byte counts and service ids line up in columns only if
+     they are tabular; the sans stack above is not. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
   }
 
   ::selection {
-    background: var(--color-accent-soft);
-    color: var(--color-text);
+    background: var(--color-fg);
+    color: var(--color-canvas);
   }
 
-  /* Subtle accent scrollbar to match the brighter theme. */
-  ::-webkit-scrollbar { width: 10px; height: 10px; }
-  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
   ::-webkit-scrollbar-thumb {
-    background: var(--color-surface-hi);
+    background: var(--color-line);
     border-radius: 999px;
-    border: 2px solid transparent;
+    border: 3px solid transparent;
     background-clip: padding-box;
   }
-  ::-webkit-scrollbar-thumb:hover { background: var(--color-border); background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-faint);
+    background-clip: padding-box;
+  }
+
+  /* Keyboard focus must stay visible — the player and the channel list
+     are both driven by arrow keys. */
+  :focus-visible {
+    outline: 1px solid var(--color-fg);
+    outline-offset: 1px;
+  }
 }
 
-/* ── shared ui atoms ────────────────────────────────────────── */
+/* ── atoms ───────────────────────────────────────────────────────────
+   The handful of repeated shapes. Anything used once stays in its
+   component. */
 
 .btn {
-  @apply inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium
-         transition-colors cursor-pointer border-none;
-  background: var(--color-surface);
-  color: var(--color-text);
-  border: 1px solid var(--color-border);
+  @apply inline-flex items-center gap-1.5 rounded-md px-2.5 py-1
+         text-xs whitespace-nowrap cursor-pointer
+         border border-line bg-panel text-fg
+         transition-colors;
 }
-.btn:hover { background: var(--color-surface-hi); border-color: var(--color-accent-soft); }
-.btn-accent { background: var(--color-accent-dim); color: #042027; border-color: transparent; font-weight: 600; }
-.btn-accent:hover { background: var(--color-accent); box-shadow: 0 0 0 1px var(--color-accent), 0 0 14px rgba(34, 211, 238, 0.35); }
-.btn-danger { background: var(--color-danger); color: #2a0612; border-color: transparent; font-weight: 600; }
-.btn-danger:hover { filter: brightness(1.08); box-shadow: 0 0 14px rgba(255, 107, 138, 0.35); }
+.btn:hover:not(:disabled) {
+  @apply bg-raised;
+}
+.btn:disabled {
+  @apply opacity-40 cursor-not-allowed;
+}
+
+/* Inverted, like the TUI cursor — the one loud control on a page. */
+.btn-primary {
+  @apply border-transparent bg-fg font-medium text-canvas;
+}
+.btn-primary:hover:not(:disabled) {
+  @apply bg-white;
+}
+
+.btn-danger {
+  @apply text-rec;
+}
+.btn-danger:hover:not(:disabled) {
+  @apply border-rec/50;
+}
+
+.field {
+  @apply rounded-md border border-line bg-panel px-2 py-1
+         text-sm text-fg outline-none;
+}
+.field:focus {
+  @apply border-faint;
+}
 
 .badge {
-  @apply inline-block px-2 py-0.5 rounded-full text-xs font-medium;
+  @apply inline-block rounded px-1.5 py-0.5 text-[11px] font-medium;
+}
+
+/* A per-row action (the guide's Book button) that only shows on the hovered
+   row. Written out rather than composed from variants because it has to be
+   conditional on the *device*: with 300-odd guide rows a permanently
+   visible button is noise, but on a touch screen there is no hover to
+   reveal it with, and an opacity-0 button still takes taps — an invisible
+   target you can only hit by accident. So the default is visible, and only
+   a device that can hover gets the reveal. */
+.row-action {
+  @apply shrink-0;
+}
+@media (hover: hover) {
+  .row-action {
+    @apply opacity-0 transition-opacity;
+  }
+  .group:hover .row-action,
+  .row-action:focus-visible {
+    @apply opacity-100;
+  }
+}
+
+/* Section label: the small uppercase caption over a group of rows. */
+.eyebrow {
+  @apply font-mono text-[10px] uppercase tracking-[0.12em] text-faint;
+}
+
+.panel {
+  @apply rounded-lg border border-line bg-panel;
 }
 
 .table-wrap {
-  @apply overflow-x-auto rounded-xl border;
-  border-color: var(--color-border);
+  @apply overflow-x-auto rounded-lg border border-line;
 }
 table {
   @apply w-full text-sm;
 }
+thead {
+  @apply bg-panel;
+}
 th {
-  @apply text-left px-3 py-2 text-xs uppercase tracking-wider;
-  color: var(--color-text-muted);
+  @apply px-3 py-1.5 text-left font-mono text-[10px] font-medium
+         uppercase tracking-[0.12em] text-faint;
 }
 td {
-  @apply px-3 py-2;
-  border-top: 1px solid var(--color-border);
+  @apply border-t border-line px-3 py-2 align-top;
 }
-
-.toasts {
-  @apply fixed bottom-4 right-4 z-50 flex flex-col gap-2;
-}
-.toast {
-  @apply px-4 py-2 rounded-lg text-sm shadow-lg animate-pulse;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+tbody tr:hover {
+  @apply bg-panel;
 }

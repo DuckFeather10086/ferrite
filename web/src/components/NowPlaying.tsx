@@ -5,35 +5,42 @@ import {
   createSchedule,
   epgEnd,
   fmtTime,
+  recordNow,
+  stopRecording,
   useNextEvent,
   useNow,
+  useRecordings,
   type EPGEvent,
 } from "@/lib/api";
 
 export type NowPlayingProps = {
   serviceId?: number;
   channelName: string | null;
+  // Whether this page is watching. Recording is independent of it, so the
+  // panel is useful either way — but there is nothing for Stop to stop.
+  playing?: boolean;
   onStop: () => void;
 };
 
-// Now-playing card: title + synopsis + live progress bar (where the
-// current programme sits in its start→end window) + "次の番組" preview
-// + a one-click "预约録画" that creates a schedule from the current
-// event's start/end. The progress bar ticks every second client-side
-// (the daemon's /api/now refreshes every 60s, which is too coarse for
-// a smooth indicator).
-export function NowPlaying({ serviceId, channelName, onStop }: NowPlayingProps) {
+// What is on this channel, and the three things you can do about it:
+// record it right now, book the programme currently airing, or stop
+// watching. The daemon's /api/now only refreshes every 60s, so the
+// progress bar is ticked client-side from the event's own start and end.
+export function NowPlaying({ serviceId, channelName, playing, onStop }: NowPlayingProps) {
   const { data: now } = useNow(serviceId);
   const { data: next } = useNextEvent(serviceId);
+  const { data: recordings } = useRecordings();
   const [progress, setProgress] = useState(0);
   const [booking, setBooking] = useState(false);
   const [booked, setBooked] = useState(false);
-  const [bookErr, setBookErr] = useState<string | null>(null);
+  const [recBusy, setRecBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
-  // Reset the "booked" toast when the programme changes.
+  // A "Booked" label belongs to one programme; clear it when the
+  // programme changes under us.
   useEffect(() => {
     setBooked(false);
-    setBookErr(null);
+    setErr(null);
   }, [now?.event_id]);
 
   useEffect(() => {
@@ -44,9 +51,8 @@ export function NowPlaying({ serviceId, channelName, onStop }: NowPlayingProps) 
     const tick = () => {
       const start = new Date(now.start).getTime();
       const end = new Date(epgEnd(now)).getTime();
-      const n = Date.now();
-      const p = end > start ? Math.min(1, Math.max(0, (n - start) / (end - start))) : 0;
-      setProgress(p);
+      const p = end > start ? (Date.now() - start) / (end - start) : 0;
+      setProgress(Math.min(1, Math.max(0, p)));
     };
     tick();
     const id = setInterval(tick, 1000);
@@ -54,17 +60,17 @@ export function NowPlaying({ serviceId, channelName, onStop }: NowPlayingProps) 
   }, [now]);
 
   if (!channelName) {
-    return (
-      <p className="text-sm" style={{ color: "var(--color-text-muted)" }}>
-        左のリストからチャンネルを選んでください。
-      </p>
-    );
+    return <p className="text-sm text-dim">Pick a channel to start watching.</p>;
   }
 
+  // The ad-hoc recording of this channel, if one is running — its row id
+  // is the handle to stop it.
+  const running = recordings?.find((r) => r.channel === channelName && r.state === "recording");
+
   const book = async () => {
-    if (!now || !serviceId || !channelName) return;
+    if (!now || !serviceId) return;
     setBooking(true);
-    setBookErr(null);
+    setErr(null);
     try {
       await createSchedule({
         channel: channelName,
@@ -74,77 +80,83 @@ export function NowPlaying({ serviceId, channelName, onStop }: NowPlayingProps) 
       });
       setBooked(true);
     } catch (e) {
-      setBookErr(e instanceof Error ? e.message : String(e));
+      setErr(e instanceof Error ? e.message : String(e));
     } finally {
       setBooking(false);
     }
   };
 
+  const toggleRecord = async () => {
+    setRecBusy(true);
+    setErr(null);
+    try {
+      if (running) await stopRecording(running.id);
+      else await recordNow(channelName);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRecBusy(false);
+    }
+  };
+
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex flex-col gap-2">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            {now ? (
-              <>
-                <h2 className="text-base font-semibold leading-tight truncate">{now.title}</h2>
-                <p className="text-xs mt-0.5" style={{ color: "var(--color-text-muted)" }}>
-                  {fmtTime(now.start)} – {fmtTime(epgEnd(now))}
-                </p>
-              </>
-            ) : (
-              <p className="text-sm" style={{ color: "var(--color-text-muted)" }}>
-                番組情報がありません
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          {now ? (
+            <>
+              <h2 className="truncate text-[15px] font-medium leading-tight">{now.title}</h2>
+              <p className="mt-0.5 font-mono text-[11px] text-dim tnum">
+                {fmtTime(now.start)}–{fmtTime(epgEnd(now))}
               </p>
-            )}
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
-            {now && (
-              <button
-                onClick={book}
-                disabled={booking || booked}
-                className={`btn text-xs ${booked ? "btn-accent" : ""}`}
-                title="現在の番組を予約録画"
-              >
-                {booked ? "✓ 予約済み" : booking ? "予約中…" : "● 予約"}
-              </button>
-            )}
-            <button onClick={onStop} className="btn btn-danger text-xs">
-              停止
-            </button>
-          </div>
+            </>
+          ) : (
+            // Normal for a data service or a subchannel the broadcaster
+            // only publishes present/following for — not an error.
+            <p className="text-sm text-dim">No guide data for this channel.</p>
+          )}
         </div>
 
-        {now && (
-          <>
-            {/* Progress bar */}
-            <div
-              className="w-full h-1.5 rounded-full overflow-hidden"
-              style={{ background: "var(--color-surface)" }}
-            >
-              <div
-                className="h-full transition-[width] duration-1000 ease-linear"
-                style={{ width: `${progress * 100}%`, background: "var(--color-accent)" }}
-              />
-            </div>
-
-            {now.synopsis && (
-              <p
-                className="text-xs leading-relaxed mt-1"
-                style={{ color: "var(--color-text-muted)" }}
-              >
-                {now.synopsis}
-              </p>
-            )}
-          </>
-        )}
-
-        {bookErr && (
-          <p className="text-xs" style={{ color: "var(--color-danger)" }}>
-            予約失敗: {bookErr}
-          </p>
-        )}
+        <div className="flex shrink-0 items-center gap-1.5">
+          <button
+            onClick={toggleRecord}
+            disabled={recBusy}
+            className={`btn ${running ? "btn-danger" : ""}`}
+            title={running ? "Finish this recording now" : "Start recording this channel"}
+          >
+            {running ? "■ Stop rec" : "● Record"}
+          </button>
+          {now && (
+            <button onClick={book} disabled={booking || booked} className="btn" title="Schedule the programme now airing">
+              {booked ? "✓ Booked" : booking ? "Booking…" : "Book"}
+            </button>
+          )}
+          <button onClick={onStop} disabled={!playing} className="btn">
+            Stop
+          </button>
+        </div>
       </div>
+
+      {now && (
+        <>
+          <div className="h-px w-full bg-line">
+            <div
+              className="h-px bg-fg transition-[width] duration-1000 ease-linear"
+              style={{ width: `${progress * 100}%` }}
+            />
+          </div>
+          {now.synopsis && <p className="text-xs leading-relaxed text-dim">{now.synopsis}</p>}
+        </>
+      )}
+
+      {running && (
+        <p className="font-mono text-[11px] text-rec">
+          ● Recording to row {running.id}
+          {running.title ? ` · ${running.title}` : ""}
+        </p>
+      )}
+
+      {err && <p className="text-xs text-rec">{err}</p>}
 
       <NextEvent next={next} />
     </div>
@@ -154,20 +166,10 @@ export function NowPlaying({ serviceId, channelName, onStop }: NowPlayingProps) 
 function NextEvent({ next }: { next?: EPGEvent | null }) {
   if (!next) return null;
   return (
-    <div
-      className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs"
-      style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)" }}
-    >
-      <span
-        className="text-[10px] font-semibold uppercase tracking-wider"
-        style={{ color: "var(--color-text-muted)" }}
-      >
-        次の番組
-      </span>
-      <span className="font-mono" style={{ color: "var(--color-text-muted)" }}>
-        {fmtTime(next.start)}
-      </span>
-      <span className="truncate">{next.title}</span>
+    <div className="flex items-baseline gap-2 border-t border-line pt-2 text-xs">
+      <span className="eyebrow">next</span>
+      <span className="font-mono text-dim tnum">{fmtTime(next.start)}</span>
+      <span className="truncate text-dim">{next.title}</span>
     </div>
   );
 }

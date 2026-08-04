@@ -145,9 +145,19 @@ Implemented and tested (race-clean):
   in file order. Diverging means one tool reads a channel while another acts on
   a different one. `bun test` needs no network and no API key.
 - `web/` — Bun + Next.js 16 (App Router, TypeScript, Tailwind CSS).
-  Four pages: Live (hls.js player), Guide (EPG), Schedules (create/
-  cancel), Recordings (download / delete). Static `output: 'export'`; all
+  Four pages: Live (hls.js player + record now / stop), Guide (EPG, one
+  click books a programme), Schedules (create/cancel), Recordings
+  (stop a running one, download, delete). Static `output: 'export'`; all
   data fetching is client-side via SWR against the `/api/*` endpoints.
+  Colour lives in one place — the `@theme` block in `app/globals.css`,
+  from which Tailwind derives the utilities (`text-dim`, `border-line`),
+  so components carry class names and not `style={{ color: "var(…)" }}`.
+  It is near-monochrome on purpose, chroma being spent on the states that
+  cost something to miss; the palette is a sibling of the TUI's
+  bold/faint/reverse rather than its own idea of the product.
+  Chrome is English and broadcast data is whatever the air carried —
+  that split is the rule, since the UI had drifted into `Refresh` beside
+  `予約` with no principle deciding which.
 
 **Not implemented:**
 - Subtitles: `arib_caption` is present in the recorded TS (and in the
@@ -222,6 +232,15 @@ mid-recording finalizing as 'done'.
   the URL typed in), because a tab click is handled entirely by the client
   router and never asks the server for the route — which is how it survived
   in the committed `dist` unnoticed.
+- **Opening a UI must not tune.** The Live page adopts a session that is
+  already running — read off `/api/status`, so a reload or a second browser
+  joins what is on — but an idle box stays idle until someone asks for a
+  channel. It used to tune on load, which meant merely *looking* at the UI
+  took the adapter and held it for the session's whole idle timeout, and on
+  a one-tuner box that is the difference between EPG running tonight and
+  not. Changing channel then goes through `POST /api/live/{ch}/switch`, not
+  a hand-rolled stop-then-open: equal priorities do not evict each other,
+  so the wrong order deadlocks on `ErrNoAdapter`.
 - **`name` is the identifier; `display_name` is the label.** Every request
   takes `name`. What a UI *shows* is `config.Channel.DisplayName()`, served
   as `display_name` on `/api/channels`, because `channels.json` mixes three
@@ -231,6 +250,11 @@ mid-recording finalizing as 'done'.
   whose *alias* is the mojibake). Clients render the field; they must not
   re-derive a label from the alias list — the web UI used to take
   `aliases[0]` and showed mojibake for half the list.
+  This binds every view, not just the channel picker. A schedule row, a
+  recording row and an EPG row carry a `channel` name or a `service_id`,
+  and printing either raw puts `NHKEFl1El5~` on screen. The web UI resolves
+  both through one `useChannelIndex()` so a new page cannot reintroduce it;
+  three of its four pages had, long after the picker was fixed.
 - **Channel lookup is first-match-wins over each record's name *and* aliases,
   in file order** (`config.Channels.Find`). Two consequences: every record must
   be selectable by its own name (a name that is an earlier record's alias makes

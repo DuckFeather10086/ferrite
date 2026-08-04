@@ -1,90 +1,163 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useChannels, useEPG, fmtTime, epgEnd, type EPGEvent } from "@/lib/api";
+import {
+  createSchedule,
+  displayName,
+  epgEnd,
+  fmtTime,
+  isAiring,
+  useChannelIndex,
+  useEPG,
+  useMinuteTick,
+  type EPGEvent,
+} from "@/lib/api";
 
 export default function GuidePage() {
-  const { data: channels } = useChannels();
+  const index = useChannelIndex();
   const [sel, setSel] = useState("");
-  const selectedId = channels?.find((c) => c.name === sel)?.service_id;
-  const { data: events, isLoading, mutate } = useEPG(selectedId);
+  const selected = sel ? index.byName.get(sel) : undefined;
+  const { data: events, isLoading, mutate } = useEPG(selected?.service_id);
+  const now = useMinuteTick();
 
-  // Build service_id -> channel name map for DB-backed EPG events.
-  const sidToName = useMemo(() => {
-    const m: Record<number, string> = {};
-    channels?.forEach((c) => { m[c.service_id] = c.name; });
-    return m;
-  }, [channels]);
+  // The window spans midnight more often than not, and a bare "19:00" with
+  // no day is how you book tomorrow's programme by accident.
+  const days = useMemo(() => groupByDay(events ?? []), [events]);
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-3 flex-wrap">
-        <label className="text-sm" style={{ color: "var(--color-text-muted)" }}>
-          Channel{" "}
-          <select
-            value={sel}
-            onChange={(e) => setSel(e.target.value)}
-            className="ml-1 px-2 py-1 rounded-lg text-sm border"
-            style={{ background: "var(--color-surface)", borderColor: "var(--color-border)", color: "var(--color-text)" }}
-          >
-            <option value="">All</option>
-            {channels?.map((c) => (
-              <option key={c.name} value={c.name}>{c.name}</option>
-            ))}
-          </select>
-        </label>
-        <button onClick={() => mutate()} className="btn text-xs">Refresh</button>
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <select value={sel} onChange={(e) => setSel(e.target.value)} className="field">
+          <option value="">All channels</option>
+          {index.channels.map((c) => (
+            // Label from display_name, request by name — this select used
+            // to show the raw key, which for a legacy record is mojibake.
+            <option key={c.name} value={c.name}>
+              {displayName(c)}
+            </option>
+          ))}
+        </select>
+        <button onClick={() => mutate()} className="btn">
+          Refresh
+        </button>
+        <span className="font-mono text-[11px] text-faint">
+          {events?.length ?? 0} events · next 12h
+        </span>
       </div>
 
-      {isLoading && <p className="text-sm" style={{ color: "var(--color-text-muted)" }}>Loading EPG...</p>}
+      {isLoading && <p className="text-sm text-dim">Loading guide…</p>}
 
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Channel</th>
-              <th>Title</th>
-            </tr>
-          </thead>
-          <tbody>
-            {events?.map((e) => (
-              <tr key={`${e.service_id}-${e.event_id}`} className="hover:brightness-110" style={{ background: isNow(e) ? "#1e293b" : "transparent" }}>
-                <td className="whitespace-nowrap font-mono text-xs">
-                  {fmtTime(e.start)}
-                </td>
-                <td className="whitespace-nowrap text-xs" style={{ color: "var(--color-text-muted)" }}>
-                  {sidToName[e.service_id] || `SID ${e.service_id}`}
-                </td>
-                <td>
-                  <GuideTitle event={e} />
-                </td>
-              </tr>
-            ))}
-            {events?.length === 0 && (
-              <tr><td colSpan={3} className="text-center py-4" style={{ color: "var(--color-text-muted)" }}>No events in this window.</td></tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-function isNow(e: EPGEvent) {
-  const n = Date.now();
-  return new Date(e.start).getTime() <= n && new Date(epgEnd(e)).getTime() > n;
-}
-
-function GuideTitle({ event: e }: { event: EPGEvent }) {
-  return (
-    <div>
-      <span className="font-medium">{e.title}</span>
-      {e.synopsis && (
-        <p className="text-xs mt-0.5" style={{ color: "var(--color-text-muted)", maxWidth: "42rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {e.synopsis}
+      {!isLoading && !days.length && (
+        <p className="text-sm text-dim">
+          Nothing in the guide for this window. EPG is ingested per mux in the
+          background, so a channel can stay empty until its transport stream has
+          been scanned.
         </p>
       )}
+
+      {days.map(([day, rows]) => (
+        <section key={day} className="flex flex-col">
+          <h2 className="eyebrow sticky top-0 bg-canvas py-1.5">{day}</h2>
+          <div className="flex flex-col divide-y divide-line border-y border-line">
+            {rows.map((e) => (
+              <GuideRow
+                key={`${e.service_id}-${e.event_id}-${e.start}`}
+                event={e}
+                channelName={index.byServiceId.get(e.service_id)?.name}
+                channelLabel={index.labelForServiceId(e.service_id)}
+                showChannel={!selected}
+                airing={isAiring(e, now)}
+              />
+            ))}
+          </div>
+        </section>
+      ))}
     </div>
   );
+}
+
+function GuideRow({
+  event: e,
+  channelName,
+  channelLabel,
+  showChannel,
+  airing,
+}: {
+  event: EPGEvent;
+  channelName?: string;
+  channelLabel: string;
+  showChannel: boolean;
+  airing: boolean;
+}) {
+  const [state, setState] = useState<"idle" | "saving" | "booked">("idle");
+  const [err, setErr] = useState<string | null>(null);
+
+  const book = async () => {
+    if (!channelName) return;
+    setState("saving");
+    setErr(null);
+    try {
+      await createSchedule({
+        channel: channelName,
+        service_id: e.service_id,
+        start: e.start,
+        end: epgEnd(e),
+      });
+      setState("booked");
+    } catch (x) {
+      setErr(x instanceof Error ? x.message : String(x));
+      setState("idle");
+    }
+  };
+
+  return (
+    <div className={`group flex items-baseline gap-3 px-2 py-1.5 ${airing ? "bg-panel" : ""}`}>
+      <span className="w-2 shrink-0 text-[10px] leading-none text-rec" aria-hidden>
+        {airing ? "●" : ""}
+      </span>
+      <span className="shrink-0 font-mono text-[11px] text-dim tnum">
+        {fmtTime(e.start)}–{fmtTime(epgEnd(e))}
+      </span>
+      {showChannel && (
+        <span className="w-28 shrink-0 truncate text-[11px] text-faint">{channelLabel}</span>
+      )}
+      <div className="min-w-0 flex-1">
+        <p className={`truncate text-[13px] ${airing ? "text-fg" : ""}`}>{e.title}</p>
+        {e.synopsis && <p className="truncate text-[11px] text-faint">{e.synopsis}</p>}
+        {err && <p className="text-[11px] text-rec">{err}</p>}
+      </div>
+      {/* A guide row already knows the channel, the start and the end — the
+          three things the schedule form otherwise asks you to retype. Not
+          offered for a service that is not in channels.json: the recorder
+          takes a channel name, and there is none to send. */}
+      <button
+        onClick={book}
+        disabled={!channelName || state !== "idle"}
+        title={channelName ? "Schedule this programme" : "Channel not in channels.json"}
+        // A booked row keeps its confirmation visible; an unbooked one is
+        // revealed by hovering the row (see .row-action).
+        className={`btn shrink-0 ${state === "booked" ? "" : "row-action"}`}
+      >
+        {state === "booked" ? "✓ Booked" : state === "saving" ? "…" : "Book"}
+      </button>
+    </div>
+  );
+}
+
+// Events bucketed by local calendar day, in chronological order. The API
+// returns them sorted by start; a service filter does not change that.
+function groupByDay(events: EPGEvent[]): [string, EPGEvent[]][] {
+  const days = new Map<string, EPGEvent[]>();
+  for (const e of events) {
+    const d = new Date(e.start);
+    const key = d.toLocaleDateString("ja-JP", {
+      month: "short",
+      day: "numeric",
+      weekday: "short",
+    });
+    const arr = days.get(key) ?? [];
+    arr.push(e);
+    days.set(key, arr);
+  }
+  return [...days.entries()];
 }

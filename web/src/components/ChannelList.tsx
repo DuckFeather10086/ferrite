@@ -6,31 +6,39 @@ import {
   channelGroup,
   displayName,
   useChannels,
-  useNow,
+  useNowByService,
   type Channel,
   type ChannelGroup,
 } from "@/lib/api";
 
 export type ChannelListProps = {
+  // The channel this page is watching. Distinct from `tuned`: during a
+  // switch the selection has moved and the adapter has not caught up.
   active: string | null;
+  // What the daemon reports as tuned, if anything.
+  tuned?: string;
   onSelect: (name: string) => void;
-  disabled?: boolean;
-  disabledReason?: string;
 };
 
-// Channel sidebar. Groups by ISDB service-id band (GR/BS/CS/SKY),
-// shows the human-readable name (aliases[0]), marks the live channel
-// with a red dot, and lazy-loads each visible channel's now-playing
-// subtitle. Includes a filter box. On mobile collapses to a horizontal
-// scrollable chip row.
-export function ChannelList({ active, onSelect, disabled, disabledReason }: ChannelListProps) {
+// Channel sidebar: grouped by ISDB service-id band, labelled with the
+// daemon's display_name, with each row's now-playing programme underneath.
+//
+// One vertical list at every width. It used to lay the groups out as
+// side-by-side columns below the `lg` breakpoint, which on a phone filled
+// the whole viewport with a horizontally scrolling grid and pushed the
+// player off the bottom of the page — you could not see the television.
+export function ChannelList({ active, tuned, onSelect }: ChannelListProps) {
   const { data: channels } = useChannels();
+  const nowByService = useNowByService();
   const [q, setQ] = useState("");
 
   const filtered = useMemo(() => {
     if (!channels) return [];
     const needle = q.trim().toLowerCase();
     if (!needle) return channels;
+    // Aliases are searchable but never shown: for a legacy record the
+    // alias is the mojibake, and matching on it is how you find a channel
+    // whose label you can read but whose key you cannot.
     return channels.filter(
       (c) =>
         displayName(c).toLowerCase().includes(needle) ||
@@ -51,58 +59,43 @@ export function ChannelList({ active, onSelect, disabled, disabledReason }: Chan
   }, [filtered]);
 
   if (!channels?.length) {
-    return (
-      <p className="text-xs" style={{ color: "var(--color-text-muted)" }}>
-        channels.json が読み込まれていません
-      </p>
-    );
+    return <p className="text-xs text-dim">No channels — is channels.json loaded?</p>;
   }
 
   return (
-    <div className="flex flex-col gap-2 h-full">
+    <div className="flex h-full flex-col gap-2">
       <input
         type="search"
         value={q}
         onChange={(e) => setQ(e.target.value)}
-        placeholder="チャンネル検索…"
-        className="w-full px-3 py-1.5 rounded-lg text-sm border outline-none"
-        style={{
-          background: "var(--color-surface)",
-          borderColor: "var(--color-border)",
-          color: "var(--color-text)",
-        }}
+        placeholder="Filter channels"
+        className="field w-full"
       />
 
-      <div className="flex lg:flex-col gap-3 overflow-x-auto lg:overflow-y-auto lg:flex-1 pb-1 lg:pb-0">
+      {/* Capped and scrollable on a phone so 39 channels do not become a
+          page you scroll past to reach anything else; the desktop sidebar
+          takes the column's full height instead. */}
+      <div className="flex max-h-[50vh] flex-col gap-3 overflow-y-auto lg:max-h-none lg:flex-1">
         {CHANNEL_GROUP_ORDER.map((g) => {
           const items = grouped.get(g);
           if (!items?.length) return null;
           return (
-            <section key={g} className="flex flex-col gap-1 min-w-40 lg:min-w-0">
-              <h3
-                className="text-[10px] font-semibold uppercase tracking-wider px-2 pt-1 lg:pt-2"
-                style={{ color: "var(--color-text-muted)" }}
-              >
-                {g}
-              </h3>
+            <section key={g} className="flex flex-col gap-px">
+              <h3 className="eyebrow px-2 pb-1">{g}</h3>
               {items.map((c) => (
                 <ChannelRow
                   key={c.name}
                   channel={c}
+                  nowTitle={nowByService.get(c.service_id)?.title}
                   active={active === c.name}
+                  tuned={tuned === c.name}
                   onSelect={onSelect}
-                  disabled={disabled}
-                  disabledReason={disabledReason}
                 />
               ))}
             </section>
           );
         })}
-        {filtered.length === 0 && (
-          <p className="text-xs px-2 py-4" style={{ color: "var(--color-text-muted)" }}>
-            該当なし
-          </p>
-        )}
+        {filtered.length === 0 && <p className="px-2 py-4 text-xs text-dim">No match.</p>}
       </div>
     </div>
   );
@@ -110,46 +103,40 @@ export function ChannelList({ active, onSelect, disabled, disabledReason }: Chan
 
 type RowProps = {
   channel: Channel;
+  nowTitle?: string;
   active: boolean;
+  tuned: boolean;
   onSelect: (name: string) => void;
-  disabled?: boolean;
-  disabledReason?: string;
 };
 
-function ChannelRow({ channel, active, onSelect, disabled, disabledReason }: RowProps) {
-  const { data: now } = useNow(channel.service_id);
-  const title = now?.title;
+function ChannelRow({ channel, nowTitle, active, tuned, onSelect }: RowProps) {
   return (
     <button
-      onClick={() => !disabled && onSelect(channel.name)}
-      disabled={disabled}
-      title={disabled ? disabledReason : undefined}
-      className={`w-full text-left px-3 py-2 rounded-lg transition-colors ${
-        active ? "" : "hover:bg-white/5"
-      } ${disabled ? "opacity-40 cursor-not-allowed" : "cursor-pointer"}`}
-      style={{
-        background: active ? "var(--color-accent-dim)" : "transparent",
-        color: active ? "#042027" : "var(--color-text)",
-        boxShadow: active ? "0 0 0 1px var(--color-accent), 0 0 12px rgba(34, 211, 238, 0.25)" : "none",
-      }}
+      onClick={() => onSelect(channel.name)}
+      // Selection is inversion, the same emphasis the TUI's cursor uses.
+      className={`w-full cursor-pointer rounded-md px-2 py-1.5 text-left transition-colors ${
+        active ? "bg-fg text-canvas" : "hover:bg-panel"
+      }`}
     >
-      <div className="flex items-center gap-2">
+      <div className="flex items-baseline gap-1.5">
+        {/* Only the tuned channel is marked. This used to give a red dot to
+            every row *except* the selected one, so a 39-channel sidebar
+            came up as a column of red. */}
         <span
-          className={`inline-block w-2 h-2 rounded-full shrink-0 ${
-            active ? "bg-[#042027]" : "bg-red-500"
+          className={`w-2 shrink-0 text-center text-[10px] leading-none ${
+            active ? "text-canvas" : "text-rec"
           }`}
           aria-hidden
-        />
-        <span className={`text-sm truncate ${active ? "font-semibold" : "font-normal"}`}>
+        >
+          {tuned ? "●" : ""}
+        </span>
+        <span className={`truncate text-[13px] ${active ? "font-medium" : ""}`}>
           {displayName(channel)}
         </span>
       </div>
-      {title && (
-        <p
-          className="text-[11px] mt-0.5 truncate"
-          style={{ color: active ? "rgba(4, 32, 39, 0.65)" : "var(--color-text-muted)" }}
-        >
-          {title}
+      {nowTitle && (
+        <p className={`truncate pl-3.5 text-[11px] ${active ? "text-canvas/60" : "text-faint"}`}>
+          {nowTitle}
         </p>
       )}
     </button>
