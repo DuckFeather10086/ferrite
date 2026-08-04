@@ -11,6 +11,9 @@ dvbr_bin    = "./target/release/dvbr"
 b25_bin     = "./libaribb25-rs/target/release/b25-rs"
 ffmpeg_bin  = "ffmpeg"
 ffprobe_bin = "ffprobe"
+# ARIB caption decoder: live HLS gets a WebVTT subtitle rendition when this
+# and ffprobe_bin are both set. Empty disables captions.
+arib_caption_bin = "./target/release/arib-caption"
 
 channels_file = "channels.json"
 

@@ -29,9 +29,10 @@ run: build
 
 rust:
 	@echo "=== cargo build (release) ==="
-	cargo build --release -p dvbr -p b25-rs
+	cargo build --release -p dvbr -p b25-rs -p arib-caption
 	@test -x target/release/dvbr || (echo "ERROR: target/release/dvbr not found" && exit 1)
 	@test -x libaribb25-rs/target/release/b25-rs || (echo "ERROR: b25-rs not found" && exit 1)
+	@test -x target/release/arib-caption || (echo "ERROR: arib-caption not found" && exit 1)
 
 web:
 	@echo "=== next.js static export ==="
@@ -60,6 +61,7 @@ go:
 install-service: go
 	@test -x target/release/dvbr || (echo "ERROR: target/release/dvbr missing — run 'make rust'" && exit 1)
 	@test -x libaribb25-rs/target/release/b25-rs || (echo "ERROR: b25-rs missing — run 'make rust'" && exit 1)
+	@test -x target/release/arib-caption || (echo "ERROR: arib-caption missing — run 'make rust'" && exit 1)
 	@mkdir -p $(HOME)/.config/systemd/user $(HOME)/.local/bin
 	sed 's|@DIR@|$(CURDIR)|g' scripts/ferrite.service \
 		> $(HOME)/.config/systemd/user/ferrite.service

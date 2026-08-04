@@ -31,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/DuckFeather10086/ferrite/internal/caption"
 	"github.com/DuckFeather10086/ferrite/internal/fanout"
 	"github.com/DuckFeather10086/ferrite/internal/proc"
 	"github.com/DuckFeather10086/ferrite/internal/store"
@@ -75,6 +76,12 @@ type Manager struct {
 	FFprobeBin  string        // path to ffprobe; empty disables A/V offset probing
 	FFmpegArgs  []string      // extra args inserted before -i pipe:0
 	IdleTimeout time.Duration // 0 → DefaultIdleTimeout
+
+	// CaptionBin is the arib-caption executable. When set (and FFprobeBin
+	// is too), each session also decodes the tune's caption PID into a
+	// WebVTT rendition beside its segments. Empty means no captions —
+	// the picture is identical either way.
+	CaptionBin string
 
 	// A/V sync (see config.Daemon). ProbeSeconds is the ffprobe sampling
 	// window (0 → defaultProbeSeconds; <0 disables); AudioOffsetBias is
@@ -188,6 +195,12 @@ type Session struct {
 	ff       *proc.Process
 	lastSeen time.Time
 	closed   bool
+
+	// The caption decode, when one is running: a second lease on the same
+	// tune (equal priority, so it joins rather than evicting) and the
+	// context that stops it.
+	capLease  *tuner.Lease
+	capCancel context.CancelFunc
 }
 
 // Open returns the existing session for channel, or starts a new one.
@@ -314,7 +327,15 @@ func (m *Manager) openSession(ctx context.Context, channel string) (*Session, er
 		// so a 1s window is plenty to identify it.
 		"-probesize", "5M", "-analyzeduration", "1M",
 		"-i", "pipe:0",
+		// -sn -dn: ffmpeg has no ARIB caption decoder, so the caption and
+		// data PIDs are dropped here and decoded separately (internal/caption).
 		"-sn", "-dn",
+		// Keep the broadcast timestamps on the output. The subtitle rendition
+		// times its cues by the caption PTS, and a player reconciles the two by
+		// subtracting the video's first PTS — which only works if that PTS is
+		// still the broadcast's. Without this the video restarts at zero and
+		// every cue lands hours away.
+		"-copyts",
 	)
 	if af := audioOffsetFilter(audioOffset); af != "" {
 		args = append(args, "-af", af)
@@ -370,12 +391,49 @@ func (m *Manager) openSession(ctx context.Context, channel string) (*Session, er
 
 	go pumpToFFmpeg(lease.Sub, ff.Stdin)
 
+	// Captions ride the same tune. A second Acquire on the same channel joins
+	// the existing tuneSession — equal priority does not evict — so this is a
+	// second fanout subscription, not a second tune.
+	withSubs := false
+	if m.CaptionBin != "" && m.FFprobeBin != "" {
+		capLease, cerr := m.Tuners.Acquire(context.Background(), canonical)
+		if cerr != nil {
+			slog.Warn("hls: no lease for captions; continuing without them",
+				"channel", canonical, "err", cerr)
+		} else {
+			capCtx, cancel := context.WithCancel(context.Background())
+			pipeline := &caption.Pipeline{
+				Bin:           m.CaptionBin,
+				FFprobeBin:    m.FFprobeBin,
+				Channel:       canonical,
+				Dir:           dir,
+				VideoPlaylist: playlist,
+				Sub:           capLease.Sub,
+			}
+			s.capLease = capLease
+			s.capCancel = cancel
+			withSubs = true
+			go func() {
+				if err := pipeline.Run(capCtx); err != nil && capCtx.Err() == nil {
+					slog.Warn("hls: caption pipeline stopped",
+						"channel", canonical, "err", err)
+				}
+			}()
+		}
+	}
+	if err := caption.WriteMaster(dir, canonical, withSubs); err != nil {
+		// The master playlist is how a client finds the subtitle rendition;
+		// without it the per-channel media playlist still plays.
+		slog.Warn("hls: write master playlist", "channel", canonical, "err", err)
+	}
+
 	m.mu.Lock()
 	m.sessions[canonical] = s
 	m.lastOpen = canonical
 	m.mu.Unlock()
 
-	slog.Info("hls: session opened", "channel", canonical, "dir", dir)
+	slog.Info("hls: session opened",
+		"channel", canonical, "dir", dir, "captions", withSubs)
 	return s, nil
 }
 
@@ -507,6 +565,14 @@ func (s *Session) tearDown() {
 	s.closed = true
 	if s.ff != nil {
 		_ = s.ff.Close()
+	}
+	// Stop the caption decode before releasing its lease: cancelling kills the
+	// child, and the release is what lets the tune go.
+	if s.capCancel != nil {
+		s.capCancel()
+	}
+	if s.capLease != nil {
+		s.capLease.Release()
 	}
 	if s.lease != nil {
 		s.lease.Release()

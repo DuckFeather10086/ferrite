@@ -144,6 +144,9 @@ export default function LivePage() {
   );
 }
 
+// The multivariant playlist, not the media playlist: it is what names the
+// caption rendition beside the video. Written when the session opens, so it
+// exists for any session this build created.
 function playlistFor(channel: string) {
-  return `/api/live/${encodeURIComponent(channel)}.m3u8`;
+  return `/api/live/${encodeURIComponent(channel)}/master.m3u8`;
 }

@@ -81,6 +81,28 @@ export function VideoPlayer({ src, fatal, onPrev, onNext }: VideoPlayerProps) {
   // never installed the recovery path, so the first hiccup after a
   // manual retry was fatal.
   const [reload, setReload] = useState(0);
+  // Whether this stream offers a caption rendition, and whether it is on.
+  // ARIB captions are off by default here as they are on a television; the
+  // button only appears once the manifest says there is something to show.
+  const [hasCaptions, setHasCaptions] = useState(false);
+  const [captionsOn, setCaptionsOn] = useState(false);
+
+  // The manifest handler needs the current preference without making the
+  // attach effect depend on it — a change there would tear down the player.
+  const captionsOnRef = useRef(false);
+  captionsOnRef.current = captionsOn;
+
+  const toggleCaptions = useCallback(() => {
+    setCaptionsOn((on) => {
+      const next = !on;
+      const h = hlsRef.current;
+      if (h) {
+        h.subtitleDisplay = next;
+        h.subtitleTrack = next ? 0 : -1;
+      }
+      return next;
+    });
+  }, []);
 
   const destroy = useCallback(() => {
     if (hlsRef.current) {
@@ -123,6 +145,16 @@ export function VideoPlayer({ src, fatal, onPrev, onNext }: VideoPlayerProps) {
       h.loadSource(src);
       h.attachMedia(video);
       h.on(Hls.Events.MANIFEST_PARSED, () => playThenUnmute(video));
+      // The subtitle rendition is a separate playlist in the multivariant
+      // manifest (internal/caption writes it). hls.js turns it into a
+      // TextTrack; -1 means "none", which is where it stays until the
+      // viewer asks for captions.
+      h.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, (_e, data) => {
+        const available = data.subtitleTracks.length > 0;
+        setHasCaptions(available);
+        h.subtitleDisplay = available && captionsOnRef.current;
+        h.subtitleTrack = available && captionsOnRef.current ? 0 : -1;
+      });
       h.on(Hls.Events.ERROR, (_evt, data) => {
         if (!data.fatal) return;
         // Cold tunes start mid-GOP: the first segment can carry
@@ -223,6 +255,20 @@ export function VideoPlayer({ src, fatal, onPrev, onNext }: VideoPlayerProps) {
         tabIndex={0}
         className="h-full w-full"
       />
+
+      {hasCaptions && src && (
+        <button
+          onClick={toggleCaptions}
+          title={captionsOn ? "Hide captions" : "Show captions"}
+          // Bottom right, above the native control bar: the browser draws
+          // cues centred, so nothing of the text is covered.
+          className={`absolute right-2 bottom-14 rounded px-1.5 py-0.5 font-mono text-[11px] transition-colors ${
+            captionsOn ? "bg-fg text-canvas" : "bg-black/50 text-white/70 hover:text-white"
+          }`}
+        >
+          字幕
+        </button>
+      )}
 
       {shown === "loading" && src && (
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2">

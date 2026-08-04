@@ -15,6 +15,12 @@ binaries spawned as subprocesses:
   emit TS on stdout; also `dvb-rs epg` for EIT ingestion.
 - `b25-rs` (Rust, sibling repo `libaribb25-rs`) — ARIB B25 descrambler;
   reads encrypted TS on stdin, writes plain TS on stdout.
+- `arib-caption` (Rust, sibling repo `libaribcaption-rs`) — ARIB STD-B24
+  *caption* decoder: reads a service TS, decodes the caption PID, and prints
+  cues (`cues`, JSON) or a subtitle file (`vtt`). A Rust port of the decoder
+  half of xqq/libaribcaption, with the caption model and the renderers kept
+  apart. ffmpeg cannot do this — its `arib_caption` codec has no decoder
+  unless built against libaribb24/libaribcaption, and Ubuntu's is not.
 - `arib-b24` (Rust, sibling repo `libaribb24-rs`) — ARIB STD-B24 text
   decoder. Used *inside* dvb-rs (not spawned directly by ferrite) to decode
   SDT service names and EIT programme text to UTF-8.
@@ -60,6 +66,9 @@ dvb-rs stdout → b25-rs stdin → b25-rs stdout → fanout.Broadcaster
     update store row.
   - `scheduler/` — `robfig/cron` driving recordings from `schedules`
     table.
+  - `caption/` — the live subtitle rendition: a second fanout consumer feeds
+    `arib-caption cues`, and this segments the resulting cues into WebVTT
+    beside the video segments (`subs.m3u8`, `sub{N}.vtt`, `master.m3u8`).
   - `hls/` — per-channel session: acquire lease → ffmpeg subprocess
     → m3u8 dir. Refcounted; teardown when last viewer leaves. On start
     it delays audio via `-af asetpts` to correct ISDB's A/V skew — ports
@@ -160,8 +169,11 @@ Implemented and tested (race-clean):
   `予約` with no principle deciding which.
 
 **Not implemented:**
-- Subtitles: `arib_caption` is present in the recorded TS (and in the
-  tapped service PIDs) but nothing decodes or serves it yet.
+- Subtitles beyond live HLS. Live playback has a WebVTT rendition
+  (`internal/caption` + `arib-caption`); still missing are the recording-side
+  forms — an `.ass` sidecar keeping ARIB's real positions and colours, a pixel
+  renderer for DRCS glyphs no font has — and the DRCS→Unicode replacement
+  table, without which a DRCS character reads as 〓.
 - Channel-list hygiene: duplicate records survive from the legacy
   migrate (`TOKYO MX1` + `TOKYO MX1_2` for separate service_ids,
   `515.14MHz#23864`), and several muxes carry the same service name on
@@ -169,6 +181,13 @@ Implemented and tested (race-clean):
   human pass over `channels.json` would tidy it.
 - Watch-one-channel-while-recording-another needs a second tuner; with
   one adapter the recording wins and live drops.
+
+**Hardware-verified (2026-08-04, live captions):** NHK 総合 at noon — caption
+PID found from the PMT (0x130), cue timeline anchored by ffprobe, and the
+WebVTT segment for `stream13.ts` holding exactly the cue overlapping that
+segment's real PTS window (43511.667–43513.669 vs cue 43510.789–43514.476).
+The browser rendering of that rendition (the 字幕 button on the Live page) has
+not been checked in a browser yet.
 
 **Hardware-verified (2026-07-30, single Siano adapter, Tokyo):** EPG
 preempted by record and by live; record-now → file grows ~1.4 MB/s →
@@ -241,6 +260,22 @@ mid-recording finalizing as 'done'.
   not. Changing channel then goes through `POST /api/live/{ch}/switch`, not
   a hand-rolled stop-then-open: equal priorities do not evict each other,
   so the wrong order deadlocks on `ErrNoAdapter`.
+- **Captions are decoded by us, and `-copyts` is load-bearing.** ffmpeg has no
+  ARIB caption decoder, so the HLS session drops the caption PID (`-sn -dn`)
+  and `internal/caption` decodes it out of a *second* lease on the same tune
+  (equal priority, so it joins the tune rather than evicting it). Cue times are
+  broadcast PTS; the player reconciles them with the picture through
+  `X-TIMESTAMP-MAP` by subtracting the video's first PTS — which only works
+  because `-copyts` keeps the broadcast timestamps on the segments. Remove it
+  and every cue lands hours away from the frame it belongs to.
+- **A subtitle rendition mirrors the video playlist, and `#EXTINF` lies.** A
+  player fetches the subtitle fragment covering the position it is playing, so
+  segment N of `subs.m3u8` must cover the same window as segment N of the video
+  — and the only way to know which PTS that is, is to measure it (one ffprobe
+  on the newest listed segment). Summing durations does not work: ffmpeg writes
+  `#EXTINF:2.002` for segments that really run ~11 ms shorter, which is a
+  quarter second of drift by segment 20 and more than a whole segment within
+  the hour. The measurement is therefore repeated every few segments, not once.
 - **`name` is the identifier; `display_name` is the label.** Every request
   takes `name`. What a UI *shows* is `config.Channel.DisplayName()`, served
   as `display_name` on `/api/channels`, because `channels.json` mixes three

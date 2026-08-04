@@ -17,16 +17,19 @@ import (
 
 // Daemon mirrors configs/isdbd.example.toml.
 type Daemon struct {
-	HTTPPort     int      `toml:"http_port"`
-	StorageRoot  string   `toml:"storage_root"`
-	Adapters     []int    `toml:"adapters"`
-	DvbrBin      string   `toml:"dvbr_bin"`
-	B25Bin       string   `toml:"b25_bin"`
-	FFmpegBin    string   `toml:"ffmpeg_bin"`
-	FFprobeBin   string   `toml:"ffprobe_bin"`
-	ChannelsFile string   `toml:"channels_file"`
-	EPGCron      string   `toml:"epg_cron"`
-	EPGChannels  []string `toml:"epg_channels"`
+	HTTPPort    int    `toml:"http_port"`
+	StorageRoot string `toml:"storage_root"`
+	Adapters    []int  `toml:"adapters"`
+	DvbrBin     string `toml:"dvbr_bin"`
+	B25Bin      string `toml:"b25_bin"`
+	FFmpegBin   string `toml:"ffmpeg_bin"`
+	FFprobeBin  string `toml:"ffprobe_bin"`
+	// AribCaptionBin decodes the ARIB caption PID into a WebVTT rendition
+	// for live HLS. Empty disables captions.
+	AribCaptionBin string   `toml:"arib_caption_bin"`
+	ChannelsFile   string   `toml:"channels_file"`
+	EPGCron        string   `toml:"epg_cron"`
+	EPGChannels    []string `toml:"epg_channels"`
 
 	// Live HLS A/V sync. ISDB-T muxes interleave audio ahead of the
 	// first decodable video frame, so HLS comes up with a constant
@@ -42,15 +45,16 @@ type Daemon struct {
 // not present in the TOML.
 func Defaults() Daemon {
 	return Daemon{
-		HTTPPort:     8010,
-		StorageRoot:  "./var",
-		Adapters:     []int{0},
-		DvbrBin:      "dvb-rs",
-		B25Bin:       "b25-rs",
-		FFmpegBin:    "ffmpeg",
-		FFprobeBin:   "ffprobe",
-		EPGCron:      "0 */6 * * *",
-		ProbeSeconds: 5,
+		HTTPPort:       8010,
+		StorageRoot:    "./var",
+		Adapters:       []int{0},
+		DvbrBin:        "dvb-rs",
+		B25Bin:         "b25-rs",
+		FFmpegBin:      "ffmpeg",
+		FFprobeBin:     "ffprobe",
+		AribCaptionBin: "arib-caption",
+		EPGCron:        "0 */6 * * *",
+		ProbeSeconds:   5,
 	}
 }
 

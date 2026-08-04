@@ -588,7 +588,17 @@ func (d Deps) handleLiveSegment(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", "video/mp2t")
+	// Segments are .ts, but the same directory also holds the subtitle
+	// rendition written by internal/caption — its playlists and .vtt
+	// segments. Serving those as video/mp2t makes a player discard them.
+	switch {
+	case strings.HasSuffix(segment, ".m3u8"):
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	case strings.HasSuffix(segment, ".vtt"):
+		w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
+	default:
+		w.Header().Set("Content-Type", "video/mp2t")
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	http.ServeFile(w, r, filepath.Join(s.Dir, segment))
 }

@@ -106,6 +106,7 @@ func run(cfgPath, logLevel string) error {
 		OutputRoot:      hlsRoot,
 		FFmpegBin:       cfg.FFmpegBin,
 		FFprobeBin:      cfg.FFprobeBin,
+		CaptionBin:      cfg.AribCaptionBin,
 		ProbeSeconds:    cfg.ProbeSeconds,
 		AudioOffsetBias: cfg.AudioOffsetBias,
 		// Persist the measured A/V skew so a channel only pays the
