@@ -212,6 +212,13 @@ type Session struct {
 	Dir          string // disk dir holding stream.m3u8 + segments
 	PlaylistPath string
 
+	// Captions reports that this session decodes the tune's caption PID, so a
+	// WebVTT rendition is coming even if it is not on disk yet. The first one
+	// is published a tick after ffmpeg's first segment — later than the master
+	// playlist is composed, and a player never re-fetches a master. Whoever
+	// composes it waits on this rather than on the file alone.
+	Captions bool
+
 	mgr      *Manager
 	lease    *tuner.Lease
 	ff       *proc.Process
@@ -426,7 +433,6 @@ func (m *Manager) openSession(ctx context.Context, channel string) (*Session, er
 	// subscription to this session's tune rather than a second claim on the
 	// adapter: one viewer should look like one live claim, and a second Acquire
 	// could tune again if this tune had just died.
-	withSubs := false
 	if m.CaptionBin != "" && m.FFprobeBin != "" {
 		capSub := lease.Subscribe()
 		capCtx, cancel := context.WithCancel(context.Background())
@@ -440,7 +446,7 @@ func (m *Manager) openSession(ctx context.Context, channel string) (*Session, er
 		}
 		s.capSub = capSub
 		s.capCancel = cancel
-		withSubs = true
+		s.Captions = true
 		go func() {
 			if err := pipeline.Run(capCtx); err != nil && capCtx.Err() == nil {
 				slog.Warn("hls: caption pipeline stopped",
@@ -454,7 +460,7 @@ func (m *Manager) openSession(ctx context.Context, channel string) (*Session, er
 	m.mu.Unlock()
 
 	slog.Info("hls: session opened",
-		"channel", canonical, "dir", dir, "captions", withSubs)
+		"channel", canonical, "dir", dir, "captions", s.Captions)
 	return s, nil
 }
 
@@ -739,8 +745,15 @@ func audioOffsetFilter(offset float64) string {
 	return fmt.Sprintf("asetpts=PTS%s%g/TB", op, math.Abs(offset))
 }
 
-// clearStaleSegments removes any leftover stream.m3u8 / .ts files
-// in dir from a previous run. Mirrors live_hls.py's cleanup_hls.
+// clearStaleSegments removes any leftover stream.m3u8 / .ts files in dir from a
+// previous run, and the subtitle rendition beside them. Mirrors live_hls.py's
+// cleanup_hls.
+//
+// The rendition has to go too: its cue times and media sequence belong to the
+// dead run, and serving it to this one would put captions minutes out of step
+// with the picture for the second or so before the first publish overwrites it.
+// Its absence is what the master playlist waits on, so nothing announces it
+// early either.
 func clearStaleSegments(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -752,7 +765,9 @@ func clearStaleSegments(dir string) error {
 		}
 		name := e.Name()
 		if name == "stream.m3u8" ||
-			(len(name) > 6 && name[:6] == "stream" && filepath.Ext(name) == ".ts") {
+			(len(name) > 6 && name[:6] == "stream" && filepath.Ext(name) == ".ts") ||
+			name == caption.SubsPlaylist ||
+			(strings.HasPrefix(name, "sub") && filepath.Ext(name) == ".vtt") {
 			_ = os.Remove(filepath.Join(dir, name))
 		}
 	}

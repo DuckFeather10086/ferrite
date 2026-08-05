@@ -33,6 +33,20 @@ function playThenUnmute(video: HTMLVideoElement) {
     .catch(() => {});
 }
 
+// The viewer's caption choice, read off the media element rather than held
+// as state, because the control that sets it is the browser's own captions
+// menu and not anything of ours. Returns null when captions are off.
+function subtitleChoice(video: HTMLVideoElement) {
+  const tracks = video.textTracks;
+  for (let i = 0; i < tracks.length; i++) {
+    const t = tracks[i];
+    if ((t.kind === "subtitles" || t.kind === "captions") && t.mode === "showing") {
+      return { name: t.label, lang: t.language };
+    }
+  }
+  return null;
+}
+
 // A cold tune holds the manifest request open server-side for up to
 // ~30s (frontend lock timeout + A/V probe + first segment) before the
 // playlist exists. hls.js defaults give up after 10s, which aborts the
@@ -68,6 +82,16 @@ const HLS_CONFIG = {
 // Autoplay policy: start muted (browser-compliant), unmute after the
 // first play() resolves. enableWorker=true offloads remuxing from the
 // main thread (the previous `false` caused stutter on high-bitrate CS).
+//
+// Captions have no control here on purpose. hls.js renders the manifest's
+// subtitle rendition as a native TextTrack (renderTextTracksNatively, its
+// default), which puts it in the browser's own captions menu on the control
+// bar — the same place a viewer looks for subtitles on every other video on
+// the web, present in fullscreen, and gone when the controls are. It is also
+// the only caption UI iOS Safari can be given, since there hls.js does not
+// run at all. The manifest says DEFAULT=NO, so captions start off as they do
+// on a television, and hls.js maps a selection made in that menu back onto
+// the subtitle track it has to load.
 export function VideoPlayer({ src, fatal, onPrev, onNext }: VideoPlayerProps) {
   const boxRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -81,35 +105,23 @@ export function VideoPlayer({ src, fatal, onPrev, onNext }: VideoPlayerProps) {
   // never installed the recovery path, so the first hiccup after a
   // manual retry was fatal.
   const [reload, setReload] = useState(0);
-  // Whether this stream offers a caption rendition, and whether it is on.
-  // ARIB captions are off by default here as they are on a television; the
-  // button only appears once the manifest says there is something to show.
-  const [hasCaptions, setHasCaptions] = useState(false);
-  const [captionsOn, setCaptionsOn] = useState(false);
-
-  // The manifest handler needs the current preference without making the
-  // attach effect depend on it — a change there would tear down the player.
-  const captionsOnRef = useRef(false);
-  captionsOnRef.current = captionsOn;
-
-  const toggleCaptions = useCallback(() => {
-    setCaptionsOn((on) => {
-      const next = !on;
-      const h = hlsRef.current;
-      if (h) {
-        h.subtitleDisplay = next;
-        h.subtitleTrack = next ? 0 : -1;
-      }
-      return next;
-    });
-  }, []);
+  // What the viewer last picked in the browser's captions menu, carried
+  // across channel changes. Detaching the media resets the track selection,
+  // so without this every change of channel would silently turn captions
+  // back off — and the viewer would have to find the menu again each time.
+  const subsPrefRef = useRef<{ name: string; lang: string } | null>(null);
 
   const destroy = useCallback(() => {
+    const v = videoRef.current;
+    // Read the caption choice while the player is still attached: hls.js
+    // disables every text track as it detaches. Only when there is something
+    // to read from — a destroy() on an already-dead player would otherwise
+    // record "off" over a real preference.
+    if (v && hlsRef.current) subsPrefRef.current = subtitleChoice(v);
     if (hlsRef.current) {
       hlsRef.current.destroy();
       hlsRef.current = null;
     }
-    const v = videoRef.current;
     if (v) v.removeAttribute("src");
   }, []);
 
@@ -140,21 +152,14 @@ export function VideoPlayer({ src, fatal, onPrev, onNext }: VideoPlayerProps) {
     // streams. Native HLS is only for browsers without MSE (iOS
     // Safari), where hls.js is unsupported.
     if (Hls.isSupported()) {
-      const h = new Hls(HLS_CONFIG);
+      // subtitlePreference re-selects the rendition the viewer had on before
+      // the channel changed; with none, the manifest's DEFAULT=NO leaves
+      // captions off and the browser's captions menu is how they go on.
+      const h = new Hls({ ...HLS_CONFIG, subtitlePreference: subsPrefRef.current ?? undefined });
       hlsRef.current = h;
       h.loadSource(src);
       h.attachMedia(video);
       h.on(Hls.Events.MANIFEST_PARSED, () => playThenUnmute(video));
-      // The subtitle rendition is a separate playlist in the multivariant
-      // manifest (internal/caption writes it). hls.js turns it into a
-      // TextTrack; -1 means "none", which is where it stays until the
-      // viewer asks for captions.
-      h.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, (_e, data) => {
-        const available = data.subtitleTracks.length > 0;
-        setHasCaptions(available);
-        h.subtitleDisplay = available && captionsOnRef.current;
-        h.subtitleTrack = available && captionsOnRef.current ? 0 : -1;
-      });
       h.on(Hls.Events.ERROR, (_evt, data) => {
         if (!data.fatal) return;
         // Cold tunes start mid-GOP: the first segment can carry
@@ -255,20 +260,6 @@ export function VideoPlayer({ src, fatal, onPrev, onNext }: VideoPlayerProps) {
         tabIndex={0}
         className="h-full w-full"
       />
-
-      {hasCaptions && src && (
-        <button
-          onClick={toggleCaptions}
-          title={captionsOn ? "Hide captions" : "Show captions"}
-          // Bottom right, above the native control bar: the browser draws
-          // cues centred, so nothing of the text is covered.
-          className={`absolute right-2 bottom-14 rounded px-1.5 py-0.5 font-mono text-[11px] transition-colors ${
-            captionsOn ? "bg-fg text-canvas" : "bg-black/50 text-white/70 hover:text-white"
-          }`}
-        >
-          字幕
-        </button>
-      )}
 
       {shown === "loading" && src && (
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2">

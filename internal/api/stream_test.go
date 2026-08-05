@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -179,6 +180,40 @@ func TestMasterAnnouncesCaptionsOnlyWhenPresent(t *testing.T) {
 	if vtt := get(t, h, "/api/live/mx/sub0.vtt"); vtt.Code != http.StatusOK ||
 		vtt.Header().Get("Content-Type") != "text/vtt; charset=utf-8" {
 		t.Fatalf("vtt segment = %d %q", vtt.Code, vtt.Header().Get("Content-Type"))
+	}
+}
+
+// …and a rendition that is a moment away counts as existing. internal/caption
+// publishes its first subs.m3u8 a tick after ffmpeg's first segment — after the
+// video playlist a master request has already waited for. A player reads a
+// master exactly once, so composing it in that gap would leave the session with
+// no captions at all, and the browser's captions menu is now the only way to
+// turn them on.
+func TestMasterWaitsForTheFirstRendition(t *testing.T) {
+	dir := t.TempDir()
+	s := &hls.Session{Channel: "mx", Dir: dir, Captions: true}
+
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		_ = os.WriteFile(filepath.Join(dir, "subs.m3u8"), []byte("#EXTM3U\n"), 0o644)
+	}()
+
+	if !subsAnnounced(context.Background(), s) {
+		t.Fatal("captions not announced for a session that was about to publish them")
+	}
+}
+
+// A session that is not decoding captions answers at once: the wait is for a
+// rendition that is coming, not a guess that one might.
+func TestMasterDoesNotWaitWithoutACaptionDecode(t *testing.T) {
+	s := &hls.Session{Channel: "mx", Dir: t.TempDir()}
+
+	start := time.Now()
+	if subsAnnounced(context.Background(), s) {
+		t.Fatal("captions announced with no rendition and no decoder")
+	}
+	if waited := time.Since(start); waited > subsWait/2 {
+		t.Fatalf("waited %s for a rendition that was never coming", waited)
 	}
 }
 

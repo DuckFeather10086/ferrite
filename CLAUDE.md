@@ -186,8 +186,8 @@ Implemented and tested (race-clean):
 PID found from the PMT (0x130), cue timeline anchored by ffprobe, and the
 WebVTT segment for `stream13.ts` holding exactly the cue overlapping that
 segment's real PTS window (43511.667–43513.669 vs cue 43510.789–43514.476).
-The browser rendering of that rendition (the 字幕 button on the Live page) has
-not been checked in a browser yet.
+The browser rendering of that rendition — now the browser's own captions menu
+on the Live page's player — has not been checked in a browser yet.
 
 **Hardware-verified (2026-07-30, single Siano adapter, Tokyo):** EPG
 preempted by record and by live; record-now → file grows ~1.4 MB/s →
@@ -242,8 +242,25 @@ mid-recording finalizing as 'done'.
   with ffmpeg's `-hls_base_url` prefix *stripped*, since from inside the
   channel's path those URIs would resolve one directory too deep. A rendition is
   announced only when `subs.m3u8` exists: naming a playlist that 404s makes some
-  players abandon the stream. `{ch}/video.m3u8` only ever *serves* a session, it
-  never opens one.
+  players abandon the stream. But a player reads a master *once* and never
+  re-fetches it, and a session's first `subs.m3u8` lands a publish tick after the
+  video playlist the request already waited for — so for a session that is
+  decoding captions (`hls.Session.Captions`) `subsAnnounced` waits up to 3s for
+  that first one rather than composing a manifest that silently means "this
+  channel has no subtitles tonight". `{ch}/video.m3u8` only ever *serves* a
+  session, it never opens one.
+- **The captions control is the browser's, not ours.** hls.js turns the
+  manifest's subtitle rendition into a native `TextTrack`
+  (`renderTextTracksNatively`, its default), which is what puts captions in the
+  player's own control bar — where a viewer already looks for them, present in
+  fullscreen, and gone with the controls. An overlay button of ours was the
+  first attempt and it could not be got rid of: it sits above the video, so it
+  is on screen whether or not the controls are. `DEFAULT=NO` keeps captions off
+  until asked, hls.js maps a selection made in that menu back onto the subtitle
+  track to load, and the player carries the choice into the next channel as
+  `subtitlePreference` — detaching the media clears the selection, so without
+  that every channel change would quietly turn captions back off. This is also
+  the only caption UI iOS Safari can be given, since hls.js does not run there.
 - **Live TV is one URL, and a playlist's segment URIs are relative to
   where the playlist is served.** `/stream.m3u8` is what any player or
   bookmark gets (the `live_hls.py` contract): a channel change must not

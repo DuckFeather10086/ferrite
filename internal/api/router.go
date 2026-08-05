@@ -546,7 +546,7 @@ func (d Deps) handleLivePlaylist(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusGatewayTimeout, "stream did not start: "+err.Error())
 		return
 	}
-	writePlaylist(w, masterPlaylist(s.Channel, "", subsReady(s.Dir)))
+	writePlaylist(w, masterPlaylist(s.Channel, "", subsAnnounced(r.Context(), s)))
 }
 
 // handleLiveVideoPlaylist serves the media playlist the master points at.
@@ -726,7 +726,7 @@ func (d Deps) handleStreamM3U8(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "stream not started yet")
 		return
 	}
-	writePlaylist(w, masterPlaylist(s.Channel, livePrefix, subsReady(s.Dir)))
+	writePlaylist(w, masterPlaylist(s.Channel, livePrefix, subsAnnounced(r.Context(), s)))
 }
 
 // videoPlaylistName is where a channel's media playlist is served, under the
@@ -766,10 +766,31 @@ func masterPlaylist(channel, prefix string, withSubs bool) []byte {
 	return b.Bytes()
 }
 
-// subsReady reports whether a session has a subtitle rendition to announce.
-// Captions can be disabled, and a session that has just started has not written
-// one yet — announcing a rendition that 404s makes some players give up on the
-// stream entirely.
+// subsWait bounds how long composing a master playlist will wait for a
+// session's first subtitle rendition. internal/caption publishes one a tick
+// (1s) after ffmpeg's first segment, plus the ffprobe that anchors the cue
+// timeline; three seconds covers that and stops a session whose decoder died
+// from holding every manifest request open.
+const subsWait = 3 * time.Second
+
+// subsAnnounced reports whether to name the caption rendition in the master
+// playlist, waiting briefly for a session that is about to publish its first.
+//
+// The wait is what makes the browser's own captions menu usable: a player reads
+// the master once and never again, so a manifest composed in the second between
+// the video playlist appearing and the first subs.m3u8 leaves that session with
+// no captions at all — and now there is no button of ours to turn them on with.
+// Announcing a rendition that 404s is the other failure (some players abandon
+// the stream), which is why this waits for the file rather than trusting
+// Captions on its own.
+func subsAnnounced(ctx context.Context, s *hls.Session) bool {
+	if s.Captions && !subsReady(s.Dir) {
+		_ = waitForFile(ctx, filepath.Join(s.Dir, caption.SubsPlaylist), subsWait)
+	}
+	return subsReady(s.Dir)
+}
+
+// subsReady reports whether a session has a subtitle rendition on disk.
 func subsReady(dir string) bool {
 	st, err := os.Stat(filepath.Join(dir, caption.SubsPlaylist))
 	return err == nil && st.Size() > 0
