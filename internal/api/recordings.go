@@ -67,6 +67,104 @@ func (d Deps) handleRecordingFile(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, filepath.Base(path), fi.ModTime(), f)
 }
 
+// derivedExts are the files internal/postprocess writes beside a recording.
+// Listed here because deleting a recording has to take them with it.
+var derivedExts = []string{".mp4", ".ass", ".vtt"}
+
+// derivedFile serves one of the files the post-pass made beside a recording.
+//
+// The name is derived from the recording's own path rather than stored, so
+// these inherit its storage-root check instead of adding three more
+// filesystem paths from a database to guard. Nothing here can name a file the
+// .ts could not already name.
+func (d Deps) derivedFile(ext, contentType string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rec, ok := d.lookupRecording(w, r)
+		if !ok {
+			return
+		}
+		src, err := d.recordingPath(rec)
+		if err != nil {
+			writeErr(w, http.StatusForbidden, err.Error())
+			return
+		}
+		path := strings.TrimSuffix(src, filepath.Ext(src)) + ext
+
+		f, err := os.Open(path)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				// Not an error about this request so much as an answer about
+				// the recording: say which, because "404" alone cannot tell a
+				// transcode that has not run from one that never will.
+				writeErr(w, http.StatusNotFound, describeMissingDerived(rec, ext))
+				return
+			}
+			writeErr(w, http.StatusInternalServerError, "open: "+err.Error())
+			return
+		}
+		defer f.Close()
+		fi, err := f.Stat()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "stat: "+err.Error())
+			return
+		}
+
+		w.Header().Set("Content-Type", contentType)
+		// ServeContent answers Range requests, which is what lets a browser
+		// seek in the MP4 instead of downloading it to play the last minute.
+		http.ServeContent(w, r, filepath.Base(path), fi.ModTime(), f)
+	}
+}
+
+func describeMissingDerived(rec store.Recording, ext string) string {
+	id := strconv.FormatInt(rec.ID, 10)
+	switch rec.PostState {
+	case store.PostStateDone:
+		// The pass ran and this file is not there: the recording had no
+		// captions in it, which is ordinary and not worth an error.
+		return "recording " + id + " has no " + ext + " file"
+	case store.PostStateFailed:
+		return "the post-pass for recording " + id + " failed: " + rec.PostError
+	case store.PostStatePending, store.PostStateRunning:
+		return "recording " + id + " is still being processed (" + string(rec.PostState) + ")"
+	default:
+		return "recording " + id + " has not been processed — " +
+			"POST /api/recordings/" + id + "/postprocess to ask for it"
+	}
+}
+
+// handlePostprocessRecording asks for a recording to be (re)processed.
+//
+// The queue is a column, so this only has to write it: the runner sweeps at
+// startup and is nudged here. It is how a recording made before the post-pass
+// existed gets converted, and how a failed one is retried.
+func (d Deps) handlePostprocessRecording(w http.ResponseWriter, r *http.Request) {
+	rec, ok := d.lookupRecording(w, r)
+	if !ok {
+		return
+	}
+	if rec.State != store.RecordingStateDone {
+		writeErr(w, http.StatusConflict,
+			"recording "+strconv.FormatInt(rec.ID, 10)+" is "+string(rec.State)+
+				", not done — nothing to process yet")
+		return
+	}
+	if err := d.Store.SetPostState(r.Context(), rec.ID, store.PostStatePending, ""); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if d.Postprocess != nil {
+		d.Postprocess.Enqueue(rec.ID)
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"id":         rec.ID,
+		"post_state": store.PostStatePending,
+		// Say so rather than accepting silently: with no runner the row now
+		// says 'pending' and nothing is ever going to move it.
+		"queued": d.Postprocess != nil,
+	})
+}
+
 // handleDeleteRecording removes a recording: the file first, then the row.
 //
 // A recording in progress is refused. Unlinking the file underneath the
@@ -98,6 +196,14 @@ func (d Deps) handleDeleteRecording(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("api: recording row has an unusable path; deleting the row only",
 			"id", rec.ID, "path", rec.Path, "err", err)
 	} else {
+		// The post-pass's files go with it. They are derived from this
+		// recording and named after it, so nothing else will ever look for
+		// them — and the .mp4 is the largest single file of the set, which
+		// makes leaving it behind the expensive kind of orphan.
+		base := strings.TrimSuffix(path, filepath.Ext(path))
+		for _, ext := range derivedExts {
+			_ = os.Remove(base + ext)
+		}
 		switch err := os.Remove(path); {
 		case err == nil:
 			fileDeleted = true

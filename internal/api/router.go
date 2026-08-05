@@ -12,6 +12,10 @@
 //	DELETE /api/schedule/{id}           cancel schedule
 //	GET  /api/recordings                list recordings
 //	GET  /api/recordings/{id}/file      download/stream a recorded file
+//	GET  /api/recordings/{id}/mp4       the transcode, for a browser
+//	GET  /api/recordings/{id}/subs.ass  subtitles with ARIB's own placement
+//	GET  /api/recordings/{id}/subs.vtt  subtitles as words, for a <track>
+//	POST /api/recordings/{id}/postprocess  (re)make all three
 //	DELETE /api/recordings/{id}         delete a recording and its file
 //	POST /api/record                    start recording now
 //	POST /api/record/{id}/stop          stop an in-progress recording
@@ -45,6 +49,7 @@ import (
 	"github.com/DuckFeather10086/ferrite/internal/config"
 	"github.com/DuckFeather10086/ferrite/internal/hls"
 	"github.com/DuckFeather10086/ferrite/internal/netaddr"
+	"github.com/DuckFeather10086/ferrite/internal/postprocess"
 	"github.com/DuckFeather10086/ferrite/internal/recorder"
 	"github.com/DuckFeather10086/ferrite/internal/store"
 	"github.com/DuckFeather10086/ferrite/internal/tuner"
@@ -70,6 +75,10 @@ type Deps struct {
 	// Recorder serves the "record now" endpoints. Nil disables them
 	// (scheduled recordings still run — those go through the scheduler).
 	Recorder *recorder.Manager
+	// Postprocess is nudged when a recording is asked for by hand. Nil
+	// still writes the row's state — a later start sweeps it up — but
+	// nothing happens until then, and the response says so.
+	Postprocess *postprocess.Runner
 	// StorageRoot is the daemon's storage_root. Recording files are served
 	// (and deleted) only from inside it, so a bad `path` column can't turn
 	// the download endpoint into an arbitrary-file read. Empty skips that
@@ -115,6 +124,10 @@ func NewRouter(d Deps) http.Handler {
 
 		r.Get("/recordings", d.handleListRecordings)
 		r.Get("/recordings/{id}/file", d.handleRecordingFile)
+		r.Get("/recordings/{id}/mp4", d.derivedFile(".mp4", "video/mp4"))
+		r.Get("/recordings/{id}/subs.ass", d.derivedFile(".ass", "text/x-ssa; charset=utf-8"))
+		r.Get("/recordings/{id}/subs.vtt", d.derivedFile(".vtt", "text/vtt; charset=utf-8"))
+		r.Post("/recordings/{id}/postprocess", d.handlePostprocessRecording)
 		r.Delete("/recordings/{id}", d.handleDeleteRecording)
 		r.Post("/record", d.handleRecordNow)
 		r.Post("/record/{id}/stop", d.handleRecordStop)

@@ -55,6 +55,15 @@ type Runner struct {
 	StorageRoot    string        // recordings written under {StorageRoot}/recordings/...
 	StartupTimeout time.Duration // 0 → DefaultStartupTimeout
 	StallTimeout   time.Duration // 0 → DefaultStallTimeout
+
+	// OnFinished, when non-nil, is called with the row id of a recording
+	// that finished with bytes on disk. It is how the post-pass hears about
+	// work without the recorder knowing what a post-pass is.
+	//
+	// It must not block: it runs on the recording's own goroutine, after the
+	// row is finalized. Losing the call is survivable — FinalizeRecording
+	// has already marked the row for the post-pass, and a sweep finds it.
+	OnFinished func(recordingID int64)
 }
 
 // Job describes one recording task.
@@ -122,6 +131,9 @@ func (r *Runner) Run(ctx context.Context, j Job) error {
 		if err := r.Store.FinalizeRecording(context.Background(),
 			recID, endActual, bytesWritten, finalState, finalErr); err != nil {
 			slog.Warn("recorder: finalize row", "id", recID, "err", err)
+		}
+		if finalState == store.RecordingStateDone && r.OnFinished != nil {
+			r.OnFinished(recID)
 		}
 	}()
 

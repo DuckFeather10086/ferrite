@@ -42,3 +42,15 @@ epg_channels = [
   "NHKEテレ1東京",  # 551.14 (alias of the mojibake name NHKEFl1El5~)
   "NHK_G",          # 557.14
 ]
+
+# This box: Intel N100 iGPU. Measured 4.9x realtime at 68% of one core, where
+# software is 2.2x at 309% — the CPU headroom is what matters, since live HLS
+# has to keep encoding while this runs.
+[transcode]
+enable = true
+input_args  = ["-hwaccel", "vaapi",
+               "-hwaccel_device", "/dev/dri/renderD128",
+               "-hwaccel_output_format", "vaapi"]
+output_args = ["-vf", "deinterlace_vaapi,scale_vaapi=w=1920:h=1080",
+               "-c:v", "h264_vaapi", "-b:v", "6M",
+               "-c:a", "aac", "-b:a", "192k"]

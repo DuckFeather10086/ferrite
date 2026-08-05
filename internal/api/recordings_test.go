@@ -323,3 +323,119 @@ func TestRecordingFileEndpoints_NoStore(t *testing.T) {
 		t.Fatalf("delete: %d %s", rr.Code, rr.Body.String())
 	}
 }
+
+// The post-pass writes its files beside the recording, and the endpoints that
+// serve them derive the name rather than reading another path column — so a
+// row that cannot serve its .ts cannot serve an .mp4 either.
+func TestDerivedFilesAreServedFromBesideTheRecording(t *testing.T) {
+	f := newFileRouter(t)
+	id := f.addRecording(t, "x.ts", "transport stream", store.RecordingStateDone)
+	base := filepath.Join(f.root, "recordings", "2026-07-30", "x")
+	for name, body := range map[string]string{
+		".mp4": "an-mp4",
+		".ass": "[Script Info]\nDialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,x\n",
+		".vtt": "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nx\n",
+	} {
+		if err := os.WriteFile(base+name, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, tc := range []struct{ path, wantType, wantBody string }{
+		{"/mp4", "video/mp4", "an-mp4"},
+		{"/subs.ass", "text/x-ssa; charset=utf-8", "Dialogue:"},
+		{"/subs.vtt", "text/vtt; charset=utf-8", "WEBVTT"},
+	} {
+		rr := get(t, f.h, "/api/recordings/"+strconv.FormatInt(id, 10)+tc.path)
+		if rr.Code != http.StatusOK {
+			t.Errorf("GET %s = %d %s", tc.path, rr.Code, rr.Body.String())
+			continue
+		}
+		if ct := rr.Header().Get("Content-Type"); ct != tc.wantType {
+			t.Errorf("GET %s: Content-Type %q, want %q", tc.path, ct, tc.wantType)
+		}
+		if !strings.Contains(rr.Body.String(), tc.wantBody) {
+			t.Errorf("GET %s served %q", tc.path, rr.Body.String())
+		}
+	}
+}
+
+// A 404 here is an answer about the recording, not about the URL, so it has
+// to say which: a transcode that has not run yet reads very differently from
+// one that failed, and identically over the wire without this.
+func TestAMissingDerivedFileSaysWhy(t *testing.T) {
+	f := newFileRouter(t)
+	id := f.addRecording(t, "x.ts", "ts", store.RecordingStateDone)
+	url := "/api/recordings/" + strconv.FormatInt(id, 10) + "/mp4"
+
+	rr := get(t, f.h, url)
+	if rr.Code != http.StatusNotFound || !strings.Contains(rr.Body.String(), "postprocess") {
+		t.Fatalf("unprocessed: %d %s", rr.Code, rr.Body.String())
+	}
+
+	if err := f.st.SetPostState(context.Background(), id, store.PostStateFailed, "no such device"); err != nil {
+		t.Fatal(err)
+	}
+	rr = get(t, f.h, url)
+	if !strings.Contains(rr.Body.String(), "no such device") {
+		t.Fatalf("failed: %d %s", rr.Code, rr.Body.String())
+	}
+
+	if err := f.st.SetPostState(context.Background(), id, store.PostStateRunning, ""); err != nil {
+		t.Fatal(err)
+	}
+	rr = get(t, f.h, url)
+	if !strings.Contains(rr.Body.String(), "still being processed") {
+		t.Fatalf("running: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+// Asking by hand is how a recording made before the post-pass existed gets
+// converted, and how a failed one is retried.
+func TestPostprocessEndpointQueuesTheRecording(t *testing.T) {
+	f := newFileRouter(t)
+	done := f.addRecording(t, "x.ts", "ts", store.RecordingStateDone)
+	running := f.addRecording(t, "y.ts", "ts", store.RecordingStateRecording)
+
+	rr := post(t, f.h, "/api/recordings/"+strconv.FormatInt(done, 10)+"/postprocess", "")
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("%d %s", rr.Code, rr.Body.String())
+	}
+	rec, _ := f.st.GetRecording(context.Background(), done)
+	if rec.PostState != store.PostStatePending {
+		t.Fatalf("state %q, want pending", rec.PostState)
+	}
+	// No runner wired here, so the response has to admit nothing will happen.
+	if !strings.Contains(rr.Body.String(), `"queued":false`) {
+		t.Fatalf("silently accepted with no runner: %s", rr.Body.String())
+	}
+
+	// Nothing to convert until the file stops growing.
+	rr = post(t, f.h, "/api/recordings/"+strconv.FormatInt(running, 10)+"/postprocess", "")
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("in-progress recording: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+// Deleting a recording takes the post-pass's files with it. They are named
+// after it and derived from it, so nothing else would ever come looking — and
+// the .mp4 is the biggest file of the set.
+func TestDeleteRemovesTheDerivedFilesToo(t *testing.T) {
+	f := newFileRouter(t)
+	id := f.addRecording(t, "x.ts", "transport stream", store.RecordingStateDone)
+	base := filepath.Join(f.root, "recordings", "2026-07-30", "x")
+	for _, ext := range derivedExts {
+		if err := os.WriteFile(base+ext, []byte("derived"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if rr := del(t, f.h, "/api/recordings/"+strconv.FormatInt(id, 10)); rr.Code != http.StatusOK {
+		t.Fatalf("%d %s", rr.Code, rr.Body.String())
+	}
+	for _, ext := range append(derivedExts, ".ts") {
+		if _, err := os.Stat(base + ext); err == nil {
+			t.Errorf("%s survived the delete", ext)
+		}
+	}
+}

@@ -77,6 +77,11 @@ dvb-rs stdout → b25-rs stdin → b25-rs stdout → fanout.Broadcaster
     cache miss pays the ffprobe pass. Output is normalized to square
     pixels (1440x1080 SAR 4:3 → 1920x1080 SAR 1:1) because hls.js does
     not reliably honour the SAR in the H.264 VUI.
+  - `postprocess/` — what happens to a recording after the tuner lets go:
+    transcode to an `.mp4` a browser can open, plus `.ass`/`.vtt` sidecars
+    from `arib-caption`. Serialized, niced, and it waits while any recording
+    is in progress. The queue is the `post_state` column, written in the same
+    statement that marks a recording done, so it survives a crash.
   - `netaddr/` — the addresses a viewer can reach this daemon at, labelled
     `local` / `lan` / `tailscale` / `public`. Only the daemon can answer
     this (a remote would be enumerating its own interfaces), so it is
@@ -169,15 +174,16 @@ Implemented and tested (race-clean):
   `予約` with no principle deciding which.
 
 **Not implemented:**
-- Subtitles for recordings. Live playback has its WebVTT rendition
-  (`internal/caption` + `arib-caption`), and `arib-caption ass` now writes the
-  richer sidecar form — ARIB's real positions, colours, cell sizes, ruby, and
-  DRCS glyphs drawn as vector outlines rather than read as 〓. **ferrite does
-  not run it yet**: what is missing is a post-pass after a recording finalizes,
-  an endpoint to serve the sidecar (with the same `storage_root` containment as
-  the file endpoints), and `--sub-file` from the TUI, since mpv does not
-  auto-detect a sidecar over HTTP. The consumer is mpv either way — a browser
-  cannot decode the MPEG-2 in a recording at all.
+- Watching a recording in the web UI. The pieces are there — `internal/postprocess`
+  writes the `.mp4` and the sidecars, and `/api/recordings/{id}/{mp4,subs.ass,subs.vtt}`
+  serve them — but no page plays them yet. ASS.js renders what our `.ass`
+  emits, drawings and all (verified in a headless browser against real
+  recordings: positions, background boxes, ruby, DRCS glyphs); it needs no
+  font shipped, since it sets CSS `font-family` and falls back to the system
+  CJK font. One wrinkle to handle: it renders off `requestVideoFrameCallback`,
+  so seeking while *paused* clears the captions until playback resumes.
+- `--sub-file` from the TUI: mpv does not auto-detect a sidecar over HTTP, so
+  playing a recording there needs the `.ass` URL passed explicitly.
 - The DRCS→Unicode replacement table (keyed by the glyph's MD5). Only the text
   forms need it now that ASS draws the glyph; `arib-caption drcs` prints what a
   stream sends, as ASCII art, which is what such a table gets built from.
@@ -188,6 +194,13 @@ Implemented and tested (race-clean):
   human pass over `channels.json` would tidy it.
 - Watch-one-channel-while-recording-another needs a second tuner; with
   one adapter the recording wins and live drops.
+
+**Hardware-verified (2026-08-05, the recording post-pass):** a 7m04s NHK 総合
+recording (888 MB) → 288 MB MP4 (H.264 1920x1080 SAR 1:1 + AAC), 1m50s wall on
+the N100's iGPU, ~3.9× realtime end to end. `.ass` 46 KB and `.vtt` 8 KB
+alongside; all three served over HTTP with Range. The `.ass` burned back onto
+its own MP4 puts NHK's two upper caption lines where the broadcast put them,
+at the frame the on-screen clock agrees with. DELETE took all four files.
 
 **Hardware-verified (2026-08-04, live captions):** NHK 総合 at noon — caption
 PID found from the PMT (0x130), cue timeline anchored by ffprobe, and the
@@ -379,6 +392,25 @@ mid-recording finalizing as 'done'.
   difference between a download endpoint and an arbitrary-file read — and,
   for DELETE, an arbitrary-file unlink. Keep the check on any new endpoint
   that opens a path out of the database.
+- **Everything derived from a recording is *named* after it, not stored.**
+  `foo.ts` → `foo.mp4`, `foo.ass`, `foo.vtt`. Three more path columns would be
+  three more untrusted paths to guard; deriving means they inherit the check
+  the `.ts` already gets, and nothing can name a file the recording could not.
+  It also means DELETE has to take them with it (`derivedExts`) — the `.mp4`
+  is the biggest file of the set and orphaning it is expensive.
+- **The transcode's ffmpeg arguments are configuration, not a codec name.**
+  `transcode.input_args` / `output_args` are whole argument lists because the
+  filter chain and the encoder go together: VAAPI wants `deinterlace_vaapi` +
+  `scale_vaapi`, software wants `yadif` + `scale`, and naming only the encoder
+  produces an ffmpeg that fails at runtime. The default is software, which
+  works anywhere; this box's config selects VAAPI (measured on the N100: 4.9×
+  realtime at 68% of one core, against 2.2× at 309% for libx264 — the CPU
+  headroom is the point, since live HLS keeps encoding while this runs).
+  Two things that bit during development: the output is written as
+  `.mp4.part`, so `-f mp4` is required or ffmpeg cannot choose a muxer from
+  the extension; and access to `/dev/dri/renderD128` here comes from a logind
+  ACL on the *login session* rather than group membership, so a user unit that
+  outlives the session loses the GPU (`usermod -aG render`).
 - **Subprocess stderr is not /dev/null.** Pipe to slog at warn level.
   The legacy Python silently masked failures and we missed recordings.
 - **Always validate the pipeline produces bytes.** Port the watchdog

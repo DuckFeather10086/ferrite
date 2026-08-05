@@ -274,3 +274,10 @@ func (p *Process) killGroup() {
 		"cmd", p.name, "pgid", p.pgid)
 	_ = syscall.Kill(-p.pgid, syscall.SIGKILL)
 }
+
+// Pgid is the child's process group id.
+//
+// Exported for callers that need to act on the whole tree rather than the
+// process they started — lowering a transcode's scheduling priority, say,
+// where the work may have been re-executed into a child of its own.
+func (p *Process) Pgid() int { return p.pgid }

@@ -33,6 +33,7 @@ import (
 	"github.com/DuckFeather10086/ferrite/internal/epg"
 	"github.com/DuckFeather10086/ferrite/internal/hls"
 	"github.com/DuckFeather10086/ferrite/internal/netaddr"
+	"github.com/DuckFeather10086/ferrite/internal/postprocess"
 	"github.com/DuckFeather10086/ferrite/internal/recorder"
 	"github.com/DuckFeather10086/ferrite/internal/scheduler"
 	"github.com/DuckFeather10086/ferrite/internal/store"
@@ -95,6 +96,24 @@ func run(cfgPath, logLevel string) error {
 		Store:       st,
 		StorageRoot: cfg.StorageRoot,
 	}
+
+	// The post-pass: a finished recording becomes an MP4 a browser can play,
+	// with subtitle sidecars beside it. Off unless the config asks for it —
+	// it is real work on a box whose first job is to keep recording.
+	var post *postprocess.Runner
+	if cfg.Transcode.Enable {
+		post = &postprocess.Runner{
+			Store:           st,
+			StorageRoot:     cfg.StorageRoot,
+			FFmpegBin:       cfg.FFmpegBin,
+			CaptionBin:      cfg.AribCaptionBin,
+			InputArgs:       cfg.Transcode.InputArgs,
+			TranscodeArgs:   cfg.Transcode.OutputArgs,
+			AudioOffsetBias: cfg.AudioOffsetBias,
+			DeleteSource:    cfg.Transcode.DeleteSource,
+		}
+		recRunner.OnFinished = post.Enqueue
+	}
 	sched := &scheduler.Scheduler{
 		Store:  st,
 		Runner: recRunner,
@@ -133,11 +152,12 @@ func run(cfgPath, logLevel string) error {
 	adhoc := &recorder.Manager{Runner: recRunner, Base: context.Background()}
 
 	handler := api.NewRouter(api.Deps{
-		Channels: channels,
-		Store:    st,
-		Tuners:   tunerPool,
-		HLS:      hlsMgr,
-		Recorder: adhoc,
+		Channels:    channels,
+		Store:       st,
+		Tuners:      tunerPool,
+		HLS:         hlsMgr,
+		Recorder:    adhoc,
+		Postprocess: post,
 		// Bounds which files /api/recordings/{id}/file will serve and
 		// DELETE will unlink — same root the recorder writes under.
 		StorageRoot: cfg.StorageRoot,
@@ -162,6 +182,14 @@ func run(cfgPath, logLevel string) error {
 		}
 	}()
 	slog.Info("hls manager started", "dir", hlsRoot)
+
+	if post != nil {
+		go func() {
+			if err := post.Run(ctx); err != nil && ctx.Err() == nil {
+				slog.Warn("postprocess exited", "err", err)
+			}
+		}()
+	}
 
 	// EPG refresher (best-effort: missing dvbr binary or no
 	// epg_channels just means no ingest, not a fatal).
