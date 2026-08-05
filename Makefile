@@ -1,6 +1,15 @@
 .PHONY: all deps build run clean web rust go \
         install-service uninstall-service restart status logs
 
+# What /api/status reports, and what the TUI prints under its wordmark.
+# `cmd/isdbd` declares `var version = "dev"` for -ldflags to overwrite, and
+# nothing was overwriting it, so every build called itself "dev" — including
+# the one running as a service, which is the one you most need to identify.
+# git describe answers all three questions at once: a tagged build says
+# v0.1.0, a build past the tag says how far past and from which commit, and a
+# build from an uncommitted tree says `-dirty`.
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
 # ── top-level targets ─────────────────────────────────────────────
 
 all: build
@@ -47,7 +56,7 @@ web:
 
 go:
 	@echo "=== go build ==="
-	@export PATH="$${GOROOT:-/usr/local/go}/bin:$$PATH" && go build -o isdbd ./cmd/isdbd/
+	@export PATH="$${GOROOT:-/usr/local/go}/bin:$$PATH" && go build -ldflags "-X main.version=$(VERSION)" -o isdbd ./cmd/isdbd/
 	@test -x isdbd || (echo "ERROR: go build failed" && exit 1)
 	@export PATH="$${GOROOT:-/usr/local/go}/bin:$$PATH" && go build -o ferrite-tui ./cmd/ferrite-tui/
 	@test -x ferrite-tui || (echo "ERROR: tui build failed" && exit 1)
