@@ -169,11 +169,18 @@ Implemented and tested (race-clean):
   `予約` with no principle deciding which.
 
 **Not implemented:**
-- Subtitles beyond live HLS. Live playback has a WebVTT rendition
-  (`internal/caption` + `arib-caption`); still missing are the recording-side
-  forms — an `.ass` sidecar keeping ARIB's real positions and colours, a pixel
-  renderer for DRCS glyphs no font has — and the DRCS→Unicode replacement
-  table, without which a DRCS character reads as 〓.
+- Subtitles for recordings. Live playback has its WebVTT rendition
+  (`internal/caption` + `arib-caption`), and `arib-caption ass` now writes the
+  richer sidecar form — ARIB's real positions, colours, cell sizes, ruby, and
+  DRCS glyphs drawn as vector outlines rather than read as 〓. **ferrite does
+  not run it yet**: what is missing is a post-pass after a recording finalizes,
+  an endpoint to serve the sidecar (with the same `storage_root` containment as
+  the file endpoints), and `--sub-file` from the TUI, since mpv does not
+  auto-detect a sidecar over HTTP. The consumer is mpv either way — a browser
+  cannot decode the MPEG-2 in a recording at all.
+- The DRCS→Unicode replacement table (keyed by the glyph's MD5). Only the text
+  forms need it now that ASS draws the glyph; `arib-caption drcs` prints what a
+  stream sends, as ASCII art, which is what such a table gets built from.
 - Channel-list hygiene: duplicate records survive from the legacy
   migrate (`TOKYO MX1` + `TOKYO MX1_2` for separate service_ids,
   `515.14MHz#23864`), and several muxes carry the same service name on
