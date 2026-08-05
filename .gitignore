@@ -10,5 +10,10 @@
 /var/
 web/node_modules/
 web/.next/
+web/out/
+web/tsconfig.tsbuildinfo
 .env
 *.log
+/isdbd
+/ferrite-tui
+/target/

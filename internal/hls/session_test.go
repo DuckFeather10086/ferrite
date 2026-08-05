@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/DuckFeather10086/isdbd/internal/config"
-	"github.com/DuckFeather10086/isdbd/internal/tuner"
+	"github.com/DuckFeather10086/ferrite/internal/config"
+	"github.com/DuckFeather10086/ferrite/internal/tuner"
 )
 
 // fakeTuner returns a stream of constant chunks until ctx cancels.

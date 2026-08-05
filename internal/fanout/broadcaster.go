@@ -172,6 +172,12 @@ func (b *Broadcaster) broadcast(data []byte) {
 	b.mu.RUnlock()
 }
 
+// Close closes every subscriber channel and refuses further
+// subscriptions, without a Pump ever having run. Use it when the source
+// failed to materialize (e.g. the tune never came up) so subscribers
+// see EOF immediately instead of blocking forever. Idempotent.
+func (b *Broadcaster) Close() { b.closeAll() }
+
 func (b *Broadcaster) closeAll() {
 	b.mu.Lock()
 	b.closed = true

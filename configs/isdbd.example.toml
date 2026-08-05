@@ -3,8 +3,8 @@ storage_root = "/var/lib/isdbd"
 adapters = [0]
 
 # dvbr is built into the parent virtual workspace's target/, not dvbr/target/.
-dvbr_bin     = "/home/duckfeather/code/isdb-workspace/target/release/dvbr"
-b25_bin      = "/home/duckfeather/code/isdb-workspace/libaribb25-rs/target/release/b25"
+dvbr_bin     = "/home/duckfeather/code/isdb-workspace/target/release/dvb-rs"
+b25_bin      = "/home/duckfeather/code/isdb-workspace/libaribb25-rs/target/release/b25-rs"
 ffmpeg_bin   = "ffmpeg"
 ffprobe_bin  = "ffprobe"
 
@@ -17,4 +17,45 @@ channels_file = "channels.json"
 
 # EPG refresh cron (UTC). Default: every 6 hours.
 epg_cron = "0 */6 * * *"
-epg_channels = ["TOKYO MX1", "NHKEFl1El5~", "asahi"]
+# List one channel per *mux* (per distinct FREQUENCY in channels.json). One
+# pass collects the EIT of every service in the transport stream it tuned, so
+# a second channel on the same frequency is skipped as already covered.
+epg_channels = ["TOKYO MX1", "asahi", "TBS1", "tvk1", "NHK_G", "NTV", "FUJI"]
+
+# ── After a recording finishes ──────────────────────────────────────────
+#
+# A recording is MPEG-2 in a transport stream with its captions on an ARIB
+# PID: mpv plays it, a browser plays none of it. With this on, each finished
+# recording also gets an .mp4 (H.264/AAC, faststart) and .ass/.vtt subtitle
+# sidecars written beside it. Jobs run one at a time, niced, and never while a
+# recording is in progress.
+#
+# Off by default. It is real work on a box whose first job is to keep
+# recording, so it is opted into.
+[transcode]
+enable = false
+
+# input_args go before ffmpeg's -i, output_args after it. They are one setting
+# because the filter chain and the encoder go together: naming only a codec
+# gets you an ffmpeg that fails at runtime. Leave both empty for software
+# H.264 (libx264 superfast) — correct everywhere, ~2× realtime on an N100.
+#
+# Intel iGPU, whole pipeline on the GPU (measured on an N100: 4.9× realtime at
+# 68% of one core, against 2.2× at 309% for software). Note that access to
+# /dev/dri/renderD128 may come from a logind ACL on the *login session* rather
+# than from group membership — check `getfacl`, and prefer adding the daemon's
+# user to the `render` group, or this silently stops working after a logout.
+#   input_args  = ["-hwaccel", "vaapi",
+#                  "-hwaccel_device", "/dev/dri/renderD128",
+#                  "-hwaccel_output_format", "vaapi"]
+#   output_args = ["-vf", "deinterlace_vaapi,scale_vaapi=w=1920:h=1080",
+#                  "-c:v", "h264_vaapi", "-b:v", "6M",
+#                  "-c:a", "aac", "-b:a", "192k"]
+#
+# Raspberry Pi 4: h264_v4l2m2m. Raspberry Pi 5 has no hardware H.264 encoder
+# at all — leave these empty and expect roughly realtime.
+
+# Remove the .ts once the .mp4 is written. Off by default: the .ts is what
+# came off the air, everything else is derived from it, and it is the only one
+# that cannot be made again.
+delete_source = false

@@ -24,18 +24,21 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
-	"github.com/DuckFeather10086/isdbd/internal/api"
-	"github.com/DuckFeather10086/isdbd/internal/config"
-	"github.com/DuckFeather10086/isdbd/internal/epg"
-	"github.com/DuckFeather10086/isdbd/internal/hls"
-	"github.com/DuckFeather10086/isdbd/internal/recorder"
-	"github.com/DuckFeather10086/isdbd/internal/scheduler"
-	"github.com/DuckFeather10086/isdbd/internal/store"
-	"github.com/DuckFeather10086/isdbd/internal/tuner"
-	"github.com/DuckFeather10086/isdbd/internal/web"
+	"github.com/DuckFeather10086/ferrite/internal/api"
+	"github.com/DuckFeather10086/ferrite/internal/config"
+	"github.com/DuckFeather10086/ferrite/internal/epg"
+	"github.com/DuckFeather10086/ferrite/internal/hls"
+	"github.com/DuckFeather10086/ferrite/internal/netaddr"
+	"github.com/DuckFeather10086/ferrite/internal/postprocess"
+	"github.com/DuckFeather10086/ferrite/internal/recorder"
+	"github.com/DuckFeather10086/ferrite/internal/scheduler"
+	"github.com/DuckFeather10086/ferrite/internal/store"
+	"github.com/DuckFeather10086/ferrite/internal/tuner"
+	"github.com/DuckFeather10086/ferrite/internal/web"
 )
 
 // Set via -ldflags "-X main.version=...".
@@ -93,6 +96,24 @@ func run(cfgPath, logLevel string) error {
 		Store:       st,
 		StorageRoot: cfg.StorageRoot,
 	}
+
+	// The post-pass: a finished recording becomes an MP4 a browser can play,
+	// with subtitle sidecars beside it. Off unless the config asks for it —
+	// it is real work on a box whose first job is to keep recording.
+	var post *postprocess.Runner
+	if cfg.Transcode.Enable {
+		post = &postprocess.Runner{
+			Store:           st,
+			StorageRoot:     cfg.StorageRoot,
+			FFmpegBin:       cfg.FFmpegBin,
+			CaptionBin:      cfg.AribCaptionBin,
+			InputArgs:       cfg.Transcode.InputArgs,
+			TranscodeArgs:   cfg.Transcode.OutputArgs,
+			AudioOffsetBias: cfg.AudioOffsetBias,
+			DeleteSource:    cfg.Transcode.DeleteSource,
+		}
+		recRunner.OnFinished = post.Enqueue
+	}
 	sched := &scheduler.Scheduler{
 		Store:  st,
 		Runner: recRunner,
@@ -104,23 +125,49 @@ func run(cfgPath, logLevel string) error {
 		OutputRoot:      hlsRoot,
 		FFmpegBin:       cfg.FFmpegBin,
 		FFprobeBin:      cfg.FFprobeBin,
+		CaptionBin:      cfg.AribCaptionBin,
 		ProbeSeconds:    cfg.ProbeSeconds,
 		AudioOffsetBias: cfg.AudioOffsetBias,
+		// Persist the measured A/V skew so a channel only pays the
+		// ~5s ffprobe pass once, not on every tune.
+		Offsets: st,
+		Canonical: func(name string) string {
+			if ch := channels.Find(name); ch != nil {
+				return ch.Name
+			}
+			return name
+		},
 	}
-
-	handler := api.NewRouter(api.Deps{
-		Channels:  channels,
-		Store:     st,
-		Tuners:    tunerPool,
-		HLS:       hlsMgr,
-		StartedAt: time.Now(),
-		Version:   version,
-		Web:       web.FS(),
-	})
 
 	ctx, stop := signal.NotifyContext(context.Background(),
 		syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Ad-hoc ("record now") recordings outlive the HTTP request that
+	// started them. Base is deliberately *not* the signal context: on
+	// SIGTERM that would cancel the job before StopAllAndWait below can
+	// ask it to stop gracefully, and the row would land as 'failed' with
+	// its bytes already on disk. Shutdown reaches these jobs only
+	// through StopAllAndWait.
+	adhoc := &recorder.Manager{Runner: recRunner, Base: context.Background()}
+
+	handler := api.NewRouter(api.Deps{
+		Channels:    channels,
+		Store:       st,
+		Tuners:      tunerPool,
+		HLS:         hlsMgr,
+		Recorder:    adhoc,
+		Postprocess: post,
+		// Bounds which files /api/recordings/{id}/file will serve and
+		// DELETE will unlink — same root the recorder writes under.
+		StorageRoot: cfg.StorageRoot,
+		// Lets /api/status report the addresses a viewer can reach the
+		// stream at. Only this process can see its own interfaces.
+		HTTPPort:  cfg.HTTPPort,
+		StartedAt: time.Now(),
+		Version:   version,
+		Web:       web.FS(),
+	})
 
 	go func() {
 		if err := sched.Run(ctx); err != nil && ctx.Err() == nil {
@@ -136,6 +183,14 @@ func run(cfgPath, logLevel string) error {
 	}()
 	slog.Info("hls manager started", "dir", hlsRoot)
 
+	if post != nil {
+		go func() {
+			if err := post.Run(ctx); err != nil && ctx.Err() == nil {
+				slog.Warn("postprocess exited", "err", err)
+			}
+		}()
+	}
+
 	// EPG refresher (best-effort: missing dvbr binary or no
 	// epg_channels just means no ingest, not a fatal).
 	if len(cfg.EPGChannels) > 0 && cfg.DvbrBin != "" {
@@ -146,6 +201,10 @@ func run(cfgPath, logLevel string) error {
 			Channels:     channels,
 			ChannelNames: cfg.EPGChannels,
 			Store:        st,
+			// Route EPG through the pool at background priority: live
+			// viewing and recordings evict it instead of dying on dvbr's
+			// flock (which is what starved live HLS before).
+			Tuners: tunerPool,
 		}
 		go func() {
 			if err := refresher.Run(ctx); err != nil && ctx.Err() == nil {
@@ -159,17 +218,28 @@ func run(cfgPath, logLevel string) error {
 	}
 
 	srv := &http.Server{
-		Addr:         ":" + strconv.Itoa(cfg.HTTPPort),
-		Handler:      handler,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		Addr:        ":" + strconv.Itoa(cfg.HTTPPort),
+		Handler:     handler,
+		ReadTimeout: 10 * time.Second,
+		// WriteTimeout must cover the slowest handler: a cold
+		// /api/live/{ch}.m3u8 blocks through the frontend lock timeout
+		// (~25s) plus waiting for ffmpeg's first playlist write (~30s)
+		// before it can respond.
+		WriteTimeout: 120 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 
 	serveErr := make(chan error, 1)
 	go func() {
+		// Every address the stream can be opened from, not just loopback:
+		// after a boot on the tuner box this log line is what you read to
+		// know what to paste into a phone.
+		var watch []string
+		for _, a := range netaddr.Addresses(cfg.HTTPPort) {
+			watch = append(watch, string(a.Kind)+"="+a.URL(api.StreamPath))
+		}
 		slog.Info("http listening", "addr", srv.Addr,
-			"local", "http://localhost"+srv.Addr,
+			"watch", strings.Join(watch, " "),
 			"endpoints", "/health /api/status /api/channels /api/epg /api/schedule /api/recordings")
 		serveErr <- srv.ListenAndServe()
 	}()
@@ -183,6 +253,12 @@ func run(cfgPath, logLevel string) error {
 	case <-ctx.Done():
 		slog.Info("shutdown signal received", "sig", ctx.Err())
 	}
+
+	// Let in-flight "record now" jobs close their file and write their
+	// row before the store goes away (deferred st.Close runs after this
+	// function returns). Without the wait the row stays stuck in state
+	// 'recording' forever.
+	adhoc.StopAllAndWait(5 * time.Second)
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

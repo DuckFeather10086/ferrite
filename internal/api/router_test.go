@@ -11,8 +11,8 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/DuckFeather10086/isdbd/internal/config"
-	"github.com/DuckFeather10086/isdbd/internal/store"
+	"github.com/DuckFeather10086/ferrite/internal/config"
+	"github.com/DuckFeather10086/ferrite/internal/store"
 )
 
 func newTestRouter(t *testing.T, withStore bool) (http.Handler, *store.Store) {
@@ -88,6 +88,43 @@ func TestChannels(t *testing.T) {
 	}
 	if int(out[0]["service_id"].(float64)) != 23608 {
 		t.Fatalf("service_id: %v", out[0]["service_id"])
+	}
+	// display_name is always present, so a client can render it without
+	// re-deriving a label from the alias list (and disagreeing with the
+	// other clients when it does).
+	if out[0]["display_name"] != "mx" {
+		t.Fatalf("display_name = %v, want the name when no alias reads better",
+			out[0]["display_name"])
+	}
+}
+
+// The label a UI shows is chosen server-side. A record whose own name is
+// legacy mojibake must come back with the readable alias.
+func TestChannels_DisplayNamePrefersTheReadableAlias(t *testing.T) {
+	h := NewRouter(Deps{
+		Channels: &config.Channels{Version: 1, Channels: []config.Channel{
+			{Name: "NHKEFl1El5~", Aliases: []string{"NHKEテレ1東京"}},
+			{Name: "asahi", Aliases: []string{"|ÆìÓD+F|", "テレビ朝日"}},
+			{Name: "J：COMテレビ", Aliases: []string{"J!'COM|ÆìÓ"}},
+		}},
+		StartedAt: time.Now(),
+	})
+	var out []struct {
+		Name        string `json:"name"`
+		DisplayName string `json:"display_name"`
+	}
+	if err := json.Unmarshal(get(t, h, "/api/channels").Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"NHKEFl1El5~": "NHKEテレ1東京",
+		"asahi":       "テレビ朝日",
+		"J：COMテレビ":    "J：COMテレビ", // its own name already reads fine
+	}
+	for _, row := range out {
+		if got := want[row.Name]; row.DisplayName != got {
+			t.Errorf("%q → display_name %q, want %q", row.Name, row.DisplayName, got)
+		}
 	}
 }
 
@@ -188,6 +225,33 @@ func TestWebUI_ServesAndFallsBack(t *testing.T) {
 	}
 	if !json.Valid(rr.Body.Bytes()) {
 		t.Fatalf("api 404 not JSON: %s", rr.Body.String())
+	}
+}
+
+// A route whose .html page has a same-named directory beside it must serve
+// the page. The Next.js export lays every route out exactly this way —
+// guide.html plus a guide/ of RSC payloads — so a handler that treats a
+// successful Open("guide") as "found the asset" serves the directory, and
+// with no index.html inside, the client gets an autoindex listing of
+// __next.*.txt where the page should be.
+func TestWebUI_RouteWithSiblingDirectory(t *testing.T) {
+	web := fstest.MapFS{
+		"index.html":             {Data: []byte("<html>SPA-SHELL</html>")},
+		"guide.html":             {Data: []byte("<html>GUIDE-PAGE</html>")},
+		"guide/__next.guide.txt": {Data: []byte("rsc-payload")},
+		"guide/__next._tree.txt": {Data: []byte("rsc-payload")},
+	}
+	h := NewRouter(Deps{Channels: &config.Channels{}, StartedAt: time.Now(), Web: web})
+
+	rr := get(t, h, "/guide")
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "GUIDE-PAGE") {
+		t.Fatalf("/guide: %d %s", rr.Code, rr.Body.String())
+	}
+	// The payloads themselves are still reachable — client-side navigation
+	// fetches them by their real paths.
+	if rr := get(t, h, "/guide/__next.guide.txt"); rr.Code != 200 ||
+		!strings.Contains(rr.Body.String(), "rsc-payload") {
+		t.Fatalf("rsc payload: %d %s", rr.Code, rr.Body.String())
 	}
 }
 

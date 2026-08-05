@@ -1,0 +1,21 @@
+{
+  "name": "ferrite-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP tools + a DeepSeek agent for driving a ferrite ISDB-T TV daemon",
+  "scripts": {
+    "mcp": "bun run src/mcp.ts",
+    "agent": "bun run src/cli.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "openai": "^7.1.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "typescript": "^7.0.2"
+  }
+}

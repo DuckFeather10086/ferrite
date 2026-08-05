@@ -27,12 +27,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/DuckFeather10086/isdbd/internal/tuner"
+	"github.com/DuckFeather10086/ferrite/internal/tuner"
 )
 
 func main() {
 	var (
-		dvbrBin     = flag.String("dvbr", "dvbr", "path to dvbr binary")
+		dvbrBin     = flag.String("dvbr", "dvb-rs", "path to dvb-rs binary")
 		channelFile = flag.String("channels", "channels.json", "path to channels.json")
 		adapter     = flag.Int("adapter", 0, "DVB adapter number")
 		outPath     = flag.String("out", "/tmp/probe.ts", "output file for raw TS")

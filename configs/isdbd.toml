@@ -7,10 +7,13 @@ adapters = [0]
 
 # Sibling repos under ~/code/isdb-workspace/. Adjust if you cloned
 # elsewhere.
-dvbr_bin    = "../target/release/dvbr"
-b25_bin     = "../libaribb25-rs/target/release/b25"
+dvbr_bin    = "./target/release/dvbr"
+b25_bin     = "./libaribb25-rs/target/release/b25-rs"
 ffmpeg_bin  = "ffmpeg"
 ffprobe_bin = "ffprobe"
+# ARIB caption decoder: live HLS gets a WebVTT subtitle rendition when this
+# and ffprobe_bin are both set. Empty disables captions.
+arib_caption_bin = "./target/release/arib-caption"
 
 channels_file = "channels.json"
 
@@ -22,4 +25,32 @@ channels_file = "channels.json"
 
 # EPG refresh cron (UTC). Default: every 6 hours.
 epg_cron = "0 */6 * * *"
-epg_channels = ["TOKYO MX1", "NHKEFl1El5~", "asahi"]
+# One entry per *mux*, not per channel. A pass harvests the EIT of the whole
+# transport stream it tuned, so listing a second service on the same
+# frequency only re-collects the same guide (the refresher skips it).
+# Ten muxes × up to 60s of collection, at background priority — live viewing
+# and recordings preempt it.
+epg_channels = [
+  "J：COMテレビ",   # 473.14 MHz
+  "テレ玉1",        # 485.14
+  "tvk1",           # 503.14
+  "TOKYO MX1",      # 515.14
+  "FUJI",           # 521.14
+  "TBS1",           # 527.14
+  "asahi",          # 539.14
+  "NTV",            # 545.14
+  "NHKEテレ1東京",  # 551.14 (alias of the mojibake name NHKEFl1El5~)
+  "NHK_G",          # 557.14
+]
+
+# This box: Intel N100 iGPU. Measured 4.9x realtime at 68% of one core, where
+# software is 2.2x at 309% — the CPU headroom is what matters, since live HLS
+# has to keep encoding while this runs.
+[transcode]
+enable = true
+input_args  = ["-hwaccel", "vaapi",
+               "-hwaccel_device", "/dev/dri/renderD128",
+               "-hwaccel_output_format", "vaapi"]
+output_args = ["-vf", "deinterlace_vaapi,scale_vaapi=w=1920:h=1080",
+               "-c:v", "h264_vaapi", "-b:v", "6M",
+               "-c:a", "aac", "-b:a", "192k"]

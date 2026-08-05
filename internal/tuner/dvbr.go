@@ -1,7 +1,7 @@
-// Package tuner manages DVB adapters and the dvbr subprocesses that
+// Package tuner manages DVB adapters and the dvb-rs subprocesses that
 // drive them.
 //
-// dvbr.go wraps the dvbr CLI:
+// dvbr.go wraps the dvb-rs CLI:
 //   dvbr tune  -> stdout TS stream
 //   dvbr scan  -> json
 //   dvbr epg   -> json
@@ -22,16 +22,16 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/DuckFeather10086/isdbd/internal/proc"
+	"github.com/DuckFeather10086/ferrite/internal/proc"
 )
 
-// DvbrCLI is a thin invoker for the dvbr binary. One instance per
+// DvbrCLI is a thin invoker for the dvb-rs binary. One instance per
 // daemon (or per test); methods are safe to call concurrently as long
 // as different invocations target different adapters.
 type DvbrCLI struct {
 	// BinPath is the absolute path to the dvbr executable.
 	BinPath string
-	// B25Bin is the absolute path to the b25 descrambler. When set,
+	// B25Bin is the absolute path to the b25-rs descrambler. When set,
 	// Tune chains dvbr's output through b25 so consumers receive
 	// descrambled TS. Empty disables descrambling (raw TS — only useful
 	// for free-to-air or when no B-CAS card is present).
@@ -49,7 +49,7 @@ type TsStream interface {
 	io.ReadCloser
 }
 
-// Tune spawns `dvbr tune` against the given adapter and channel, and
+// Tune spawns `dvb-rs tune` against the given adapter and channel, and
 // returns its stdout TS stream. Close the stream to tear the tune down.
 //
 // channel may be a name or alias as defined in the channels file —
@@ -110,7 +110,7 @@ func (d *DvbrCLI) Tune(ctx context.Context, adapter int, channel string) (TsStre
 		if copyErr != nil &&
 			!errors.Is(copyErr, os.ErrClosed) &&
 			!errors.Is(copyErr, io.ErrClosedPipe) {
-			slog.Debug("tuner: dvbr→b25 copy ended", "adapter", adapter, "err", copyErr)
+			slog.Debug("tuner: dvb-rs→b25-rs copy ended", "adapter", adapter, "err", copyErr)
 		}
 	}()
 

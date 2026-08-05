@@ -1,0 +1,31 @@
+[Unit]
+# systemd *user* unit — install with `make install-service`, which
+# substitutes @DIR@ for the checkout path. The system-wide variant for a
+# real deployment is scripts/isdbd.service.
+#
+# A user unit is the right shape here: the tuner and the B-CAS reader are
+# reached through the invoking user's permissions (pcscd's polkit rule is
+# per-user), so running as root would need a second set of rules for no
+# gain. `loginctl enable-linger <user>` makes it start at boot rather than
+# at login.
+Description=ferrite ISDB-T TV daemon
+Documentation=file://@DIR@/README.md
+After=network-online.target
+
+[Service]
+Type=simple
+# Required: isdbd.toml addresses dvb-rs, b25-rs, channels.json and
+# storage_root relatively, so the daemon has to start from the checkout.
+WorkingDirectory=@DIR@
+ExecStart=@DIR@/isdbd -config configs/isdbd.toml
+Restart=on-failure
+RestartSec=5
+# Shutdown finalizes in-flight recordings before the store closes
+# (StopAllAndWait 5s, then the HTTP server 5s). Give it room, or a row
+# stays stuck in state 'recording'.
+TimeoutStopSec=20
+# pcscd is socket-activated system-wide; b25-rs connecting to the reader
+# starts it. Nothing to declare from a user unit.
+
+[Install]
+WantedBy=default.target

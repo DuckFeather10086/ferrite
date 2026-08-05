@@ -17,16 +17,19 @@ import (
 
 // Daemon mirrors configs/isdbd.example.toml.
 type Daemon struct {
-	HTTPPort     int      `toml:"http_port"`
-	StorageRoot  string   `toml:"storage_root"`
-	Adapters     []int    `toml:"adapters"`
-	DvbrBin      string   `toml:"dvbr_bin"`
-	B25Bin       string   `toml:"b25_bin"`
-	FFmpegBin    string   `toml:"ffmpeg_bin"`
-	FFprobeBin   string   `toml:"ffprobe_bin"`
-	ChannelsFile string   `toml:"channels_file"`
-	EPGCron      string   `toml:"epg_cron"`
-	EPGChannels  []string `toml:"epg_channels"`
+	HTTPPort    int    `toml:"http_port"`
+	StorageRoot string `toml:"storage_root"`
+	Adapters    []int  `toml:"adapters"`
+	DvbrBin     string `toml:"dvbr_bin"`
+	B25Bin      string `toml:"b25_bin"`
+	FFmpegBin   string `toml:"ffmpeg_bin"`
+	FFprobeBin  string `toml:"ffprobe_bin"`
+	// AribCaptionBin decodes the ARIB caption PID into a WebVTT rendition
+	// for live HLS. Empty disables captions.
+	AribCaptionBin string   `toml:"arib_caption_bin"`
+	ChannelsFile   string   `toml:"channels_file"`
+	EPGCron        string   `toml:"epg_cron"`
+	EPGChannels    []string `toml:"epg_channels"`
 
 	// Live HLS A/V sync. ISDB-T muxes interleave audio ahead of the
 	// first decodable video frame, so HLS comes up with a constant
@@ -36,21 +39,48 @@ type Daemon struct {
 	// when FFprobeBin is non-empty and ProbeSeconds > 0.
 	ProbeSeconds    float64 `toml:"probe_seconds"`     // ffprobe sampling window; default 5
 	AudioOffsetBias float64 `toml:"audio_offset_bias"` // seconds added to the measured offset
+
+	Transcode Transcode `toml:"transcode"`
+}
+
+// Transcode is the post-pass that runs after a recording finishes: the MP4 a
+// browser can play, and the subtitle sidecars beside it.
+type Transcode struct {
+	// Enable is off by default. It is real work on a box whose first job is
+	// to keep recording, so it is opted into rather than out of.
+	Enable bool `toml:"enable"`
+
+	// InputArgs go before ffmpeg's -i and OutputArgs after it: hardware
+	// decode setup, then the filter chain and the encoder. They are one
+	// setting rather than a codec name because the two go together — a
+	// VAAPI encode wants deinterlace_vaapi and scale_vaapi, a software one
+	// wants yadif and scale, and naming only the encoder gets you an
+	// ffmpeg that fails at runtime.
+	//
+	// Empty means postprocess.DefaultTranscodeArgs: software H.264.
+	InputArgs  []string `toml:"input_args"`
+	OutputArgs []string `toml:"output_args"`
+
+	// DeleteSource removes the .ts once the MP4 is written. Off by default:
+	// the .ts is what came off the air, everything else is derived from it,
+	// and it is the only one of them that cannot be made again.
+	DeleteSource bool `toml:"delete_source"`
 }
 
 // Defaults returns a daemon config with sensible defaults for fields
 // not present in the TOML.
 func Defaults() Daemon {
 	return Daemon{
-		HTTPPort:     8010,
-		StorageRoot:  "./var",
-		Adapters:     []int{0},
-		DvbrBin:      "dvbr",
-		B25Bin:       "b25",
-		FFmpegBin:    "ffmpeg",
-		FFprobeBin:   "ffprobe",
-		EPGCron:      "0 */6 * * *",
-		ProbeSeconds: 5,
+		HTTPPort:       8010,
+		StorageRoot:    "./var",
+		Adapters:       []int{0},
+		DvbrBin:        "dvb-rs",
+		B25Bin:         "b25-rs",
+		FFmpegBin:      "ffmpeg",
+		FFprobeBin:     "ffprobe",
+		AribCaptionBin: "arib-caption",
+		EPGCron:        "0 */6 * * *",
+		ProbeSeconds:   5,
 	}
 }
 

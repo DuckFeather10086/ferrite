@@ -27,9 +27,9 @@ func writeScript(t *testing.T, dir, name, body string) string {
 func TestTune_DescramblesThroughB25(t *testing.T) {
 	dir := t.TempDir()
 	// Fake dvbr: ignore all the tune args, emit a fixed payload, exit.
-	dvbr := writeScript(t, dir, "dvbr", `printf 'scrambled-ts'`)
+	dvbr := writeScript(t, dir, "dvb-rs", `printf 'scrambled-ts'`)
 	// Fake b25: ignore "-v 0 - -", uppercase stdin → stdout.
-	b25 := writeScript(t, dir, "b25", `exec tr 'a-z' 'A-Z'`)
+	b25 := writeScript(t, dir, "b25-rs", `exec tr 'a-z' 'A-Z'`)
 
 	cli := &DvbrCLI{BinPath: dvbr, B25Bin: b25, ChannelsFile: "channels.json"}
 	stream, err := cli.Tune(context.Background(), 0, "mx")
@@ -51,7 +51,7 @@ func TestTune_DescramblesThroughB25(t *testing.T) {
 // receives dvbr's stdout unmodified (free-to-air / no-card path).
 func TestTune_RawWhenNoB25(t *testing.T) {
 	dir := t.TempDir()
-	dvbr := writeScript(t, dir, "dvbr", `printf 'raw-ts-bytes'`)
+	dvbr := writeScript(t, dir, "dvb-rs", `printf 'raw-ts-bytes'`)
 
 	cli := &DvbrCLI{BinPath: dvbr, ChannelsFile: "channels.json"}
 	stream, err := cli.Tune(context.Background(), 0, "mx")
@@ -75,8 +75,8 @@ func TestTune_RawWhenNoB25(t *testing.T) {
 func TestTune_CloseTearsDownPipeline(t *testing.T) {
 	dir := t.TempDir()
 	// Fake dvbr: stream forever until killed.
-	dvbr := writeScript(t, dir, "dvbr", `while true; do printf 'x'; sleep 0.05; done`)
-	b25 := writeScript(t, dir, "b25", `exec cat`)
+	dvbr := writeScript(t, dir, "dvb-rs", `while true; do printf 'x'; sleep 0.05; done`)
+	b25 := writeScript(t, dir, "b25-rs", `exec cat`)
 
 	cli := &DvbrCLI{BinPath: dvbr, B25Bin: b25, ChannelsFile: "channels.json"}
 	stream, err := cli.Tune(context.Background(), 0, "mx")
