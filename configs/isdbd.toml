@@ -7,7 +7,10 @@ adapters = [0]
 
 # Sibling repos under ~/code/isdb-workspace/. Adjust if you cloned
 # elsewhere.
-dvbr_bin    = "./target/release/dvbr"
+# The binary is named after its crate, which dvb-rs renamed `dvbr` → `dvb-rs`
+# when the repo was renamed. The config *key* keeps its old name so an
+# existing isdbd.toml still parses.
+dvbr_bin    = "./target/release/dvb-rs"
 b25_bin     = "./libaribb25-rs/target/release/b25-rs"
 ffmpeg_bin  = "ffmpeg"
 ffprobe_bin = "ffprobe"

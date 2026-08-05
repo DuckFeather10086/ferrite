@@ -18,7 +18,7 @@ deps:
 # Build everything: Rust binaries, web UI, Go daemon.
 build: rust web go
 	@echo "=== build complete ==="
-	@ls -lh target/release/dvbr libaribb25-rs/target/release/b25-rs internal/web/dist/index.html isdbd 2>/dev/null | awk '{print $$NF, $$5}'
+	@ls -lh target/release/dvb-rs libaribb25-rs/target/release/b25-rs internal/web/dist/index.html isdbd 2>/dev/null | awk '{print $$NF, $$5}'
 
 # Run from the ferrite/ directory.
 run: build
@@ -29,8 +29,14 @@ run: build
 
 rust:
 	@echo "=== cargo build (release) ==="
-	cargo build --release -p dvbr -p b25-rs -p arib-caption
-	@test -x target/release/dvbr || (echo "ERROR: target/release/dvbr not found" && exit 1)
+	cargo build --release -p dvb-rs -p arib-caption
+	@# b25-rs is a workspace of its own — Cargo.toml *excludes* libaribb25-rs,
+	@# because it vendors the aribb25 C bindings and building it needs its own
+	@# feature resolution. So it cannot be named as a -p of the outer build,
+	@# which is what this target used to try; it has to be built from in there,
+	@# and that is also where its target/ (and the path the config names) is.
+	cd libaribb25-rs && cargo build --release -p b25-rs
+	@test -x target/release/dvb-rs || (echo "ERROR: target/release/dvb-rs not found" && exit 1)
 	@test -x libaribb25-rs/target/release/b25-rs || (echo "ERROR: b25-rs not found" && exit 1)
 	@test -x target/release/arib-caption || (echo "ERROR: arib-caption not found" && exit 1)
 
@@ -59,7 +65,7 @@ go:
 # web UI or reach for cargo. The Rust binaries the daemon spawns must
 # already be there, so check rather than build them.
 install-service: go
-	@test -x target/release/dvbr || (echo "ERROR: target/release/dvbr missing — run 'make rust'" && exit 1)
+	@test -x target/release/dvb-rs || (echo "ERROR: target/release/dvb-rs missing — run 'make rust'" && exit 1)
 	@test -x libaribb25-rs/target/release/b25-rs || (echo "ERROR: b25-rs missing — run 'make rust'" && exit 1)
 	@test -x target/release/arib-caption || (echo "ERROR: arib-caption missing — run 'make rust'" && exit 1)
 	@mkdir -p $(HOME)/.config/systemd/user $(HOME)/.local/bin

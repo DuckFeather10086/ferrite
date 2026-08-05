@@ -468,7 +468,7 @@ mid-recording finalizing as 'done'.
 the day-to-day handles; `restart` rebuilds the Go binaries first.
 
 Two things the unit must keep: `WorkingDirectory` at the checkout — the
-config addresses `./target/release/dvbr`, `channels.json` and `./var`
+config addresses `./target/release/dvb-rs`, `channels.json` and `./var`
 relatively — and `TimeoutStopSec` well above the shutdown path's own
 budget (`StopAllAndWait` 5s + HTTP 5s), or SIGTERM cuts off recording
 finalization and a row stays stuck in state 'recording'.
