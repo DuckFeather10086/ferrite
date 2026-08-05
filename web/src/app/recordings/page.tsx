@@ -1,12 +1,15 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { RecordingPlayer } from "@/components/RecordingPlayer";
 import { StateBadge } from "@/components/StateBadge";
 import {
   deleteRecording,
   fmtBytes,
   fmtDate,
   fmtTime,
+  isPlayable,
+  postprocessRecording,
   recordingFileUrl,
   stopRecording,
   useChannelIndex,
@@ -21,6 +24,18 @@ export default function RecordingsPage() {
   // Which row has an action in flight, so its buttons stop responding
   // instead of firing a second DELETE.
   const [busyId, setBusyId] = useState<number | null>(null);
+  // The row being watched, by id rather than by value: the list re-fetches
+  // under the player (every 5s while anything is converting) and holding
+  // the object would pin a stale copy of the row.
+  const [watchingId, setWatchingId] = useState<number | null>(null);
+  const playerRef = useRef<HTMLDivElement>(null);
+
+  const watching = recordings?.find((r) => r.id === watchingId) ?? null;
+  // A recording deleted from another tab — or one whose files went with a
+  // DELETE here — leaves the player pointing at nothing.
+  useEffect(() => {
+    if (watchingId !== null && recordings && !watching) setWatchingId(null);
+  }, [watchingId, recordings, watching]);
 
   const act = async (id: number, fn: () => Promise<unknown>) => {
     setBusyId(id);
@@ -40,8 +55,33 @@ export default function RecordingsPage() {
     void act(r.id, () => deleteRecording(r.id));
   };
 
+  const watch = (r: Recording) => {
+    setWatchingId(r.id);
+    // The list is long enough that the row you clicked can be well below
+    // the player it just loaded.
+    requestAnimationFrame(() =>
+      playerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }),
+    );
+  };
+
   return (
     <div className="flex flex-col gap-3">
+      {/* Always mounted so `watch` has a ref to scroll to, but `empty:hidden`
+          keeps it out of the flex flow — otherwise an idle page carries the
+          column gap of a player that isn't there. */}
+      <div ref={playerRef} className="empty:hidden">
+        {watching && (
+          <RecordingPlayer
+            // Remount on a change of recording rather than swapping the src
+            // under a live ASS.js instance and a loaded <track>.
+            key={watching.id}
+            rec={watching}
+            channelLabel={index.label(watching.channel)}
+            onClose={() => setWatchingId(null)}
+          />
+        )}
+      </div>
+
       <div className="flex flex-wrap items-center gap-2">
         <button onClick={() => mutate()} className="btn">
           Refresh
@@ -69,7 +109,9 @@ export default function RecordingsPage() {
           </thead>
           <tbody>
             {recordings?.map((r) => (
-              <tr key={r.id}>
+              // The row the player is on, marked as the table's own hover
+              // state does it — the player is above and can be off screen.
+              <tr key={r.id} className={watchingId === r.id ? "bg-panel" : undefined}>
                 <td className="whitespace-nowrap text-xs text-dim tnum">{fmtDate(r.start)}</td>
                 {/* The row stores the canonical channel name; show the label. */}
                 <td className="whitespace-nowrap">{index.label(r.channel)}</td>
@@ -79,6 +121,14 @@ export default function RecordingsPage() {
                 <td>
                   {r.title || <span className="text-faint">—</span>}
                   {r.error && <p className="mt-0.5 text-xs text-rec">{r.error}</p>}
+                  {/* A recording that is fine but whose transcode is not: the
+                      row is 'done' and only the Convert button knows why it
+                      is still there, which is not where a person looks. */}
+                  {r.post_state === "failed" && (
+                    <p className="mt-0.5 text-xs text-warn">
+                      Conversion failed{r.post_error ? `: ${r.post_error}` : ""}
+                    </p>
+                  )}
                 </td>
                 <td className="whitespace-nowrap text-right font-mono text-xs tnum">
                   {fmtBytes(r.size_bytes)}
@@ -103,13 +153,45 @@ export default function RecordingsPage() {
                       </button>
                     ) : (
                       <>
-                        {/* Raw MPEG-2 TS with ARIB audio: no browser plays it
-                            inline, so this is a download, and the same URL
-                            opens in mpv or VLC (the endpoint honours Range). */}
                         {(r.size_bytes ?? 0) > 0 ? (
-                          <a href={recordingFileUrl(r.id)} download className="btn">
-                            Download
-                          </a>
+                          <>
+                            {/* What plays here is the post-pass's MP4, never
+                                the .ts — that is MPEG-2 video with ARIB audio
+                                and no browser will open it. So a row is
+                                watchable only once post_state says 'done',
+                                and until then the honest thing to show is
+                                what it is waiting for. */}
+                            {isPlayable(r) ? (
+                              <button
+                                onClick={() => watch(r)}
+                                className={`btn ${watchingId === r.id ? "btn-primary" : ""}`}
+                              >
+                                ▶ Watch
+                              </button>
+                            ) : r.post_state === "pending" || r.post_state === "running" ? (
+                              <span className="px-1 font-mono text-[11px] text-dim">
+                                converting…
+                              </span>
+                            ) : r.state === "done" ? (
+                              // 'skipped' — recorded before the post-pass
+                              // existed — or 'failed'. This is the only route
+                              // from such a row to a picture in a browser.
+                              <button
+                                onClick={() => void act(r.id, () => postprocessRecording(r.id))}
+                                disabled={busyId === r.id}
+                                className="btn"
+                                title="Transcode to MP4 and write the subtitle sidecars"
+                              >
+                                Convert
+                              </button>
+                            ) : null}
+                            {/* The recording as it came off the air. Not
+                                playable here, but it is what mpv, VLC and an
+                                archive want (the endpoint honours Range). */}
+                            <a href={recordingFileUrl(r.id)} download className="btn">
+                              Download
+                            </a>
+                          </>
                         ) : (
                           <span className="px-1 text-faint">—</span>
                         )}

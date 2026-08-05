@@ -123,10 +123,22 @@ func NewRouter(d Deps) http.Handler {
 		r.Delete("/schedule/{id}", d.handleCancelSchedule)
 
 		r.Get("/recordings", d.handleListRecordings)
-		r.Get("/recordings/{id}/file", d.handleRecordingFile)
-		r.Get("/recordings/{id}/mp4", d.derivedFile(".mp4", "video/mp4"))
-		r.Get("/recordings/{id}/subs.ass", d.derivedFile(".ass", "text/x-ssa; charset=utf-8"))
-		r.Get("/recordings/{id}/subs.vtt", d.derivedFile(".vtt", "text/vtt; charset=utf-8"))
+		// Each of the four files answers HEAD as well as GET. chi matches on
+		// method, so a route registered with Get alone answers 405 to a HEAD —
+		// and asking "is this there, and how big?" without pulling the body is
+		// exactly what a client does before it commits: the web UI, to know
+		// whether a recording has captions before offering to show them, and a
+		// player probing what it is about to range-request. http.ServeContent
+		// already writes the headers and skips the body for HEAD, so the
+		// handlers need nothing.
+		getHead := func(pattern string, h http.HandlerFunc) {
+			r.Get(pattern, h)
+			r.Head(pattern, h)
+		}
+		getHead("/recordings/{id}/file", d.handleRecordingFile)
+		getHead("/recordings/{id}/mp4", d.derivedFile(".mp4", "video/mp4"))
+		getHead("/recordings/{id}/subs.ass", d.derivedFile(".ass", "text/x-ssa; charset=utf-8"))
+		getHead("/recordings/{id}/subs.vtt", d.derivedFile(".vtt", "text/vtt; charset=utf-8"))
 		r.Post("/recordings/{id}/postprocess", d.handlePostprocessRecording)
 		r.Delete("/recordings/{id}", d.handleDeleteRecording)
 		r.Post("/record", d.handleRecordNow)

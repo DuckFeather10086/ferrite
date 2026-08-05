@@ -6,6 +6,7 @@
     "build": "next build && rm -rf ../internal/web/dist && cp -r out ../internal/web/dist"
   },
   "dependencies": {
+    "assjs": "^0.1.9",
     "hls.js": "^1.6.16",
     "next": "^16.2.9",
     "react": "^19.2.7",

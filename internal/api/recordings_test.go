@@ -360,6 +360,40 @@ func TestDerivedFilesAreServedFromBesideTheRecording(t *testing.T) {
 	}
 }
 
+// Every file endpoint answers HEAD, because "is it there, and how big?" is a
+// question worth asking without pulling the body — the web UI asks it to know
+// whether a recording has captions before offering to show them, and a player
+// asks it before range-requesting. chi matches on method, so a route
+// registered with Get alone answers 405 and the caller reads that as "no".
+func TestFileEndpointsAnswerHEAD(t *testing.T) {
+	f := newFileRouter(t)
+	id := f.addRecording(t, "x.ts", "transport stream", store.RecordingStateDone)
+	base := filepath.Join(f.root, "recordings", "2026-07-30", "x")
+	if err := os.WriteFile(base+".vtt", []byte("WEBVTT\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		path string
+		want int
+	}{
+		{"/file", http.StatusOK},
+		{"/subs.vtt", http.StatusOK},
+		// No .ass beside it: still an answer, and not a 405.
+		{"/subs.ass", http.StatusNotFound},
+	} {
+		rr := httptest.NewRecorder()
+		url := "/api/recordings/" + strconv.FormatInt(id, 10) + tc.path
+		f.h.ServeHTTP(rr, httptest.NewRequest(http.MethodHead, url, nil))
+		if rr.Code != tc.want {
+			t.Errorf("HEAD %s = %d, want %d", tc.path, rr.Code, tc.want)
+		}
+		if tc.want == http.StatusOK && rr.Body.Len() != 0 {
+			t.Errorf("HEAD %s returned a %d-byte body", tc.path, rr.Body.Len())
+		}
+	}
+}
+
 // A 404 here is an answer about the recording, not about the URL, so it has
 // to say which: a transcode that has not run yet reads very differently from
 // one that failed, and identically over the wire without this.

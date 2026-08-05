@@ -161,7 +161,8 @@ Implemented and tested (race-clean):
 - `web/` — Bun + Next.js 16 (App Router, TypeScript, Tailwind CSS).
   Four pages: Live (hls.js player + record now / stop), Guide (EPG, one
   click books a programme), Schedules (create/cancel), Recordings
-  (stop a running one, download, delete). Static `output: 'export'`; all
+  (watch, stop a running one, convert, download, delete). Static
+  `output: 'export'`; all
   data fetching is client-side via SWR against the `/api/*` endpoints.
   Colour lives in one place — the `@theme` block in `app/globals.css`,
   from which Tailwind derives the utilities (`text-dim`, `border-line`),
@@ -174,14 +175,6 @@ Implemented and tested (race-clean):
   `予約` with no principle deciding which.
 
 **Not implemented:**
-- Watching a recording in the web UI. The pieces are there — `internal/postprocess`
-  writes the `.mp4` and the sidecars, and `/api/recordings/{id}/{mp4,subs.ass,subs.vtt}`
-  serve them — but no page plays them yet. ASS.js renders what our `.ass`
-  emits, drawings and all (verified in a headless browser against real
-  recordings: positions, background boxes, ruby, DRCS glyphs); it needs no
-  font shipped, since it sets CSS `font-family` and falls back to the system
-  CJK font. One wrinkle to handle: it renders off `requestVideoFrameCallback`,
-  so seeking while *paused* clears the captions until playback resumes.
 - `--sub-file` from the TUI: mpv does not auto-detect a sidecar over HTTP, so
   playing a recording there needs the `.ass` URL passed explicitly.
 - The DRCS→Unicode replacement table (keyed by the glyph's MD5). Only the text
@@ -194,6 +187,20 @@ Implemented and tested (race-clean):
   human pass over `channels.json` would tidy it.
 - Watch-one-channel-while-recording-another needs a second tuner; with
   one adapter the recording wins and live drops.
+
+**Verified in a browser (2026-08-05, the recordings player):** headless
+Chromium against two real NHK recordings on this box. The MP4 plays
+(`readyState` 4, 1920x1080); in ARIB mode ASS.js puts the captions where the
+broadcast put them, background boxes and all, including the ruby over 逢引 and
+the DRCS glyph the `.vtt` can only spell `〓`; the Text mode mounts one
+`captions/日本語` track the browser draws at the bottom; Off mounts neither.
+Our fullscreen button takes the box (1280x800 of a 1280x800 viewport) with the
+ASS overlay scaled to it; the player's own button takes the video alone and the
+`.vtt` stands in for the duration, ARIB returning on exit. Convert on a
+`skipped` row walked `converting… → ▶ Watch` in ~7s. The
+`requestVideoFrameCallback` wrinkle noted earlier **does not bite** with
+assjs 0.1.9 — its `seeking` handler re-frames at the new position, so seeking
+while paused keeps the caption (checked at three positions).
 
 **Hardware-verified (2026-08-05, the recording post-pass):** a 7m04s NHK 総合
 recording (888 MB) → 288 MB MP4 (H.264 1920x1080 SAR 1:1 + AAC), 1m50s wall on
@@ -398,6 +405,38 @@ mid-recording finalizing as 'done'.
   the `.ts` already gets, and nothing can name a file the recording could not.
   It also means DELETE has to take them with it (`derivedExts`) — the `.mp4`
   is the biggest file of the set and orphaning it is expensive.
+- **What the browser plays is the post-pass's MP4, and its captions are a DOM
+  overlay.** The `.ts` is MPEG-2 video with ARIB audio and no browser will open
+  it, so a recording is watchable only once `post_state` is `done` — which is
+  why the Recordings page shows *Convert* (POST `…/postprocess`) on the rest
+  rather than a play button that fails. The captions then come in two forms and
+  exactly one is mounted at a time: ASS.js drawing the `.ass`, which keeps
+  ARIB's own placement, or a `<track>` of the `.vtt`, which the browser draws
+  itself. Both at once is the same words rendered twice.
+- **Fullscreen decides which caption form can be drawn, so the player switches
+  forms rather than losing them.** ASS.js is a DOM overlay *beside* the video,
+  so it is visible only while the fullscreen element contains both: our own
+  fullscreen button takes that container, and it is the only way to watch with
+  ARIB placement. The player's *native* fullscreen button takes the video alone
+  and cannot be talked out of it — `controlsList="nofullscreen"` does not remove
+  it (Chrome draws it either way, checked against the accessibility tree), and
+  re-targeting fullscreen to the container from `fullscreenchange` is a
+  permissions error, because the UA's own request has already consumed the
+  click's transient activation. What does work is the platform's own mechanism:
+  a native TextTrack is drawn *inside* the fullscreen video. So `effective`
+  falls back from `ass` to `vtt` for exactly as long as the bare video is
+  fullscreen, and reverses on the way out; the toolbar keeps showing the
+  viewer's choice, which this does not change.
+- **`import ASS from 'assjs'` must stay dynamic, inside an effect.** The module
+  calls `document.createElement` at load time, and the static export prerenders
+  every page at build time, where there is no document.
+- **The file endpoints answer HEAD, not just GET.** "Is this there?" is a
+  question a client asks before committing — the Recordings page asks it to
+  know whether a recording has captions before offering to show them, and a
+  player asks it before range-requesting. chi matches on method, so a route
+  registered with `r.Get` alone answers **405** to a HEAD, and a client reads
+  that as "no". `http.ServeContent` already does the right thing for HEAD, so
+  the handlers need nothing; only the registration does.
 - **The transcode's ffmpeg arguments are configuration, not a codec name.**
   `transcode.input_args` / `output_args` are whole argument lists because the
   filter chain and the encoder go together: VAAPI wants `deinterlace_vaapi` +

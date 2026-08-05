@@ -46,7 +46,21 @@ export type Recording = {
   size_bytes: number | null;
   state: string;
   error?: string;
+  // How far the post-pass has got: the .mp4 a browser can open and the
+  // subtitle sidecars beside it. Absent while the recording is still
+  // running — nothing can be derived from a file still being written.
+  // 'skipped' is what the migration wrote over the recordings that
+  // predate the feature, so it means "never asked for", not "failed".
+  post_state?: "pending" | "running" | "done" | "failed" | "skipped";
+  post_error?: string;
 };
+
+// A recording is playable in a browser only once the post-pass has made
+// the .mp4 — the .ts is MPEG-2 video with ARIB-flavoured audio and no
+// browser will touch it.
+export function isPlayable(r: Recording) {
+  return r.state === "done" && r.post_state === "done";
+}
 
 export type AdapterStatus = {
   adapter: number;
@@ -193,8 +207,21 @@ export function useSchedules() {
 export function useRecordings() {
   // A running recording's size only lands in the row when it finalizes,
   // but its state does change under us — poll while the page is open.
+  //
+  // Faster while anything is in flight: a recording that stops and a
+  // transcode that finishes both turn into a button on this page (Convert,
+  // then Watch), and half a minute of staring at "converting…" after it is
+  // already done reads as a stuck queue.
   return useSWR<Recording[]>("/api/recordings", fetcher, {
-    refreshInterval: 30_000,
+    refreshInterval: (rows) =>
+      rows?.some(
+        (r) =>
+          r.state === "recording" ||
+          r.post_state === "pending" ||
+          r.post_state === "running",
+      )
+        ? 5_000
+        : 30_000,
     revalidateOnFocus: false,
   });
 }
@@ -336,6 +363,33 @@ export async function stopRecording(id: number) {
 // download link and as a URL to hand to mpv/VLC.
 export function recordingFileUrl(id: number) {
   return BASE + "/api/recordings/" + id + "/file";
+}
+
+// What the post-pass made beside the recording: the MP4 a browser can play
+// and the two subtitle forms. All three are named after the .ts rather than
+// stored, so they exist only once post_state is 'done' — and a recording
+// that carried no captions has the MP4 and neither sidecar.
+export function recordingMp4Url(id: number) {
+  return BASE + "/api/recordings/" + id + "/mp4";
+}
+
+// "ass" keeps ARIB's own placement (the caption where the broadcast put it,
+// over the shot it belongs to); "vtt" is the same words as plain lines.
+export function recordingSubsUrl(id: number, kind: "ass" | "vtt") {
+  return BASE + "/api/recordings/" + id + "/subs." + kind;
+}
+
+// Ask for a recording to be (re)processed. The queue is a column in the
+// row, so this returns as soon as it is written — post_state is what says
+// whether it ran. This is the only way to get an MP4 for a recording made
+// before the post-pass existed (the migration marked those 'skipped') and
+// the way to retry a failed one.
+export async function postprocessRecording(id: number) {
+  const out = await post<{ id: number; post_state: string; queued: boolean }>(
+    "/api/recordings/" + id + "/postprocess",
+  );
+  await mutate("/api/recordings");
+  return out!;
 }
 
 export async function deleteRecording(id: number) {
