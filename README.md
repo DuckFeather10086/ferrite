@@ -1,7 +1,7 @@
 # ferrite
 
-> Self-hosted **ISDB-T** TV stack — tune, descramble, record, and stream
-> live to your LAN. Go orchestrator driving three Rust engines.
+> Self-hosted **ISDB-T** TV stack — tune, descramble, record, caption, and
+> stream live to your LAN. Go orchestrator driving four Rust engines.
 
 ## The stack
 
@@ -16,12 +16,15 @@ graph TB
         DVBR["dvb-rs<br/>tune · scan · EPG"]
         B24["libaribb24<br/>B24 text decode"]
         B25["b25-rs<br/>B25 descramble"]
+        CAP["arib-caption<br/>B24 caption decode"]
     end
 
     subgraph "ferrite (Go)"
         FANOUT["fanout<br/>1→N broadcast"]
         HLS["ffmpeg → HLS<br/>.m3u8 / .ts"]
-        REC["recorder → .mp4"]
+        SUBS["caption<br/>WebVTT rendition"]
+        REC["recorder → .ts"]
+        POST["postprocess<br/>MP4 + .ass / .vtt"]
         EPG["EPG store<br/>(SQLite)"]
         SCHED["scheduler<br/>(cron)"]
         WEB["Web UI<br/>Live · Guide · Recordings"]
@@ -35,23 +38,32 @@ graph TB
     B25 -->|"plain TS"| FANOUT
     FANOUT --> HLS
     FANOUT --> REC
+    FANOUT -->|"caption PID"| CAP
+    CAP -.->|"cues"| SUBS
+    REC -->|"when the tuner lets go"| POST
+    CAP -.->|"sidecars"| POST
     DVBR -->|"epg scan"| EPG
     EPG --> SCHED
     SCHED -->|"dispatch job"| REC
     HLS --> WEB
-    REC --> WEB
+    SUBS --> WEB
+    POST --> WEB
     EPG --> WEB
 ```
 
 The hot path per active channel is a two-process pipe —
 `dvb-rs tune … | b25-rs -v 0 - -` — broadcast 1→N by `fanout` (slow
 consumers are dropped, never block live playback). `dvb-rs epg` feeds the
-EPG store on a timer.
+EPG store on a timer. A second consumer of the same tune feeds
+`arib-caption`, because ffmpeg cannot decode ARIB captions: its
+`arib_caption` codec has no decoder unless it was built against
+libaribb24 or libaribcaption, and a distribution build is not.
 
 ## Layout
 
 ```
 cmd/isdbd/           entrypoint
+cmd/ferrite-tui/     terminal remote (a REST client, no TV state of its own)
 internal/
   config/            channels.json + daemon TOML
   proc/              subprocess helpers (pgrp, stderr-to-slog)
@@ -62,13 +74,18 @@ internal/
   recorder/          recording job lifecycle
   scheduler/         cron-driven recording trigger
   hls/               ffmpeg subprocess + m3u8 serving
+  caption/           live captions → a WebVTT rendition beside the segments
+  postprocess/       after the tuner lets go: MP4 + .ass / .vtt sidecars
   netaddr/           which addresses a viewer can reach this box at
   api/               chi router + handlers
-  web/               embedded static SPA
+  web/               embedded static SPA (//go:embed of the export)
+web/                 the SPA's source (Bun + Next.js), incl. the caption font
+agent/               MCP server + tool-calling loop over the same REST API
 configs/             example daemon config
 scripts/             systemd units (ferrite.service = --user, isdbd.service = system)
 libaribb24-rs/       ARIB B24 text decoder (Rust, submodule)
 libaribb25-rs/       ARIB B25 descrambler (Rust, submodule)
+libaribcaption-rs/   ARIB B24 caption decoder + WebVTT/ASS renderers (submodule)
 dvb-rs/              DVB tuner frontend (Rust, submodule)
 ```
 
@@ -77,8 +94,9 @@ dvb-rs/              DVB tuner frontend (Rust, submodule)
 ```bash
 git clone --recursive https://github.com/DuckFeather10086/ferrite.git
 cd ferrite
-./bootstrap.sh build
-go run ./cmd/isdbd -config configs/isdbd.toml
+make deps                 # submodules + bun install + go mod tidy
+make build                # Rust engines, then the web UI, then the daemon
+make run                  # ./isdbd --config configs/isdbd.toml
 ```
 
 Open the web UI in a browser (Live / Guide / Schedules / Recordings).
@@ -113,33 +131,49 @@ ferrite-tui               # terminal remote (defaults to localhost:8010)
 
 ## Build
 
-The two Rust build roots and the Go module build independently:
+`make build` runs all of it in order — `make rust`, `make web`, `make go` —
+and each part stands alone:
 
 ```bash
-# Rust: libaribb24 + dvb-rs share the root virtual workspace
+# Rust: libaribb24, libaribcaption and dvb-rs share the root virtual workspace
 cargo build --release
 #   → target/release/dvb-rs
+#   → target/release/arib-caption
 
-# Rust: b25-rs has its own inner workspace (excluded from the root one)
+# Rust: b25-rs has its own inner workspace (excluded from the root one,
+# because it vendors the aribb25 C bindings and needs its own resolution)
 cargo build --release --manifest-path libaribb25-rs/Cargo.toml
 #   → libaribb25-rs/target/release/b25-rs
 
+# Web UI: Bun + Next.js static export, copied into internal/web/dist
+cd web && bun run build
+
 # Go orchestrator (CGO-free, web UI embedded)
-go build ./...
+go build -o isdbd ./cmd/isdbd
 ```
 
-`bootstrap.sh` wraps these and verifies the submodules are checked out.
+The daemon spawns those Rust binaries by the paths in `configs/isdbd.toml`,
+which are relative to the checkout — so run it from here, or edit them.
 
-## Releases
+## Captions
 
-Pre-built tarballs for **linux/amd64** and **linux/arm64** at
-[GitHub Releases](https://github.com/DuckFeather10086/ferrite/releases).
+ARIB STD-B24 captions, decoded by us because ffmpeg cannot, and offered in
+whichever form the thing drawing them can honour:
 
-```bash
-curl -L "https://github.com/DuckFeather10086/ferrite/releases/download/v1.0.0/ferrite-v1.0.0-linux-amd64.tar.gz" | tar xz
-cd ferrite-v1.0.0-linux-amd64
-sudo cp ferrite dvb-rs b25-rs /usr/local/bin/
-```
+- **Live** — a WebVTT rendition is published beside the video segments, so it
+  is in the manifest that `/stream.m3u8` serves: VLC, mpv and iOS Safari pick
+  it up on their own. In the web UI the Live page has `CAPTIONS On|Off` under
+  the picture, because a browser's own captions control is buried two menus
+  deep (Chromium's control bar has no captions button at all).
+- **Recordings** — the post-pass writes two sidecars next to the MP4. The
+  `.ass` keeps ARIB's own placement, colours and cell metrics, including DRCS
+  glyphs drawn as outlines; the `.vtt` is the same words as plain lines, which
+  is all a browser's native `<track>` can draw. The Recordings player offers
+  `ARIB | Text | Off` and falls back from ARIB to Text for as long as the
+  video alone is fullscreen, where a DOM overlay cannot be seen.
+
+Both forms place a caption just above where a player draws its progress bar,
+rather than the lower third a player's own default reserves for its controls.
 
 ## Bundled font
 
@@ -150,6 +184,17 @@ are only right for the font it names: an ASS size is a line box rather than
 an em, so the wrong font draws the words at the wrong size for the boxes the
 same file draws. The only webfont here — everything else uses the system
 stack. Replacing it means renaming the file: `/fonts/` is served immutable.
+
+## Releases
+
+Pre-built tarballs for **linux/amd64** and **linux/arm64** at
+[GitHub Releases](https://github.com/DuckFeather10086/ferrite/releases).
+
+```bash
+curl -L "https://github.com/DuckFeather10086/ferrite/releases/download/v0.1.0/ferrite-v0.1.0-linux-amd64.tar.gz" | tar xz
+cd ferrite-v0.1.0-linux-amd64
+sudo cp ferrite dvb-rs b25-rs arib-caption /usr/local/bin/
+```
 
 ## Runtime requirements
 
