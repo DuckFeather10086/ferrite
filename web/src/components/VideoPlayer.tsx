@@ -13,6 +13,12 @@ export type VideoPlayerProps = {
   fatal?: string | null;
   onPrev?: () => void;
   onNext?: () => void;
+  // The live quality tiers the daemon offers, the one in use, and how to
+  // ask for another. Fewer than two means there is no choice to offer and
+  // the control is not drawn.
+  qualities?: { name: string; label: string }[];
+  quality?: string | null;
+  onQuality?: (name: string) => void;
 };
 
 // Start playback muted (always allowed), then unmute — but only when
@@ -60,7 +66,16 @@ function captionTracks(video: HTMLVideoElement) {
 // byte and keep retrying errors while the tuner warms up.
 const HLS_CONFIG = {
   enableWorker: true,
+  // Nothing today: lowLatencyMode only does anything for a playlist carrying
+  // EXT-X-PART, and ffmpeg is not producing partial segments. Kept for the
+  // day LL-HLS is worth its compatibility cost; what actually shortens the
+  // live edge is the line below.
   lowLatencyMode: true,
+  // How far back from the live edge to start playing, in segments. hls.js
+  // defaults to 3, which at the daemon's 1s segments is 3s of buffer the
+  // viewer is watching from behind — and was 6s at the 2s segments this
+  // pairs with. Two is the least that still absorbs one late segment.
+  liveSyncDurationCount: 2,
   manifestLoadPolicy: {
     default: {
       maxTimeToFirstByteMs: 60000,
@@ -99,7 +114,15 @@ const HLS_CONFIG = {
 // which is where live captions went to die. The manifest still says DEFAULT=NO,
 // so they start off as they do on a television, and a choice made in the
 // browser's menu is picked up here rather than fought with.
-export function VideoPlayer({ src, fatal, onPrev, onNext }: VideoPlayerProps) {
+export function VideoPlayer({
+  src,
+  fatal,
+  onPrev,
+  onNext,
+  qualities,
+  quality,
+  onQuality,
+}: VideoPlayerProps) {
   const boxRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
@@ -356,7 +379,8 @@ export function VideoPlayer({ src, fatal, onPrev, onNext }: VideoPlayerProps) {
           whether or not the native controls are, and this is the row the
           Recordings player puts the same choice in. `z-10` because the page
           lays its "▶ Watch" overlay across the whole player while idle. */}
-      <div className="relative z-10 flex items-center gap-1.5">
+      <div className="relative z-10 flex flex-wrap items-center gap-x-4 gap-y-1.5">
+        <div className="flex items-center gap-1.5">
         <span className="eyebrow">captions</span>
         <div className="flex overflow-hidden rounded-md border border-line">
           {[
@@ -380,6 +404,33 @@ export function VideoPlayer({ src, fatal, onPrev, onNext }: VideoPlayerProps) {
             </button>
           ))}
         </div>
+        </div>
+
+        {/* Quality, when there is more than one to pick from. Choosing one
+            starts an encode on the server and reloads the player at it —
+            this is not an ABR switch inside the manifest, and it is not
+            free, which is why it is a deliberate click and not something
+            the player does on its own. */}
+        {qualities && qualities.length > 1 && (
+          <div className="flex items-center gap-1.5">
+            <span className="eyebrow">quality</span>
+            <div className="flex overflow-hidden rounded-md border border-line">
+              {qualities.map((q) => (
+                <button
+                  key={q.name}
+                  onClick={() => onQuality?.(q.name)}
+                  disabled={!src}
+                  title={`Re-encode this channel at ${q.label}`}
+                  className={`cursor-pointer px-2 py-1 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-30 ${
+                    quality === q.name ? "bg-fg text-canvas" : "bg-panel text-dim hover:bg-raised"
+                  }`}
+                >
+                  {q.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

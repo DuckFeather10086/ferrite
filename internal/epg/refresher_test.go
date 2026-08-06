@@ -137,7 +137,7 @@ func TestRefresher_ChannelWithoutFrequencyStillRuns(t *testing.T) {
 // A normal pass reserves the adapter, runs dvbr, ingests, and gives the
 // adapter back — so a live claim right after does not have to preempt.
 func TestRefresher_ReservesAndReleases(t *testing.T) {
-	pool := tuner.NewPool(holdTuner{}, testChannels(), []int{0}, 4)
+	pool := tuner.NewPool(holdTuner{}, testChannels(), config.ISDBTAdapters(0), 4)
 	r, st := newRefresher(t, oneEventJSON, pool)
 
 	n, err := r.RefreshOnce(context.Background())
@@ -181,7 +181,7 @@ func TestRefresher_YieldsWhenChildLeaksPipe(t *testing.T) {
 
 func testYieldsToLiveClaim(t *testing.T, script string) {
 	t.Helper()
-	pool := tuner.NewPool(holdTuner{}, testChannels(), []int{0}, 4)
+	pool := tuner.NewPool(holdTuner{}, testChannels(), config.ISDBTAdapters(0), 4)
 	r, _ := newRefresher(t, script, pool)
 
 	done := make(chan error, 1)
@@ -226,7 +226,7 @@ func testYieldsToLiveClaim(t *testing.T, script string) {
 // reports it as a yield rather than a hard failure — nothing is broken,
 // EPG just doesn't get a turn.
 func TestRefresher_BusyTunerReportsPreempted(t *testing.T) {
-	pool := tuner.NewPool(holdTuner{}, testChannels(), []int{0}, 4)
+	pool := tuner.NewPool(holdTuner{}, testChannels(), config.ISDBTAdapters(0), 4)
 	lease, err := pool.AcquireAt(context.Background(), "mx", tuner.PrioRecord)
 	if err != nil {
 		t.Fatalf("AcquireAt: %v", err)
@@ -242,7 +242,7 @@ func TestRefresher_BusyTunerReportsPreempted(t *testing.T) {
 // A failing dvbr is a per-channel warning, not a yield: the pass
 // continues and the adapter is still returned.
 func TestRefresher_ChildFailureReleasesAdapter(t *testing.T) {
-	pool := tuner.NewPool(holdTuner{}, testChannels(), []int{0}, 4)
+	pool := tuner.NewPool(holdTuner{}, testChannels(), config.ISDBTAdapters(0), 4)
 	r, _ := newRefresher(t, "echo boom >&2; exit 3", pool)
 	r.ChannelNames = []string{"mx", "nhk"}
 

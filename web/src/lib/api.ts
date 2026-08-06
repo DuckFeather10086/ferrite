@@ -64,6 +64,10 @@ export function isPlayable(r: Recording) {
 
 export type AdapterStatus = {
   adapter: number;
+  // The delivery systems this frontend can tune ("ISDBT", "ISDBS").
+  // Reported because "no adapter supports this delivery system" is
+  // otherwise a claim with nothing on screen to check it against.
+  systems?: string[];
   channel?: string;
   refs: number;
   // The claim's priority — "record" | "live" | "background". Absent when
@@ -86,6 +90,10 @@ export type Address = {
 };
 
 export type StatusResp = {
+  // The live quality tiers this daemon offers, first one the default.
+  // Absent on a daemon that predates them, which the player reads as
+  // "one tier, do not offer a choice".
+  live_qualities?: LiveQuality[];
   version: string;
   started: string;
   uptime: string;
@@ -304,6 +312,76 @@ async function post<T>(path: string, body?: unknown): Promise<T | null> {
   return r.json() as Promise<T>;
 }
 
+// ── channel scan ─────────────────────────────────────────────────
+
+export type ScanProgress = {
+  physical: number;
+  frequency_hz: number;
+  done: number;
+  total: number;
+  locked: boolean;
+  services: number;
+  error?: string;
+  finished?: boolean;
+};
+
+export type ScanStatus = { available: boolean; running: boolean };
+
+export function useScanStatus() {
+  return useSWR<ScanStatus>("/api/scan", fetcher, { revalidateOnFocus: false });
+}
+
+// Sweep the band, calling onProgress for each transport.
+//
+// POST + a streamed body rather than EventSource, which can only GET —
+// and this is not a GET: it drives the tuner for ten minutes. The events
+// are ordinary SSE frames read off the response, which is all EventSource
+// would have given us anyway.
+//
+// Closing the connection does not stop the scan. The daemon detaches it
+// from the request on purpose: a sweep abandoned half-way leaves
+// channels.json describing part of the band with nothing to say so.
+export async function scanChannels(
+  onProgress: (p: ScanProgress) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const r = await fetch(BASE + "/api/scan", { method: "POST", signal });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    throw new Error(e.error ?? r.statusText);
+  }
+  if (!r.body) throw new Error("no response body");
+
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    // Frames are separated by a blank line; a partial one stays in the
+    // buffer until the rest of it arrives.
+    let cut: number;
+    while ((cut = buf.indexOf("\n\n")) !== -1) {
+      const frame = buf.slice(0, cut);
+      buf = buf.slice(cut + 2);
+      for (const line of frame.split("\n")) {
+        // ": keepalive" comments keep proxies from dropping an idle
+        // connection between transports; they carry nothing.
+        if (!line.startsWith("data:")) continue;
+        try {
+          onProgress(JSON.parse(line.slice(5).trim()) as ScanProgress);
+        } catch {
+          /* a truncated frame at shutdown; nothing to do */
+        }
+      }
+    }
+  }
+  // The daemon has re-read channels.json by now, so the list this UI
+  // shows is a fetch away rather than a restart away.
+  await Promise.all([mutate("/api/channels"), mutate("/api/scan"), mutate("/api/status")]);
+}
+
 export async function createSchedule(body: {
   channel: string;
   service_id: number;
@@ -330,12 +408,23 @@ export async function cancelSchedule(id: number) {
 // have equal priority and will not evict each other, so with a single
 // adapter the wrong order deadlocks on ErrNoAdapter. The endpoint exists
 // to own that order — see api.handleLiveSwitch.
-export async function switchLive(channel: string) {
-  const out = await post<{ channel: string; playlist: string; closed: string[] }>(
-    "/api/live/" + encodeURIComponent(channel) + "/switch",
+export async function switchLive(channel: string, quality?: string) {
+  const out = await post<{ channel: string; quality: string; playlist: string; closed: string[] }>(
+    "/api/live/" + encodeURIComponent(channel) + "/switch" + qualityQuery(quality),
   );
   await mutate("/api/status");
   return out!;
+}
+
+// One live quality tier, as /api/status reports it. The first is the
+// default — the one a bookmark or VLC gets without asking.
+export type LiveQuality = { name: string; label: string; bandwidth: number };
+
+// ?q= only on the URLs a person or a bookmark types. Everything below the
+// master playlist carries the tier as a path segment, because a relative
+// segment URI has to resolve inside the tier's own directory.
+export function qualityQuery(quality?: string | null) {
+  return quality ? "?q=" + encodeURIComponent(quality) : "";
 }
 
 export async function stopLive(channel: string) {

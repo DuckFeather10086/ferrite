@@ -254,7 +254,7 @@ func TestRunner_PreemptedMidRecordingKeepsBytes(t *testing.T) {
 			{Name: "nhk", Tuning: map[string]string{"SERVICE_ID": "1024"}},
 		},
 	}
-	pool := tuner.NewPool(steadyTuner(), channels, []int{0}, 4)
+	pool := tuner.NewPool(steadyTuner(), channels, config.ISDBTAdapters(0), 4)
 	m := &Manager{Runner: &Runner{
 		Tuners:         pool,
 		Store:          st,

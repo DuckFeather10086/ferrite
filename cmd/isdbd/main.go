@@ -35,6 +35,7 @@ import (
 	"github.com/DuckFeather10086/ferrite/internal/netaddr"
 	"github.com/DuckFeather10086/ferrite/internal/postprocess"
 	"github.com/DuckFeather10086/ferrite/internal/recorder"
+	"github.com/DuckFeather10086/ferrite/internal/scan"
 	"github.com/DuckFeather10086/ferrite/internal/scheduler"
 	"github.com/DuckFeather10086/ferrite/internal/store"
 	"github.com/DuckFeather10086/ferrite/internal/tuner"
@@ -66,11 +67,33 @@ func run(cfgPath, logLevel string) error {
 		return err
 	}
 
+	// Nothing to watch yet: sweep the band before anything else starts, so
+	// a fresh install comes up with a usable channel list instead of
+	// failing to load a file that only exists in the author's flat. This
+	// runs without the Pool because the Pool does not exist yet and
+	// nothing else can be contending for the adapter — the HTTP server is
+	// not listening and no schedule has been read.
+	if _, err := os.Stat(cfg.ChannelsFile); errors.Is(err, os.ErrNotExist) {
+		slog.Info("no channel list yet; scanning for channels before starting",
+			"file", cfg.ChannelsFile)
+		boot := &scan.Runner{
+			DvbrBin:      cfg.DvbrBin,
+			ChannelsFile: cfg.ChannelsFile,
+			Adapter:      cfg.AdapterList()[0].N,
+		}
+		if _, err := boot.Run(context.Background(), nil); err != nil {
+			// Not fatal on its own: the empty list it leaves behind still
+			// loads, the daemon still serves, and POST /api/scan can try
+			// again with a better aerial.
+			slog.Warn("first-run channel scan did not finish", "err", err)
+		}
+	}
+
 	channels, err := config.LoadChannels(cfg.ChannelsFile)
 	if err != nil {
 		return err
 	}
-	slog.Info("channels loaded", "n", len(channels.Channels), "file", cfg.ChannelsFile)
+	slog.Info("channels loaded", "n", channels.Len(), "file", cfg.ChannelsFile)
 
 	dbPath, err := cfg.StoragePath("isdbd.db")
 	if err != nil {
@@ -88,8 +111,9 @@ func run(cfgPath, logLevel string) error {
 		B25Bin:       cfg.B25Bin,
 		ChannelsFile: cfg.ChannelsFile,
 	}
-	tunerPool := tuner.NewPool(dvbrCLI, channels, cfg.Adapters, 8)
-	slog.Info("tuner pool initialized", "adapters", cfg.Adapters)
+	adapters := cfg.AdapterList()
+	tunerPool := tuner.NewPool(dvbrCLI, channels, adapters, 8)
+	slog.Info("tuner pool initialized", "adapters", adapters)
 
 	recRunner := &recorder.Runner{
 		Tuners:      tunerPool,
@@ -119,13 +143,25 @@ func run(cfgPath, logLevel string) error {
 		Runner: recRunner,
 	}
 
-	hlsRoot, _ := cfg.StoragePath("hls")
+	// Live segments go wherever hls_root says, falling back to
+	// storage_root/hls. On this box that is a tmpfs the unit creates
+	// (RuntimeDirectory=ferrite), which keeps a day's worth of
+	// write-and-delete off the same disk the recordings are on.
+	hlsRoot, err := cfg.LiveRoot()
+	if err != nil {
+		return err
+	}
 	hlsMgr := &hls.Manager{
-		Tuners:          tunerPool,
-		OutputRoot:      hlsRoot,
-		FFmpegBin:       cfg.FFmpegBin,
-		FFprobeBin:      cfg.FFprobeBin,
-		CaptionBin:      cfg.AribCaptionBin,
+		Tuners:     tunerPool,
+		OutputRoot: hlsRoot,
+		FFmpegBin:  cfg.FFmpegBin,
+		FFprobeBin: cfg.FFprobeBin,
+		CaptionBin: cfg.AribCaptionBin,
+		// Live quality tiers, and the hardware-decode setup they share.
+		// An empty [live] section leaves this nil, which the manager reads
+		// as its single built-in tier — the encode it has always done.
+		FFmpegArgs:      cfg.Live.InputArgs,
+		Qualities:       liveQualities(cfg),
 		ProbeSeconds:    cfg.ProbeSeconds,
 		AudioOffsetBias: cfg.AudioOffsetBias,
 		// Persist the measured A/V skew so a channel only pays the
@@ -151,13 +187,26 @@ func run(cfgPath, logLevel string) error {
 	// through StopAllAndWait.
 	adhoc := &recorder.Manager{Runner: recRunner, Base: context.Background()}
 
+	// Rescanning on demand goes through the Pool at background priority,
+	// so a sweep — which owns the frontend for ten minutes — yields to
+	// anyone who wants to watch television.
+	scanner := &scan.Runner{
+		DvbrBin:      cfg.DvbrBin,
+		ChannelsFile: cfg.ChannelsFile,
+		Tuners:       tunerPool,
+	}
+
 	handler := api.NewRouter(api.Deps{
-		Channels:    channels,
-		Store:       st,
-		Tuners:      tunerPool,
-		HLS:         hlsMgr,
-		Recorder:    adhoc,
-		Postprocess: post,
+		Channels: channels,
+		Scanner:  scanner,
+		// Where a scan writes, and where the in-memory list is re-read
+		// from when one finishes.
+		ChannelsFile: cfg.ChannelsFile,
+		Store:        st,
+		Tuners:       tunerPool,
+		HLS:          hlsMgr,
+		Recorder:     adhoc,
+		Postprocess:  post,
 		// Bounds which files /api/recordings/{id}/file will serve and
 		// DELETE will unlink — same root the recorder writes under.
 		StorageRoot: cfg.StorageRoot,
@@ -197,7 +246,7 @@ func run(cfgPath, logLevel string) error {
 		refresher := &epg.Refresher{
 			DvbrBin:      cfg.DvbrBin,
 			ChannelsFile: cfg.ChannelsFile,
-			Adapter:      cfg.Adapters[0],
+			Adapter:      adapters[0].N,
 			Channels:     channels,
 			ChannelNames: cfg.EPGChannels,
 			Store:        st,
@@ -212,7 +261,7 @@ func run(cfgPath, logLevel string) error {
 			}
 		}()
 		slog.Info("epg refresher started",
-			"channels", cfg.EPGChannels, "adapter", cfg.Adapters[0])
+			"channels", cfg.EPGChannels, "adapter", adapters[0].N)
 	} else {
 		slog.Info("epg refresher disabled (no epg_channels or no dvbr_bin)")
 	}
@@ -267,6 +316,26 @@ func run(cfgPath, logLevel string) error {
 	}
 	slog.Info("isdbd stopped")
 	return nil
+}
+
+// liveQualities turns the config's [live.quality.*] tables into the
+// manager's tier list. Nil when none are declared, which is how a daemon
+// that has not opted into tiers keeps behaving exactly as it did.
+func liveQualities(cfg *config.Daemon) []hls.Quality {
+	declared := cfg.LiveQualities()
+	if len(declared) == 0 {
+		return nil
+	}
+	out := make([]hls.Quality, 0, len(declared))
+	for _, q := range declared {
+		out = append(out, hls.Quality{
+			Name:       q.Name(),
+			Label:      q.Label,
+			Bandwidth:  q.Bandwidth,
+			OutputArgs: q.OutputArgs,
+		})
+	}
+	return out
 }
 
 func setupLogger(level string) {

@@ -64,8 +64,18 @@ type Cue struct {
 // exists so a session left running for days does not grow without bound.
 const maxCues = 2048
 
-// Pipeline runs one channel's caption decode for as long as its live session
-// lives.
+// Pipeline runs one channel's caption decode for as long as the tune it is
+// reading lives, and publishes a subtitle rendition for each video
+// playlist attached to it.
+//
+// One decode, several outputs, because a channel can be encoded at more
+// than one quality at a time: the captions are a property of the
+// broadcast, not of the encode, so decoding them twice would mean two
+// arib-caption children and two subscriptions to the same TS for
+// identical words. What cannot be shared is the *rendition* — a player
+// matches a subtitle fragment to the video fragment it is playing, and
+// each encode has its own segment numbering and its own boundaries — so
+// there is one Rendition per quality, all fed from the same cues.
 type Pipeline struct {
 	// Bin is the arib-caption executable. Empty disables captions.
 	Bin string
@@ -74,23 +84,63 @@ type Pipeline struct {
 	FFprobeBin string
 
 	Channel string
-	// Dir is the live session's directory: the video playlist and segments are
-	// here, and the .vtt segments go beside them.
-	Dir string
-	// VideoPlaylist is the file to mirror (the session's stream.m3u8).
-	VideoPlaylist string
 	// Sub is a second subscription to the same tune the video comes from.
 	Sub *fanout.Sub
 
-	// Refresh is how often the video playlist is re-read. Defaults to 1s,
-	// comfortably inside the 2s segment duration.
+	// Refresh is how often each video playlist is re-read. It has to stay
+	// comfortably inside the video's segment duration or the rendition
+	// trails the picture by a segment, so the caller sets it from whatever
+	// -hls_time it gave ffmpeg (internal/hls passes half). Defaults to 1s,
+	// which is the right answer only for segments of 2s or longer.
 	Refresh time.Duration
 
-	mu        sync.Mutex
-	cues      []Cue
+	mu         sync.Mutex
+	cues       []Cue
+	renditions []*Rendition
+}
+
+// Rendition is one subtitle output: a subs.m3u8 in dir, mirroring the
+// video playlist at playlist segment for segment.
+//
+// The anchor lives here rather than on the Pipeline because it is a
+// property of one encode's segments — two qualities of the same channel
+// start at different moments and number their segments from their own
+// zero.
+type Rendition struct {
+	dir      string
+	playlist string
+
+	// Guarded by the owning Pipeline's mu.
 	anchorMs  int64
 	anchorSeq int64
 	haveAnc   bool
+}
+
+// Dir is where this rendition writes, for callers that need to check
+// whether it has published yet.
+func (r *Rendition) Dir() string { return r.dir }
+
+// Attach adds an output mirroring videoPlaylist into dir. Safe to call
+// before or after Run; the next publish tick picks it up.
+func (p *Pipeline) Attach(dir, videoPlaylist string) *Rendition {
+	r := &Rendition{dir: dir, playlist: videoPlaylist}
+	p.mu.Lock()
+	p.renditions = append(p.renditions, r)
+	p.mu.Unlock()
+	return r
+}
+
+// Detach stops publishing r. The decode carries on for whatever else is
+// attached; the caller is responsible for the files r left behind.
+func (p *Pipeline) Detach(r *Rendition) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i, have := range p.renditions {
+		if have == r {
+			p.renditions = append(p.renditions[:i], p.renditions[i+1:]...)
+			return
+		}
+	}
 }
 
 // reanchorEvery bounds how far a segment window may be derived from declared
@@ -99,7 +149,8 @@ type Pipeline struct {
 // ffmpeg writes #EXTINF:2.002 while the segments really run about 11 ms shorter,
 // so adding durations up drifts — a quarter of a second by segment 20, and past
 // a whole segment within the hour. Re-measuring every few segments keeps the
-// error inside a video frame or two, and costs one ffprobe per ten seconds.
+// error inside a video frame or two, and costs one ffprobe per five segments
+// however long they are.
 const reanchorEvery = 5
 
 // SubsPlaylist is the name of the subtitle media playlist. It lives in Dir and
@@ -155,7 +206,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			// are no more cues.
 			return nil
 		case <-ticker.C:
-			err := p.publish(ctx)
+			err := p.publishAll(ctx)
 			// Publishing runs every second, so a persistent failure would
 			// flood the log — but a silent one means captions quietly stop
 			// while the picture keeps playing. Log each distinct failure once.
@@ -240,10 +291,27 @@ type segment struct {
 	duration float64
 }
 
-// publish re-reads the video playlist and writes the subtitle rendition to
+// publishAll refreshes every attached rendition. One rendition failing —
+// a quality whose ffmpeg has just died, say — must not stop the others,
+// so the first error is reported and the rest still run.
+func (p *Pipeline) publishAll(ctx context.Context) error {
+	p.mu.Lock()
+	renditions := append([]*Rendition(nil), p.renditions...)
+	p.mu.Unlock()
+
+	var firstErr error
+	for _, r := range renditions {
+		if err := p.publish(ctx, r); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// publish re-reads one video playlist and writes its subtitle rendition to
 // match it.
-func (p *Pipeline) publish(ctx context.Context) error {
-	segments, targetDuration, err := readPlaylist(p.VideoPlaylist)
+func (p *Pipeline) publish(ctx context.Context, r *Rendition) error {
+	segments, targetDuration, err := readPlaylist(r.playlist)
 	if err != nil {
 		return err
 	}
@@ -254,7 +322,7 @@ func (p *Pipeline) publish(ctx context.Context) error {
 	// Measure the timeline on the newest listed segment, so the windows either
 	// side of it are derived from at most a few durations.
 	newest := segments[len(segments)-1]
-	if err := p.anchor(ctx, newest); err != nil {
+	if err := p.anchor(ctx, r, newest); err != nil {
 		return err
 	}
 
@@ -267,7 +335,7 @@ func (p *Pipeline) publish(ctx context.Context) error {
 	starts := make([]int64, len(segments))
 	anchorAt := -1
 	for i, seg := range segments {
-		if seg.seq == p.anchorSeq {
+		if seg.seq == r.anchorSeq {
 			anchorAt = i
 			break
 		}
@@ -277,7 +345,7 @@ func (p *Pipeline) publish(ctx context.Context) error {
 		// re-measures.
 		return nil
 	}
-	starts[anchorAt] = p.anchorMs
+	starts[anchorAt] = r.anchorMs
 	for i := anchorAt + 1; i < len(segments); i++ {
 		starts[i] = starts[i-1] + int64(segments[i-1].duration*1000)
 	}
@@ -294,14 +362,14 @@ func (p *Pipeline) publish(ctx context.Context) error {
 		start := starts[i]
 		end := start + int64(seg.duration*1000)
 		name := fmt.Sprintf("sub%d.vtt", seg.seq)
-		if err := p.writeSegment(name, start, end); err != nil {
+		if err := p.writeSegment(r, name, start, end); err != nil {
 			return err
 		}
 		live[name] = true
 		fmt.Fprintf(&playlist, "#EXTINF:%.3f,\n%s\n", seg.duration, name)
 	}
 
-	if err := writeFileAtomic(filepath.Join(p.Dir, SubsPlaylist), []byte(playlist.String())); err != nil {
+	if err := writeFileAtomic(filepath.Join(r.dir, SubsPlaylist), []byte(playlist.String())); err != nil {
 		return err
 	}
 
@@ -310,7 +378,7 @@ func (p *Pipeline) publish(ctx context.Context) error {
 	// process wrote: a session reusing the channel's directory inherits the
 	// previous run's segments, whose sequence numbers are unrelated to this
 	// run's and would otherwise pile up.
-	entries, err := os.ReadDir(p.Dir)
+	entries, err := os.ReadDir(r.dir)
 	if err == nil {
 		for _, entry := range entries {
 			name := entry.Name()
@@ -318,7 +386,7 @@ func (p *Pipeline) publish(ctx context.Context) error {
 				continue
 			}
 			if !live[name] {
-				_ = os.Remove(filepath.Join(p.Dir, name))
+				_ = os.Remove(filepath.Join(r.dir, name))
 			}
 		}
 	}
@@ -366,7 +434,7 @@ const topLine = " line:1"
 // segment the moment it appears and never looks at it again. Cut into
 // per-segment pieces, the copies are contiguous instead of overlapping — the
 // caption stays on screen across the boundary and is only ever drawn once.
-func (p *Pipeline) writeSegment(name string, startMs, endMs int64) error {
+func (p *Pipeline) writeSegment(r *Rendition, name string, startMs, endMs int64) error {
 	var body strings.Builder
 	// Cue times are broadcast PTS, and the map says which instant that is: the
 	// segment's own start, given once as a 90 kHz PTS and once as the time the
@@ -409,7 +477,7 @@ func (p *Pipeline) writeSegment(name string, startMs, endMs int64) error {
 			body.WriteString("\n")
 		}
 	}
-	return writeFileAtomic(filepath.Join(p.Dir, name), []byte(body.String()))
+	return writeFileAtomic(filepath.Join(r.dir, name), []byte(body.String()))
 }
 
 func formatCue(cue Cue) string {
@@ -437,25 +505,25 @@ func escapeVTT(text string) string {
 
 // anchor measures the PTS the given segment starts at, when the last
 // measurement is more than reanchorEvery segments away.
-func (p *Pipeline) anchor(ctx context.Context, seg segment) error {
+func (p *Pipeline) anchor(ctx context.Context, r *Rendition, seg segment) error {
 	p.mu.Lock()
-	fresh := p.haveAnc && seg.seq-p.anchorSeq < reanchorEvery && seg.seq >= p.anchorSeq
+	fresh := r.haveAnc && seg.seq-r.anchorSeq < reanchorEvery && seg.seq >= r.anchorSeq
 	p.mu.Unlock()
 	if fresh {
 		return nil
 	}
 
-	path := filepath.Join(p.Dir, seg.name)
+	path := filepath.Join(r.dir, seg.name)
 	pts, err := firstVideoPTS(ctx, p.FFprobeBin, path)
 	if err != nil {
 		return err
 	}
 
 	p.mu.Lock()
-	first := !p.haveAnc
-	p.anchorMs = int64(pts * 1000)
-	p.anchorSeq = seg.seq
-	p.haveAnc = true
+	first := !r.haveAnc
+	r.anchorMs = int64(pts * 1000)
+	r.anchorSeq = seg.seq
+	r.haveAnc = true
 	p.mu.Unlock()
 	if first {
 		slog.Info("caption: anchored cue timeline",

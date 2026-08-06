@@ -10,6 +10,17 @@ Restart=on-failure
 RestartSec=5
 User=duckfeather
 Group=duckfeather
+# tmpfs for live HLS at /run/ferrite, exported as $RUNTIME_DIRECTORY —
+# which is what `hls_root = "$RUNTIME_DIRECTORY/hls"` resolves to. Keeps a
+# rolling ~65 GB/day of segment write-and-delete off the recording disk.
+#
+# No size cap here either (`RuntimeDirectorySize=` is a logind setting, not
+# a unit directive): what bounds it is `-hls_flags delete_segments` with
+# `-hls_list_size 12`, about 10 MB per channel per quality. To cap it for
+# real on a system unit, `TemporaryFileSystem=/run/ferrite:size=512M` would
+# do it — at the cost of the segments living in this service's own mount
+# namespace, invisible to anything else on the box.
+RuntimeDirectory=ferrite
 StandardOutput=journal
 StandardError=journal
 

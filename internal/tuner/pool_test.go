@@ -72,9 +72,9 @@ func newPool(t *testing.T, tunerCount int, ft *fakeTuner) *Pool {
 			{Name: "tbs", Tuning: map[string]string{"SERVICE_ID": "2048"}},
 		},
 	}
-	adapters := make([]int, tunerCount)
+	adapters := make([]config.Adapter, tunerCount)
 	for i := range adapters {
-		adapters[i] = i
+		adapters[i] = config.Adapter{N: i, Systems: []string{"ISDBT"}}
 	}
 	return NewPool(ft, channels, adapters, 4)
 }
@@ -232,7 +232,7 @@ func TestPool_TuneErrorClearsSlot(t *testing.T) {
 		Version: 1,
 		Channels: []config.Channel{{Name: "mx",
 			Tuning: map[string]string{"SERVICE_ID": "1"}}},
-	}, []int{0}, 4)
+	}, config.ISDBTAdapters(0), 4)
 
 	_, err := pool.Acquire(context.Background(), "mx")
 	if err == nil {

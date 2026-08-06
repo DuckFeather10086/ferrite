@@ -3,6 +3,9 @@
 
 http_port = 8010
 storage_root = "./var"
+# One Siano USB stick, terrestrial only. The `[[adapter]]` form names each
+# frontend's delivery systems and is what a mixed card wants — see
+# isdbd.example.toml; this list is read as ["ISDBT"].
 adapters = [0]
 
 # Sibling repos under ~/code/isdb-workspace/. Adjust if you cloned
@@ -20,6 +23,13 @@ arib_caption_bin = "./target/release/arib-caption"
 
 channels_file = "channels.json"
 
+# Live segments on the tmpfs the unit creates (RuntimeDirectory=ferrite in
+# scripts/ferrite.service, which also exports this variable). Keeps ~65 GB a
+# day of rolling segment writes off the SSD the recordings are on. Run by
+# hand outside systemd the variable is unset and this falls back to
+# storage_root/hls.
+hls_root = "$RUNTIME_DIRECTORY/hls"
+
 # Live A/V sync: before starting ffmpeg, probe the first audio + video
 # PTS and delay audio by their difference (ISDB interleaves audio ahead
 # of the first decodable frame). Auto-enabled when ffprobe_bin is set.
@@ -34,17 +44,48 @@ epg_cron = "0 */6 * * *"
 # Ten muxes × up to 60s of collection, at background priority — live viewing
 # and recordings preempt it.
 epg_channels = [
-  "J：COMテレビ",   # 473.14 MHz
-  "テレ玉1",        # 485.14
-  "tvk1",           # 503.14
-  "TOKYO MX1",      # 515.14
-  "FUJI",           # 521.14
-  "TBS1",           # 527.14
-  "asahi",          # 539.14
-  "NTV",            # 545.14
-  "NHKEテレ1東京",  # 551.14 (alias of the mojibake name NHKEFl1El5~)
-  "NHK_G",          # 557.14
+  "J：COMテレビ",     # 473.14 MHz
+  "テレ玉1",          # 485.14
+  "tvk1",             # 503.14
+  "J：COMチャンネル", # 509.14
+  "TOKYO MX1",        # 515.14
+  "FUJI",             # 521.14
+  "TBS1",             # 527.14
+  "テレ東",           # 533.14
+  "asahi",            # 539.14
+  "NTV",              # 545.14
+  "NHKEテレ1東京",    # 551.14
+  "NHK_G",            # 557.14
 ]
+
+# Live picture quality: two tiers, on demand. A viewer picks one and the
+# daemon runs one encode for it — nothing is encoded until somebody asks,
+# and both tiers of a channel come off the same tune and the same lease.
+#
+# Software x264 on purpose, unlike the recording post-pass below: live
+# wants zerolatency and the iGPU is busy with the post-pass often enough
+# that the CPU is the more predictable answer here (measured ~2.6×
+# realtime on this N100).
+[live]
+
+# No output_args: this is the daemon's built-in encode, so it follows
+# whatever internal/hls calls correct rather than pinning a copy here.
+[live.quality.1080p]
+order     = 1
+label     = "1080p"
+bandwidth = 6500000
+
+# Half the bitrate and a third of the pixels — for a phone on the LAN, or
+# over Tailscale from outside.
+[live.quality.720p]
+order       = 2
+label       = "720p"
+bandwidth   = 3000000
+output_args = ["-vf", "yadif=0,scale=1280:720,setsar=1",
+               "-c:v", "libx264", "-preset", "superfast", "-tune", "zerolatency",
+               "-b:v", "2.5M", "-maxrate", "3M", "-bufsize", "6M",
+               "-pix_fmt", "yuv420p",
+               "-c:a", "aac", "-b:a", "128k"]
 
 # This box: Intel N100 iGPU. Measured 4.9x realtime at 68% of one core, where
 # software is 2.2x at 309% — the CPU headroom is what matters, since live HLS
@@ -54,6 +95,14 @@ enable = true
 input_args  = ["-hwaccel", "vaapi",
                "-hwaccel_device", "/dev/dri/renderD128",
                "-hwaccel_output_format", "vaapi"]
-output_args = ["-vf", "deinterlace_vaapi,scale_vaapi=w=1920:h=1080",
+# The scale is written the same way the software path writes it, and for the
+# same reason: ISDB-T codes HD as 1440x1080 with non-square pixels (SAR 4:3),
+# and browsers do not reliably honour the SAR in the H.264 VUI. `w=1920:h=1080`
+# gets the HD case right only by coincidence — that *is* 1440 × 4/3 — and gets a
+# 4:3 SD subchannel wrong, stretching 720x480 into a 16:9 frame. Scaling the
+# width by the source's own SAR is the general form; scale_vaapi takes the
+# expression (checked against ffmpeg 6.1 here, on this box's iGPU, from a real
+# 1440x1080 recording: out 1920x1080 SAR 1:1).
+output_args = ["-vf", "deinterlace_vaapi,scale_vaapi=w=trunc(iw*sar/2)*2:h=ih,setsar=1",
                "-c:v", "h264_vaapi", "-b:v", "6M",
                "-c:a", "aac", "-b:a", "192k"]

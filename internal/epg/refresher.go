@@ -63,7 +63,7 @@ var ErrPreempted = errors.New("epg: preempted by a higher-priority tuner claim")
 // Reserver is the tuner.Pool seam. Nil disables reservations, which is
 // only appropriate when nothing else can touch the adapter.
 type Reserver interface {
-	Reserve(ctx context.Context, prio tuner.Priority) (*tuner.Reservation, error)
+	Reserve(ctx context.Context, prio tuner.Priority, system string) (*tuner.Reservation, error)
 }
 
 // Refresher periodically runs `dvbr epg --schedule --json` against
@@ -167,7 +167,10 @@ func (r *Refresher) refreshOne(ctx context.Context, channelName string) (int, er
 	var res *tuner.Reservation
 	if r.Tuners != nil {
 		var err error
-		res, err = r.Tuners.Reserve(ctx, tuner.PrioBackground)
+		// Name the channel's own delivery system: this pass is about to
+		// spawn `dvbr epg` against whatever adapter comes back, and dvbr
+		// tunes it from channels.json without asking the Pool again.
+		res, err = r.Tuners.Reserve(ctx, tuner.PrioBackground, ch.DeliverySystem())
 		if err != nil {
 			// Busy is normal and not worth escalating: live viewing and
 			// recordings outrank EPG by design.

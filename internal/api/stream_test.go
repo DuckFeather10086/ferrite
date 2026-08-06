@@ -53,7 +53,7 @@ func newStreamRouter(t *testing.T) (http.Handler, *hls.Manager) {
 		},
 	}
 	mgr := &hls.Manager{
-		Tuners:     tuner.NewPool(fakeTuner{}, channels, []int{0}, 4),
+		Tuners:     tuner.NewPool(fakeTuner{}, channels, config.ISDBTAdapters(0), 4),
 		OutputRoot: t.TempDir(),
 		FFmpegBin:  writeFakeFFmpeg(t),
 	}
@@ -155,7 +155,7 @@ func TestMasterAnnouncesCaptionsOnlyWhenPresent(t *testing.T) {
 	}
 
 	// What internal/caption writes once it has cues.
-	s := mgr.Touch("mx")
+	s := mgr.Touch("mx", "")
 	if s == nil {
 		t.Fatal("no session")
 	}
@@ -173,11 +173,13 @@ func TestMasterAnnouncesCaptionsOnlyWhenPresent(t *testing.T) {
 	if !strings.Contains(body, `TYPE=SUBTITLES`) || !strings.Contains(body, `SUBTITLES="subs"`) {
 		t.Fatalf("captions not announced:\n%s", body)
 	}
-	// And the rendition resolves from the manifest that named it.
-	if sub := get(t, h, "/api/live/mx/subs.m3u8"); sub.Code != http.StatusOK {
+	// And the rendition resolves from the manifest that named it. Every
+	// URL below the master carries the quality, because every encode of
+	// the channel writes its own segments into its own directory.
+	if sub := get(t, h, "/api/live/mx/"+hls.DefaultQualityName+"/subs.m3u8"); sub.Code != http.StatusOK {
 		t.Fatalf("subtitle playlist = %d", sub.Code)
 	}
-	if vtt := get(t, h, "/api/live/mx/sub0.vtt"); vtt.Code != http.StatusOK ||
+	if vtt := get(t, h, "/api/live/mx/"+hls.DefaultQualityName+"/sub0.vtt"); vtt.Code != http.StatusOK ||
 		vtt.Header().Get("Content-Type") != "text/vtt; charset=utf-8" {
 		t.Fatalf("vtt segment = %d %q", vtt.Code, vtt.Header().Get("Content-Type"))
 	}
@@ -228,7 +230,7 @@ func TestVideoPlaylistServesBareSegmentNames(t *testing.T) {
 		t.Fatalf("master: %d %s", rr.Code, rr.Body.String())
 	}
 
-	rr := get(t, h, "/api/live/mx/video.m3u8")
+	rr := get(t, h, "/api/live/mx/"+hls.DefaultQualityName+"/video.m3u8")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("%d %s", rr.Code, rr.Body.String())
 	}
@@ -236,7 +238,7 @@ func TestVideoPlaylistServesBareSegmentNames(t *testing.T) {
 		t.Fatalf("segment URI still carries ffmpeg's base:\n%s", rr.Body.String())
 	}
 	// And it resolves against that playlist's URL.
-	if seg := get(t, h, "/api/live/mx/stream0.ts"); seg.Code != http.StatusOK {
+	if seg := get(t, h, "/api/live/mx/"+hls.DefaultQualityName+"/stream0.ts"); seg.Code != http.StatusOK {
 		t.Fatalf("GET segment = %d", seg.Code)
 	}
 }

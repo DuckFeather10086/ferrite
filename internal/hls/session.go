@@ -51,6 +51,27 @@ const minAudioOffset = 0.01
 // /api/live/{channel}.m3u8 touch before the janitor closes it.
 const DefaultIdleTimeout = 60 * time.Second
 
+// The segmentation of the live stream. These three go together and are
+// the whole of the latency budget on this side of the wire:
+//
+//   - segmentSeconds is the floor on how stale the live edge can be —
+//     nothing reaches a player until ffmpeg closes the segment it is in.
+//   - outputFPS is the frame rate *after* yadif, which turns ISDB-T's
+//     30i into 30p. It is here only to compute the GOP.
+//   - playlistSegments is how far back a player can reach, in segments.
+//     segmentSeconds × playlistSegments ≈ 12s of window.
+//
+// The GOP handed to x264 is segmentSeconds × outputFPS, and that
+// relationship is a hard constraint rather than a tuning choice: an HLS
+// segment must begin with an IDR frame, so a GOP that does not divide
+// the segment length makes ffmpeg cut late, at the next keyframe, and
+// segments drift away from the duration the playlist advertises.
+const (
+	segmentSeconds   = 1
+	outputFPS        = 30
+	playlistSegments = 12
+)
+
 // Acquirer is the tuner.Pool seam (tests pass a fake).
 type Acquirer interface {
 	Acquire(ctx context.Context, channel string) (*tuner.Lease, error)
@@ -69,14 +90,20 @@ type OffsetStore interface {
 // change eventually gets picked up on its own.
 const DefaultOffsetMaxAge = 30 * 24 * time.Hour
 
-// Manager owns one HLS session per channel.
+// Manager owns one HLS session per channel and quality.
 type Manager struct {
 	Tuners      Acquirer
-	OutputRoot  string        // sessions write under {OutputRoot}/{channel}/
+	OutputRoot  string        // sessions write under {OutputRoot}/{channel}/{quality}/
 	FFmpegBin   string        // path to ffmpeg
 	FFprobeBin  string        // path to ffprobe; empty disables A/V offset probing
 	FFmpegArgs  []string      // extra args inserted before -i pipe:0
 	IdleTimeout time.Duration // 0 → DefaultIdleTimeout
+
+	// Qualities are the encoding tiers on offer, in the order a UI should
+	// show them; the first is the default. Empty means the single
+	// DefaultQuality, which is the encode this daemon did before tiers
+	// existed. See quality.go for why this is on demand and not ABR.
+	Qualities []Quality
 
 	// CaptionBin is the arib-caption executable. When set (and FFprobeBin
 	// is too), each session also decodes the tune's caption PID into a
@@ -109,17 +136,30 @@ type Manager struct {
 	OffsetMaxAge time.Duration
 
 	mu       sync.Mutex
-	sessions map[string]*Session
-	// opening tracks in-flight opens per channel so concurrent viewers
-	// (e.g. a player retrying its manifest request mid-tune) join the
-	// same tune instead of racing a second Acquire — the loser of that
+	sessions map[sessionKey]*Session
+	// opening tracks in-flight opens per channel+quality so concurrent
+	// viewers (e.g. a player retrying its manifest request mid-tune) join
+	// the same tune instead of racing a second Acquire — the loser of that
 	// race would overwrite the winner in sessions and orphan a running
 	// ffmpeg + lease that the janitor can never reap.
-	opening map[string]*openCall
-	// lastOpen records the most recently opened/touched channel so the
-	// /stream.m3u8 shortcut knows which session to serve.
-	lastOpen string
+	opening map[sessionKey]*openCall
+	// tunes is the per-channel state every quality of that channel shares:
+	// the lease, and the caption decode.
+	tunes map[string]*channelTune
+	// lastOpen records the most recently opened/touched session so the
+	// /stream.m3u8 shortcut knows which one to serve.
+	lastOpen sessionKey
 }
+
+// sessionKey identifies one encode: a channel at a quality. Two tiers of
+// one channel are two sessions over one tune, which is the whole point —
+// see channelTune.
+type sessionKey struct {
+	channel string
+	quality string
+}
+
+func (k sessionKey) String() string { return k.channel + "/" + k.quality }
 
 // openCall is one in-flight session open; done is closed once s/err
 // are set.
@@ -127,6 +167,37 @@ type openCall struct {
 	done chan struct{}
 	s    *Session
 	err  error
+}
+
+// channelTune is what every quality of one channel shares: the tuner
+// lease, and the caption decode reading it.
+//
+// Both are properties of the *broadcast*, not of an encode. One lease
+// because two tiers are one claim on the frontend, released when the last
+// tier's last viewer leaves; one caption decode because the words are the
+// same at every bitrate, and decoding them per tier would mean N
+// arib-caption children reading N subscriptions of the same TS to produce
+// N copies of the same cues. Each tier still gets its own *rendition* of
+// those cues — a player matches subtitle fragments to the video fragments
+// it is playing, and each encode numbers its own segments.
+type channelTune struct {
+	channel string
+	lease   *tuner.Lease
+
+	// refs counts the sessions holding this tune. The lease is released
+	// when it reaches zero, which is the last viewer of the last tier.
+	refs int
+
+	// subTaken marks lease.Sub as handed to a session. The lease comes
+	// with one subscription already made; the first session uses it and
+	// every session after that takes its own, so nothing has to drain a
+	// subscription no one is reading.
+	subTaken bool
+
+	// The caption decode, when one is running.
+	pipeline  *caption.Pipeline
+	capSub    *fanout.Sub
+	capCancel context.CancelFunc
 }
 
 // key normalizes a requested channel name to its session key.
@@ -196,19 +267,20 @@ func (m *Manager) occupancy() string {
 		return "no live sessions (a recording or EPG pass has it)"
 	}
 	var parts []string
-	for ch, s := range m.sessions {
-		parts = append(parts, fmt.Sprintf("%s(idle %s)", ch, s.IdleFor().Round(time.Second)))
+	for key, s := range m.sessions {
+		parts = append(parts, fmt.Sprintf("%s(idle %s)", key, s.IdleFor().Round(time.Second)))
 	}
-	for ch := range m.opening {
-		parts = append(parts, ch+"(opening)")
+	for key := range m.opening {
+		parts = append(parts, key.String()+"(opening)")
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, " ")
 }
 
-// Session is one live ffmpeg pipeline for one channel.
+// Session is one live ffmpeg pipeline: one channel at one quality.
 type Session struct {
 	Channel      string
+	Quality      string
 	Dir          string // disk dir holding stream.m3u8 + segments
 	PlaylistPath string
 
@@ -220,36 +292,44 @@ type Session struct {
 	Captions bool
 
 	mgr      *Manager
-	lease    *tuner.Lease
+	tune     *channelTune
+	sub      *fanout.Sub
+	ownsSub  bool // sub was taken with Subscribe, so it has to be given back
 	ff       *proc.Process
 	lastSeen time.Time
 	closed   bool
 
-	// The caption decode, when one is running: an extra subscription to this
-	// session's own tune, and the context that stops it.
-	capSub    *fanout.Sub
-	capCancel context.CancelFunc
+	// This session's slice of the channel's caption decode, when there is
+	// one: its own subs.m3u8, mirroring its own segments.
+	rendition *caption.Rendition
 }
 
-// Open returns the existing session for channel, or starts a new one.
-// Always bumps the last-seen timestamp.
-func (m *Manager) Open(ctx context.Context, channel string) (*Session, error) {
+// key is how the manager indexes this session.
+func (s *Session) key() sessionKey {
+	return sessionKey{channel: s.Channel, quality: s.Quality}
+}
+
+// Open returns the existing session for channel at quality, or starts a
+// new one. An empty or unknown quality gets the default tier. Always
+// bumps the last-seen timestamp.
+func (m *Manager) Open(ctx context.Context, channel, quality string) (*Session, error) {
 	if m.Tuners == nil || m.OutputRoot == "" || m.FFmpegBin == "" {
 		return nil, errors.New("hls: Tuners/OutputRoot/FFmpegBin required")
 	}
-	channel = m.key(channel)
+	q := m.ResolveQuality(quality)
+	key := sessionKey{channel: m.key(channel), quality: q.Name}
 
 	m.mu.Lock()
 	if m.sessions == nil {
-		m.sessions = make(map[string]*Session)
+		m.sessions = make(map[sessionKey]*Session)
 	}
-	if s, ok := m.sessions[channel]; ok && !s.closed {
+	if s, ok := m.sessions[key]; ok && !s.closed {
 		s.lastSeen = time.Now()
-		m.lastOpen = channel
+		m.lastOpen = key
 		m.mu.Unlock()
 		return s, nil
 	}
-	if call, ok := m.opening[channel]; ok {
+	if call, ok := m.opening[key]; ok {
 		m.mu.Unlock()
 		select {
 		case <-call.done:
@@ -260,9 +340,9 @@ func (m *Manager) Open(ctx context.Context, channel string) (*Session, error) {
 	}
 	call := &openCall{done: make(chan struct{})}
 	if m.opening == nil {
-		m.opening = make(map[string]*openCall)
+		m.opening = make(map[sessionKey]*openCall)
 	}
-	m.opening[channel] = call
+	m.opening[key] = call
 	m.mu.Unlock()
 
 	// A cold open runs the frontend lock timeout (~25s) plus the A/V
@@ -271,21 +351,35 @@ func (m *Manager) Open(ctx context.Context, channel string) (*Session, error) {
 	// request doesn't tear down the tune mid-flight; its retry joins
 	// via m.opening, and a fully abandoned session is reaped by the
 	// idle janitor.
-	s, err := m.openSession(context.WithoutCancel(ctx), channel)
+	s, err := m.openSession(context.WithoutCancel(ctx), key.channel, q)
 
 	m.mu.Lock()
 	call.s, call.err = s, err
-	delete(m.opening, channel)
+	delete(m.opening, key)
 	m.mu.Unlock()
 	close(call.done)
 	return s, err
 }
 
-// openSession does the actual acquire → probe → ffmpeg spawn. Calls
-// are serialized per channel via m.opening.
-func (m *Manager) openSession(ctx context.Context, channel string) (*Session, error) {
-	// Acquire outside the manager lock — Pool.Acquire can block on
-	// frontend lock.
+// tuneFor returns the channel's shared tune, acquiring the lease if this
+// is its first session. The returned tune has already been ref'd; the
+// caller must releaseTune on any failure path.
+//
+// Acquire happens outside m.mu because it can block on the frontend lock,
+// so two qualities of one channel opening at once can both find no tune
+// and both acquire. The Pool shares the underlying dvbr for a
+// same-channel Acquire, so the loser's lease is a second reference to the
+// same tune rather than a second tune — it is released immediately and
+// the winner's is used.
+func (m *Manager) tuneFor(ctx context.Context, channel string) (*channelTune, error) {
+	m.mu.Lock()
+	if t, ok := m.tunes[channel]; ok {
+		t.refs++
+		m.mu.Unlock()
+		return t, nil
+	}
+	m.mu.Unlock()
+
 	lease, err := m.Tuners.Acquire(ctx, channel)
 	if err != nil {
 		// Say who has the adapter. This failure is the one a viewer sees as
@@ -296,11 +390,67 @@ func (m *Manager) openSession(ctx context.Context, channel string) (*Session, er
 			"channel", channel, "err", err, "occupancy", m.occupancy())
 		return nil, fmt.Errorf("hls: acquire %q: %w", channel, err)
 	}
-	canonical := lease.Channel
 
-	dir := filepath.Join(m.OutputRoot, canonical)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	m.mu.Lock()
+	if t, ok := m.tunes[lease.Channel]; ok {
+		// Lost the race. Hand the duplicate lease straight back.
+		t.refs++
+		m.mu.Unlock()
 		lease.Release()
+		return t, nil
+	}
+	t := &channelTune{channel: lease.Channel, lease: lease, refs: 1}
+	if m.tunes == nil {
+		m.tunes = make(map[string]*channelTune)
+	}
+	m.tunes[lease.Channel] = t
+	m.mu.Unlock()
+	return t, nil
+}
+
+// releaseTune drops one session's reference. The lease — and the caption
+// decode on it — go when the last one does, which is the last viewer of
+// the last quality.
+func (m *Manager) releaseTune(t *channelTune) {
+	m.mu.Lock()
+	t.refs--
+	if t.refs > 0 {
+		m.mu.Unlock()
+		return
+	}
+	if m.tunes[t.channel] == t {
+		delete(m.tunes, t.channel)
+	}
+	m.mu.Unlock()
+
+	// Stop the caption decode before releasing the lease: cancelling kills
+	// the child, then the subscription goes, then the tune.
+	if t.capCancel != nil {
+		t.capCancel()
+	}
+	if t.capSub != nil {
+		t.lease.Unsubscribe(t.capSub)
+	}
+	t.lease.Release()
+}
+
+// openSession does the actual acquire → probe → ffmpeg spawn for one
+// channel at one quality. Calls are serialized per channel+quality via
+// m.opening.
+func (m *Manager) openSession(ctx context.Context, channel string, q Quality) (*Session, error) {
+	// The lease is the channel's, not this quality's — a second tier joins
+	// the tune the first one is already on.
+	tune, err := m.tuneFor(ctx, channel)
+	if err != nil {
+		return nil, err
+	}
+	canonical := tune.channel
+
+	// A directory per quality, under the channel's. Two encodes of one
+	// channel cannot share one: they write the same segment names.
+	dir := filepath.Join(m.OutputRoot, canonical, q.Name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		m.releaseTune(tune)
 		return nil, fmt.Errorf("hls: mkdir %s: %w", dir, err)
 	}
 	playlist := filepath.Join(dir, "stream.m3u8")
@@ -312,6 +462,12 @@ func (m *Manager) openSession(ctx context.Context, channel string) (*Session, er
 	_ = clearStaleSegments(dir)
 	_ = os.Remove(filepath.Join(dir, "master.m3u8"))
 
+	// Each session reads the tune through its own subscription. The lease
+	// arrives with one already made, so the first tier uses that and the
+	// rest take their own — otherwise lease.Sub would sit unread and the
+	// broadcaster would keep filling and dropping a queue nobody drains.
+	sub, ownsSub := m.subscribe(tune)
+
 	// ISDB-T muxes interleave audio ahead of the first decodable video
 	// frame, so HLS otherwise comes up with a constant A/V skew. Shift
 	// audio by the difference between the first audio and video PTS
@@ -322,16 +478,20 @@ func (m *Manager) openSession(ctx context.Context, channel string) (*Session, er
 	// is reused when there is one. Only the raw measurement is cached;
 	// AudioOffsetBias is applied here so config changes take effect
 	// without re-probing.
+	//
+	// The skew is the broadcaster's, so it is the same at every quality:
+	// the second tier of a channel finds the first tier's measurement in
+	// the cache and starts without probing.
 	audioOffset := 0.0
 	if raw, ok := m.cachedOffset(canonical); ok {
 		audioOffset = raw + m.AudioOffsetBias
 		slog.Info("hls: reusing cached A/V offset",
 			"channel", canonical, "offset_s", audioOffset)
 	} else if m.FFprobeBin != "" && m.probeSeconds() > 0 {
-		// The probe consumes a few seconds of lease.Sub; the main pump
-		// picks up where it leaves off. Failure is non-fatal — we just
-		// start uncorrected.
-		off, perr := probeAudioOffset(context.Background(), m.FFprobeBin, lease.Sub, m.probeSeconds())
+		// The probe consumes a few seconds of this session's subscription;
+		// the main pump picks up where it leaves off. Failure is
+		// non-fatal — we just start uncorrected.
+		off, perr := probeAudioOffset(context.Background(), m.FFprobeBin, sub, m.probeSeconds())
 		if perr != nil {
 			slog.Warn("hls: A/V offset probe failed; starting without sync correction",
 				"channel", canonical, "err", perr)
@@ -343,11 +503,11 @@ func (m *Manager) openSession(ctx context.Context, channel string) (*Session, er
 		}
 	}
 
-	// The playlist is served at /api/live/{channel}.m3u8 but segments
-	// are served at /api/live/{channel}/{segment}. Prepend a relative
-	// base url so each segment URI in the playlist resolves under the
-	// channel subpath (and survives being mounted behind a path prefix).
-	segBase := url.PathEscape(canonical) + "/"
+	// The playlist is served at /api/live/{channel}.m3u8 but segments are
+	// served at /api/live/{channel}/{quality}/{segment}. Prepend a relative
+	// base url so each segment URI resolves under the quality subpath (and
+	// survives being mounted behind a path prefix).
+	segBase := url.PathEscape(canonical) + "/" + url.PathEscape(q.Name) + "/"
 
 	args := append([]string{}, m.FFmpegArgs...)
 	args = append(args,
@@ -378,32 +538,28 @@ func (m *Manager) openSession(ctx context.Context, channel string) (*Session, er
 	if af := audioOffsetFilter(audioOffset); af != "" {
 		args = append(args, "-af", af)
 	}
+	// The tier's own filter chain and encoder (see quality.go), then the
+	// GOP, which is not the tier's to choose.
+	args = append(args, q.outputArgs()...)
+	args = append(args, gopArgs()...)
 	args = append(args,
-		// ISDB-T video is MPEG-2 1080i — browsers have no MPEG-2
-		// decoder, so `-c:v copy` produces a stream hls.js loads but
-		// can never render (audio-less black frame, videoWidth 0).
-		// Transcode to H.264: yadif deinterlaces the 30i source to
-		// 30p, superfast+zerolatency runs ~2.5× realtime on an Intel
-		// N100, and -g 60 keys every ~2s so segments (hls_time 2)
-		// each start on an IDR frame.
-		//
-		// ISDB-T HD is coded 1440x1080 with *non-square* pixels
-		// (SAR 4:3 → DAR 16:9). Passing that through relies on the
-		// player honouring the SAR in the H.264 VUI, and hls.js/MSE
-		// does not do so reliably — the picture comes out horizontally
-		// squished. Normalize to square pixels instead, which yields
-		// the standard 1920x1080 for HD and leaves an already-square
-		// 1920x1080 or a 4:3 SD subchannel geometrically correct:
-		//   scale width by SAR (rounded to even), keep height, SAR 1:1.
-		// Deinterlace first — scaling interlaced fields would smear them.
-		"-vf", "yadif=0,scale=trunc(iw*sar/2)*2:ih,setsar=1",
-		"-c:v", "libx264", "-preset", "superfast", "-tune", "zerolatency",
-		"-b:v", "6M", "-maxrate", "7M", "-bufsize", "12M",
-		"-g", "60", "-pix_fmt", "yuv420p",
-		"-c:a", "aac", "-b:a", "192k",
 		"-f", "hls",
-		"-hls_time", "2",
-		"-hls_list_size", "6",
+		// Segment length is the floor on live latency — a player cannot
+		// show a segment ffmpeg has not finished writing — so it is the
+		// first thing to spend on getting from ~8s down to ~3s. The rest
+		// of that budget is the player's: see liveSyncDurationCount in
+		// web/src/components/VideoPlayer.tsx.
+		//
+		// -g is *not* independently tunable: every segment has to start on
+		// an IDR frame, so the GOP must divide the segment exactly
+		// (segmentSeconds × outputFPS, appended above). Change one and
+		// change the other, or ffmpeg cuts at the next keyframe instead
+		// and segment durations drift off the advertised #EXTINF.
+		"-hls_time", strconv.Itoa(segmentSeconds),
+		// Twice the count for half the length: the window a player can
+		// seek back into (and recover a dropped segment from) stays the
+		// same ~12s it was at 2s × 6.
+		"-hls_list_size", strconv.Itoa(playlistSegments),
 		"-hls_flags", "delete_segments+omit_endlist",
 		"-hls_base_url", segBase,
 		playlist,
@@ -412,79 +568,131 @@ func (m *Manager) openSession(ctx context.Context, channel string) (*Session, er
 	ff, err := proc.SpawnOpt(context.Background(),
 		proc.SpawnOpts{Stdin: true}, m.FFmpegBin, args...)
 	if err != nil {
-		lease.Release()
+		m.unsubscribe(tune, sub, ownsSub)
+		m.releaseTune(tune)
 		return nil, fmt.Errorf("hls: spawn ffmpeg: %w", err)
 	}
 
 	s := &Session{
 		Channel:      canonical,
+		Quality:      q.Name,
 		Dir:          dir,
 		PlaylistPath: playlist,
 
 		mgr:      m,
-		lease:    lease,
+		tune:     tune,
+		sub:      sub,
+		ownsSub:  ownsSub,
 		ff:       ff,
 		lastSeen: time.Now(),
 	}
 
-	go pumpToFFmpeg(lease.Sub, ff.Stdin)
+	go pumpToFFmpeg(sub, ff.Stdin)
 
 	// Captions read the same bytes as the encode, so they take another
-	// subscription to this session's tune rather than a second claim on the
-	// adapter: one viewer should look like one live claim, and a second Acquire
-	// could tune again if this tune had just died.
-	if m.CaptionBin != "" && m.FFprobeBin != "" {
-		capSub := lease.Subscribe()
-		capCtx, cancel := context.WithCancel(context.Background())
-		pipeline := &caption.Pipeline{
-			Bin:           m.CaptionBin,
-			FFprobeBin:    m.FFprobeBin,
-			Channel:       canonical,
-			Dir:           dir,
-			VideoPlaylist: playlist,
-			Sub:           capSub,
-		}
-		s.capSub = capSub
-		s.capCancel = cancel
+	// subscription to the *tune* rather than a second claim on the adapter:
+	// one viewer should look like one live claim, and a second Acquire could
+	// tune again if this tune had just died. One decode per channel, however
+	// many qualities are running — this session only adds a rendition of the
+	// cues, cut to its own segments.
+	if r := m.attachCaptions(tune, dir, playlist); r != nil {
+		s.rendition = r
 		s.Captions = true
-		go func() {
-			if err := pipeline.Run(capCtx); err != nil && capCtx.Err() == nil {
-				slog.Warn("hls: caption pipeline stopped",
-					"channel", canonical, "err", err)
-			}
-		}()
 	}
+
 	m.mu.Lock()
-	m.sessions[canonical] = s
-	m.lastOpen = canonical
+	m.sessions[s.key()] = s
+	m.lastOpen = s.key()
 	m.mu.Unlock()
 
 	slog.Info("hls: session opened",
-		"channel", canonical, "dir", dir, "captions", s.Captions)
+		"channel", canonical, "quality", q.Name, "dir", dir, "captions", s.Captions)
 	return s, nil
 }
 
-// Touch bumps last-seen without opening a new session. Returns nil
-// if no session exists for channel.
-func (m *Manager) Touch(channel string) *Session {
-	channel = m.key(channel)
+// subscribe hands out this session's view of the tune. Reports whether
+// the subscription is the session's own (and so has to be returned) or
+// the one that came with the lease (which goes with it).
+func (m *Manager) subscribe(t *channelTune) (*fanout.Sub, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if s, ok := m.sessions[channel]; ok && !s.closed {
+	if !t.subTaken {
+		t.subTaken = true
+		return t.lease.Sub, false
+	}
+	return t.lease.Subscribe(), true
+}
+
+func (m *Manager) unsubscribe(t *channelTune, sub *fanout.Sub, owns bool) {
+	if !owns {
+		m.mu.Lock()
+		t.subTaken = false
+		m.mu.Unlock()
+		return
+	}
+	t.lease.Unsubscribe(sub)
+}
+
+// attachCaptions gives this session a subtitle rendition, starting the
+// channel's decoder if it is not already running. Returns nil when
+// captions are not configured.
+func (m *Manager) attachCaptions(t *channelTune, dir, playlist string) *caption.Rendition {
+	if m.CaptionBin == "" || m.FFprobeBin == "" {
+		return nil
+	}
+	m.mu.Lock()
+	first := t.pipeline == nil
+	if first {
+		t.capSub = t.lease.Subscribe()
+		t.pipeline = &caption.Pipeline{
+			Bin:        m.CaptionBin,
+			FFprobeBin: m.FFprobeBin,
+			Channel:    t.channel,
+			Sub:        t.capSub,
+			// Poll twice per segment. A rendition mirrors its video
+			// playlist, so polling slower than ffmpeg writes segments
+			// leaves the captions a segment behind the picture.
+			Refresh: time.Duration(segmentSeconds) * time.Second / 2,
+		}
+	}
+	pipeline := t.pipeline
+	m.mu.Unlock()
+
+	rendition := pipeline.Attach(dir, playlist)
+	if first {
+		capCtx, cancel := context.WithCancel(context.Background())
+		t.capCancel = cancel
+		channel := t.channel
+		go func() {
+			if err := pipeline.Run(capCtx); err != nil && capCtx.Err() == nil {
+				slog.Warn("hls: caption pipeline stopped", "channel", channel, "err", err)
+			}
+		}()
+	}
+	return rendition
+}
+
+// Touch bumps last-seen without opening a new session. Returns nil if no
+// session exists for channel at quality.
+func (m *Manager) Touch(channel, quality string) *Session {
+	key := sessionKey{channel: m.key(channel), quality: m.ResolveQuality(quality).Name}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s, ok := m.sessions[key]; ok && !s.closed {
 		s.lastSeen = time.Now()
-		m.lastOpen = channel
+		m.lastOpen = key
 		return s
 	}
 	return nil
 }
 
-// LastOpened returns the session for the most recently opened/touched
-// channel, or nil if no session is active. This powers the /stream.m3u8
-// shortcut for bookmark-based playback (VLC, iPad, etc.).
+// LastOpened returns the most recently opened/touched session, or nil if
+// none is active. This powers the /stream.m3u8 shortcut for bookmark-based
+// playback (VLC, iPad, etc.).
 func (m *Manager) LastOpened() *Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.lastOpen == "" {
+	if m.lastOpen == (sessionKey{}) {
 		return nil
 	}
 	s, ok := m.sessions[m.lastOpen]
@@ -494,24 +702,27 @@ func (m *Manager) LastOpened() *Session {
 	return s
 }
 
-// CloseOthers tears down every session except channel, returning the
-// channels it closed (canonical keys, sorted).
+// CloseOthers tears down every session on a channel other than this one,
+// returning the channel names it closed (sorted, deduplicated).
 //
-// This is what makes "change channel" work on a single adapter: two
-// live sessions never outrank each other, so the tune holding the
-// frontend has to be told to let go before the new one can start.
+// This is what makes "change channel" work on a single adapter: two live
+// sessions never outrank each other, so the tune holding the frontend has
+// to be told to let go before the new one can start. Quality is not part
+// of it — every tier of the outgoing channel goes, and every tier of the
+// incoming one stays.
 func (m *Manager) CloseOthers(channel string) []string {
 	keep := m.key(channel)
 	m.mu.Lock()
 	var others []string
-	for ch := range m.sessions {
-		if ch != keep {
-			others = append(others, ch)
+	for key := range m.sessions {
+		if key.channel != keep {
+			others = append(others, key.channel)
 		}
 	}
 	m.mu.Unlock()
 
 	sort.Strings(others)
+	others = dedupe(others)
 	for _, ch := range others {
 		slog.Info("hls: closing session to free the adapter",
 			"channel", ch, "switching_to", keep)
@@ -520,21 +731,60 @@ func (m *Manager) CloseOthers(channel string) []string {
 	return others
 }
 
-// Close tears down a specific session. Idempotent.
+// Close tears down every session on a channel — all of its qualities, and
+// with the last of them the tune. Idempotent.
+//
+// Whole-channel, because that is what every caller means: stopping live
+// playback, or freeing the adapter for a different channel. A viewer
+// changing quality is not this; that is opening the other tier and
+// letting the janitor reap the one nobody is watching.
 func (m *Manager) Close(channel string) {
-	channel = m.key(channel)
+	canonical := m.key(channel)
 	m.mu.Lock()
-	s, ok := m.sessions[channel]
+	var doomed []*Session
+	for key, s := range m.sessions {
+		if key.channel != canonical {
+			continue
+		}
+		doomed = append(doomed, s)
+		delete(m.sessions, key)
+		if m.lastOpen == key {
+			m.lastOpen = sessionKey{}
+		}
+	}
+	m.mu.Unlock()
+	for _, s := range doomed {
+		s.tearDown()
+	}
+}
+
+// closeSession tears down one tier, leaving the channel's other tiers —
+// and the tune, if any remain — alone. This is the janitor's handle: a
+// quality nobody is watching should go without taking the picture away
+// from whoever is watching another one.
+func (m *Manager) closeSession(key sessionKey) {
+	m.mu.Lock()
+	s, ok := m.sessions[key]
 	if !ok {
 		m.mu.Unlock()
 		return
 	}
-	delete(m.sessions, channel)
-	if m.lastOpen == channel {
-		m.lastOpen = ""
+	delete(m.sessions, key)
+	if m.lastOpen == key {
+		m.lastOpen = sessionKey{}
 	}
 	m.mu.Unlock()
 	s.tearDown()
+}
+
+func dedupe(sorted []string) []string {
+	out := sorted[:0]
+	for i, v := range sorted {
+		if i == 0 || sorted[i-1] != v {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // Run starts the janitor that closes idle sessions. Blocks until ctx
@@ -559,29 +809,33 @@ func (m *Manager) Run(ctx context.Context) error {
 
 func (m *Manager) reapIdle(idle time.Duration) {
 	now := time.Now()
-	var stale []string
+	var stale []sessionKey
 	m.mu.Lock()
-	for ch, s := range m.sessions {
+	for key, s := range m.sessions {
 		if now.Sub(s.lastSeen) > idle {
-			stale = append(stale, ch)
+			stale = append(stale, key)
 		}
 	}
 	m.mu.Unlock()
-	for _, ch := range stale {
-		slog.Info("hls: closing idle session", "channel", ch, "idle_for", idle.String())
-		m.Close(ch)
+	// Per tier, not per channel: a viewer who switched from 1080p to 720p
+	// leaves the tier they left to go idle, and reaping it must not stop
+	// the one they are watching.
+	for _, key := range stale {
+		slog.Info("hls: closing idle session",
+			"channel", key.channel, "quality", key.quality, "idle_for", idle.String())
+		m.closeSession(key)
 	}
 }
 
 func (m *Manager) closeAll() {
 	m.mu.Lock()
-	chans := make([]string, 0, len(m.sessions))
-	for ch := range m.sessions {
-		chans = append(chans, ch)
+	keys := make([]sessionKey, 0, len(m.sessions))
+	for key := range m.sessions {
+		keys = append(keys, key)
 	}
 	m.mu.Unlock()
-	for _, ch := range chans {
-		m.Close(ch)
+	for _, key := range keys {
+		m.closeSession(key)
 	}
 }
 
@@ -593,16 +847,15 @@ func (s *Session) tearDown() {
 	if s.ff != nil {
 		_ = s.ff.Close()
 	}
-	// Stop the caption decode before releasing the lease: cancelling kills the
-	// child, then the subscription goes, then the tune.
-	if s.capCancel != nil {
-		s.capCancel()
+	// Stop publishing this tier's subtitles. The decode itself belongs to
+	// the channel and outlives this session if another quality is still
+	// running; releaseTune stops it when the last one goes.
+	if s.rendition != nil && s.tune != nil && s.tune.pipeline != nil {
+		s.tune.pipeline.Detach(s.rendition)
 	}
-	if s.capSub != nil && s.lease != nil {
-		s.lease.Unsubscribe(s.capSub)
-	}
-	if s.lease != nil {
-		s.lease.Release()
+	if s.tune != nil {
+		s.mgr.unsubscribe(s.tune, s.sub, s.ownsSub)
+		s.mgr.releaseTune(s.tune)
 	}
 }
 
@@ -754,6 +1007,13 @@ func audioOffsetFilter(offset float64) string {
 // with the picture for the second or so before the first publish overwrites it.
 // Its absence is what the master playlist waits on, so nothing announces it
 // early either.
+//
+// Pointing hls_root at a tmpfs does not make this redundant, it only narrows
+// what it is for. A reboot now starts from an empty directory, so this no
+// longer has to clean up after a crash — but the leftovers it exists to remove
+// are mostly from *this* boot: the same channel's directory is reused every
+// time a session on it is opened, and the previous session's segments are
+// still sitting in it.
 func clearStaleSegments(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -776,8 +1036,8 @@ func clearStaleSegments(dir string) error {
 
 // AdapterHint is exported for /api/status display.
 func (s *Session) AdapterHint() int {
-	if s.lease == nil {
+	if s.tune == nil || s.tune.lease == nil {
 		return -1
 	}
-	return s.lease.Adapter
+	return s.tune.lease.Adapter
 }

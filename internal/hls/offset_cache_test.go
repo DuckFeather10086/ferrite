@@ -103,7 +103,7 @@ func TestManager_CachedOffsetSkipsProbe(t *testing.T) {
 	offsets.putAged("mx", 0.25, time.Hour)
 
 	m := newOffsetManager(t, offsets, writeProbeCounter(t, counter))
-	if _, err := m.Open(context.Background(), "mx"); err != nil {
+	if _, err := m.Open(context.Background(), "mx", ""); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { m.Close("mx") })
@@ -135,7 +135,7 @@ JSON
 	}
 
 	m := newOffsetManager(t, offsets, probe)
-	if _, err := m.Open(context.Background(), "mx"); err != nil {
+	if _, err := m.Open(context.Background(), "mx", ""); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { m.Close("mx") })
@@ -161,7 +161,7 @@ func TestManager_BiasIsNotBakedIntoCache(t *testing.T) {
 
 	m := newOffsetManager(t, offsets, writeProbeCounter(t, counter))
 	m.AudioOffsetBias = 0.1
-	if _, err := m.Open(context.Background(), "mx"); err != nil {
+	if _, err := m.Open(context.Background(), "mx", ""); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { m.Close("mx") })
@@ -180,7 +180,7 @@ func TestManager_StaleOffsetIsReprobed(t *testing.T) {
 
 	m := newOffsetManager(t, offsets, writeProbeCounter(t, counter))
 	m.OffsetMaxAge = time.Hour
-	if _, err := m.Open(context.Background(), "mx"); err != nil {
+	if _, err := m.Open(context.Background(), "mx", ""); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { m.Close("mx") })
@@ -198,7 +198,7 @@ func TestManager_NegativeMaxAgeNeverExpires(t *testing.T) {
 
 	m := newOffsetManager(t, offsets, writeProbeCounter(t, counter))
 	m.OffsetMaxAge = -1
-	if _, err := m.Open(context.Background(), "mx"); err != nil {
+	if _, err := m.Open(context.Background(), "mx", ""); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { m.Close("mx") })
@@ -215,7 +215,7 @@ func TestManager_CacheReadErrorFallsBackToProbe(t *testing.T) {
 	offsets.getErr = context.DeadlineExceeded
 
 	m := newOffsetManager(t, offsets, writeProbeCounter(t, counter))
-	if _, err := m.Open(context.Background(), "mx"); err != nil {
+	if _, err := m.Open(context.Background(), "mx", ""); err != nil {
 		t.Fatalf("Open should survive a cache read failure: %v", err)
 	}
 	t.Cleanup(func() { m.Close("mx") })

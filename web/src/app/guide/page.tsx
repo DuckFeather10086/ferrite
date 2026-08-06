@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { ScanChannels } from "@/components/ScanChannels";
 import {
   createSchedule,
   displayName,
@@ -43,6 +44,12 @@ export default function GuidePage() {
         <span className="font-mono text-[11px] text-faint">
           {events?.length ?? 0} events · next 12h
         </span>
+        {/* Pushed right: rebuilding the channel list is the rarest thing
+            on this page and the most disruptive, so it sits away from the
+            controls used every visit. */}
+        <div className="ml-auto">
+          <ScanChannels />
+        </div>
       </div>
 
       {isLoading && <p className="text-sm text-dim">Loading guide…</p>}
