@@ -11,7 +11,7 @@
 [submodule "dvb-rs"]
 	path = dvb-rs
 	url = https://github.com/DuckFeather10086/dvb-rs.git
-	branch = fix/sdt-arib-b24
+	branch = main
 	ignore = untracked
 [submodule "libaribcaption-rs"]
 	path = libaribcaption-rs

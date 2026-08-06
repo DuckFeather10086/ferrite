@@ -75,13 +75,15 @@ jobs:
           mkdir -p "$RELEASE_DIR"
 
           cp target/release/dvb-rs                 "$RELEASE_DIR/dvb-rs"
+          cp target/release/arib-caption            "$RELEASE_DIR/arib-caption"
           cp libaribb25-rs/target/release/b25-rs    "$RELEASE_DIR/b25-rs"
           cp ferrite                                "$RELEASE_DIR/ferrite"
           cp -r configs                             "$RELEASE_DIR/"
           cp scripts/isdbd.service                  "$RELEASE_DIR/"
           cp README.md                              "$RELEASE_DIR/"
 
-          chmod +x "$RELEASE_DIR/dvb-rs" "$RELEASE_DIR/b25-rs" "$RELEASE_DIR/ferrite"
+          chmod +x "$RELEASE_DIR/dvb-rs" "$RELEASE_DIR/arib-caption" \
+                   "$RELEASE_DIR/b25-rs" "$RELEASE_DIR/ferrite"
 
           echo "ferrite ${TAG} — linux/${{ matrix.arch }}" > "$RELEASE_DIR/VERSION"
           "$RELEASE_DIR/dvb-rs" --version 2>&1 | head -1 >> "$RELEASE_DIR/VERSION" || true
