@@ -12,7 +12,7 @@ func TestPool_ReserveThenRelease(t *testing.T) {
 	ft := &fakeTuner{makeStream: emptyHold}
 	p := newPool(t, 1, ft)
 
-	res, err := p.Reserve(context.Background(), PrioBackground)
+	res, err := p.Reserve(context.Background(), PrioBackground, "")
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestPool_LivePreemptsBackgroundReservation(t *testing.T) {
 	ft := &fakeTuner{makeStream: emptyHold}
 	p := newPool(t, 1, ft)
 
-	res, err := p.Reserve(context.Background(), PrioBackground)
+	res, err := p.Reserve(context.Background(), PrioBackground, "")
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestPool_PreemptTimesOutOnWedgedHolder(t *testing.T) {
 	ft := &fakeTuner{makeStream: emptyHold}
 	p := newPool(t, 1, ft)
 
-	res, err := p.Reserve(context.Background(), PrioBackground)
+	res, err := p.Reserve(context.Background(), PrioBackground, "")
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestPool_BackgroundCannotPreemptRecording(t *testing.T) {
 	}
 	defer rec.Release()
 
-	if _, err := p.Reserve(context.Background(), PrioBackground); !errors.Is(err, ErrNoAdapter) {
+	if _, err := p.Reserve(context.Background(), PrioBackground, ""); !errors.Is(err, ErrNoAdapter) {
 		t.Fatalf("err = %v, want ErrNoAdapter", err)
 	}
 }
@@ -234,7 +234,7 @@ func TestPool_TwoAdaptersNoPreemptionNeeded(t *testing.T) {
 	ft := &fakeTuner{makeStream: emptyHold}
 	p := newPool(t, 2, ft)
 
-	res, err := p.Reserve(context.Background(), PrioBackground)
+	res, err := p.Reserve(context.Background(), PrioBackground, "")
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}

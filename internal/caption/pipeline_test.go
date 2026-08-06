@@ -12,7 +12,8 @@ import (
 // different ends as two cues and draws the line twice.
 func TestWriteSegmentCutsACaptionAtTheSegmentBoundary(t *testing.T) {
 	dir := t.TempDir()
-	p := &Pipeline{Dir: dir}
+	p := &Pipeline{}
+	r := p.Attach(dir, filepath.Join(dir, "stream.m3u8"))
 	// On screen from 1.0s, its end not broadcast yet.
 	p.cues = []Cue{{StartMs: 1_000, EndMs: 31_000, Open: true, Text: "ながいひとつ"}}
 
@@ -28,7 +29,7 @@ func TestWriteSegmentCutsACaptionAtTheSegmentBoundary(t *testing.T) {
 		// with the piece before it, and overlapping nothing.
 		{"sub1.vtt", 2_000, 4_000, "00:00:02.000", "00:00:04.000"},
 	} {
-		if err := p.writeSegment(seg.name, seg.start, seg.end); err != nil {
+		if err := p.writeSegment(r, seg.name, seg.start, seg.end); err != nil {
 			t.Fatalf("writeSegment %s: %v", seg.name, err)
 		}
 		body := read(t, filepath.Join(dir, seg.name))
@@ -46,12 +47,13 @@ func TestWriteSegmentCutsACaptionAtTheSegmentBoundary(t *testing.T) {
 // known, and a caption that ended before the segment does not reach into it.
 func TestWriteSegmentHonoursAClosedEnd(t *testing.T) {
 	dir := t.TempDir()
-	p := &Pipeline{Dir: dir}
+	p := &Pipeline{}
+	r := p.Attach(dir, filepath.Join(dir, "stream.m3u8"))
 	p.cues = []Cue{
 		{StartMs: 1_000, EndMs: 2_500, Text: "みじかい"},
 		{StartMs: 2_500, EndMs: 6_000, Text: "つぎ"},
 	}
-	if err := p.writeSegment("sub1.vtt", 2_000, 4_000); err != nil {
+	if err := p.writeSegment(r, "sub1.vtt", 2_000, 4_000); err != nil {
 		t.Fatal(err)
 	}
 	body := read(t, filepath.Join(dir, "sub1.vtt"))
@@ -63,7 +65,7 @@ func TestWriteSegmentHonoursAClosedEnd(t *testing.T) {
 	}
 
 	// Nothing of the first caption belongs in the segment after it.
-	if err := p.writeSegment("sub2.vtt", 4_000, 6_000); err != nil {
+	if err := p.writeSegment(r, "sub2.vtt", 4_000, 6_000); err != nil {
 		t.Fatal(err)
 	}
 	if body := read(t, filepath.Join(dir, "sub2.vtt")); strings.Contains(body, "みじかい") {

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
+	"sync"
 )
 
 // Channels is the on-disk shape of channels.json — kept in lockstep
@@ -11,6 +13,12 @@ import (
 // interpret the `tuning` map (dvbr is the only consumer of those
 // keys); we just need name + aliases for lookup.
 type Channels struct {
+	// mu guards the two fields below, which a channel scan replaces
+	// wholesale while the daemon is running. Read them through Find or
+	// All; a direct read of the slice is only safe before anything is
+	// serving.
+	mu sync.RWMutex
+
 	Version  int       `json:"version"`
 	Channels []Channel `json:"channels"`
 }
@@ -42,6 +50,8 @@ func LoadChannels(path string) (*Channels, error) {
 // in sync or channel lookup will diverge between the daemon and the
 // tuner CLI.
 func (c *Channels) Find(needle string) *Channel {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	for i := range c.Channels {
 		ch := &c.Channels[i]
 		if ch.Name == needle || ch.LegacyZapSection == needle {
@@ -53,6 +63,43 @@ func (c *Channels) Find(needle string) *Channel {
 			}
 		}
 	}
+	return nil
+}
+
+// All returns the channel list for iteration. The slice is not copied —
+// a scan replaces the whole backing array rather than mutating it, so a
+// range over what this hands back is reading a consistent snapshot even
+// if the file is rewritten underneath.
+func (c *Channels) All() []Channel {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Channels
+}
+
+// Len is All()'s length without materializing anything.
+func (c *Channels) Len() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.Channels)
+}
+
+// ReloadFrom re-reads path and swaps its contents in, so that everything
+// already holding this *Channels sees the new list. A channel scan writes
+// the file from a subprocess, which is the only reason this exists: the
+// daemon's copy is otherwise loaded once at boot.
+//
+// Pointers a caller took from Find stay valid and stay stale — they point
+// into the old backing array, which is not modified. That is the right
+// trade here, since what holds one is a tune in flight and it should
+// finish against the channel it started on.
+func (c *Channels) ReloadFrom(path string) error {
+	next, err := LoadChannels(path)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.Version, c.Channels = next.Version, next.Channels
+	c.mu.Unlock()
 	return nil
 }
 
@@ -118,6 +165,20 @@ func (c *Channel) Frequency() string {
 		return ""
 	}
 	return c.Tuning["FREQUENCY"]
+}
+
+// DeliverySystem returns c's DELIVERY_SYSTEM ("ISDBT", "ISDBS"),
+// upper-cased, or "" when the record does not carry one.
+//
+// "" means *unconstrained*, not terrestrial: the tuner Pool uses this to
+// pick a frontend that can receive the channel, and a record that does not
+// say what it needs must not be locked out of the only adapter there is.
+// Every record dvbr writes has the field; a hand-written one might not.
+func (c *Channel) DeliverySystem() string {
+	if c == nil {
+		return ""
+	}
+	return strings.ToUpper(strings.TrimSpace(c.Tuning["DELIVERY_SYSTEM"]))
 }
 
 // ServiceID returns the parsed SERVICE_ID for c, or 0 if absent /

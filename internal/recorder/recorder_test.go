@@ -35,7 +35,7 @@ func setup(t *testing.T, ft *fakeTuner) (*Runner, *store.Store) {
 			{Name: "mx", Tuning: map[string]string{"SERVICE_ID": "23608"}},
 		},
 	}
-	pool := tuner.NewPool(ft, channels, []int{0}, 4)
+	pool := tuner.NewPool(ft, channels, config.ISDBTAdapters(0), 4)
 
 	r := &Runner{
 		Tuners:         pool,

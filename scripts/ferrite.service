@@ -24,6 +24,25 @@ RestartSec=5
 # (StopAllAndWait 5s, then the HTTP server 5s). Give it room, or a row
 # stays stuck in state 'recording'.
 TimeoutStopSec=20
+# A tmpfs for live HLS. systemd creates the directory and exports
+# $RUNTIME_DIRECTORY pointing at it (/run/user/<uid>/ferrite for a user
+# unit), which is what `hls_root = "$RUNTIME_DIRECTORY/hls"` in isdbd.toml
+# resolves to — so no uid is written down anywhere. Live segments are a
+# rolling write-and-delete of ~65 GB a day at 6 Mbit/s, and having that
+# share a disk with a recording's sequential write helps neither.
+#
+# There is no per-unit size cap to set here: `RuntimeDirectorySize=` is a
+# *logind* setting that sizes the whole of /run/user/<uid> (default 10% of
+# RAM), not a unit directive — systemd 255 parses it in a unit only to log
+# "Unknown key name" and carry on. So the bound is that tmpfs, and lowering
+# it means logind.conf, for every service of this user at once.
+#
+# Which is acceptable because the usage is bounded by construction rather
+# than by the filesystem: `-hls_flags delete_segments` with
+# `-hls_list_size 12` keeps thirteen 1s segments — about 10 MB per channel
+# per quality — and the idle janitor closes a session nobody has touched
+# for 60s. Measured with one 720p session running: 4.3 MB.
+RuntimeDirectory=ferrite
 # pcscd is socket-activated system-wide; b25-rs connecting to the reader
 # starts it. Nothing to declare from a user unit.
 

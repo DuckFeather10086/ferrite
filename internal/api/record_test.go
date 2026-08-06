@@ -81,7 +81,7 @@ func newRecordRouter(t *testing.T) (http.Handler, *store.Store, *recorder.Manage
 			{Name: "nhk", Tuning: map[string]string{"SERVICE_ID": "1024"}},
 		},
 	}
-	pool := tuner.NewPool(fakeTuner{}, channels, []int{0}, 4)
+	pool := tuner.NewPool(fakeTuner{}, channels, config.ISDBTAdapters(0), 4)
 	mgr := &recorder.Manager{Runner: &recorder.Runner{
 		Tuners:         pool,
 		Store:          st,

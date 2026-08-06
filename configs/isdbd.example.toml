@@ -1,6 +1,24 @@
 http_port = 8010
 storage_root = "/var/lib/isdbd"
+
+# The adapters this daemon owns. One terrestrial frontend:
 adapters = [0]
+#
+# Or, naming what each frontend can tune — use this form on a mixed card
+# (a PT3 is 2×T + 2×S on one board). Without it every adapter is assumed
+# terrestrial, and a BS channel gets dispatched to a frontend that cannot
+# receive it: no error, just the frontend lock timing out and the failure
+# arriving as "weak signal", which is a long way from the truth.
+#
+# The names are channels.json's DELIVERY_SYSTEM values. Set one form or
+# the other, not both.
+#   [[adapter]]
+#   n       = 0
+#   systems = ["ISDBT"]
+#
+#   [[adapter]]
+#   n       = 1
+#   systems = ["ISDBS"]
 
 # dvbr is built into the parent virtual workspace's target/, not dvbr/target/.
 dvbr_bin     = "/home/duckfeather/code/isdb-workspace/target/release/dvb-rs"
@@ -9,6 +27,29 @@ ffmpeg_bin   = "ffmpeg"
 ffprobe_bin  = "ffprobe"
 
 channels_file = "channels.json"
+
+# Where live HLS writes its segments and playlists. Unset keeps them under
+# storage_root/hls.
+#
+# Worth moving because of write volume, not latency: a live session is a
+# rolling write-and-delete of the last dozen segments, which at 6 Mbit/s is
+# on the order of 65 GB a day, on the same disk a recording is streaming to.
+# A tmpfs takes all of it off the SSD. (Latency comes from the segment
+# length — see -hls_time in internal/hls — not from the filesystem.)
+#
+# $VARs are expanded. Both unit files in scripts/ declare
+# `RuntimeDirectory=ferrite`, which makes systemd create the tmpfs *and*
+# export $RUNTIME_DIRECTORY pointing at it, so this line is the same for a
+# system unit (/run/ferrite) and a user one (/run/user/{uid}/ferrite) and no
+# uid is written down. Started by hand outside systemd the variable is
+# absent, and this falls back to storage_root with a warning rather than
+# writing to /hls.
+#
+# If you point it somewhere else, keep the tmpfs size-capped:
+# RuntimeDirectorySize=512M in the unit. An uncapped tmpfs may grow to half
+# of physical memory, which on a box doing VAAPI transcodes is memory the
+# iGPU wanted.
+#   hls_root = "$RUNTIME_DIRECTORY/hls"
 
 # Live A/V sync: probe first audio+video PTS and delay audio by their
 # difference (ISDB skew). Auto-enabled when ffprobe_bin is set.
@@ -21,6 +62,60 @@ epg_cron = "0 */6 * * *"
 # pass collects the EIT of every service in the transport stream it tuned, so
 # a second channel on the same frequency is skipped as already covered.
 epg_channels = ["TOKYO MX1", "asahi", "TBS1", "tvk1", "NHK_G", "NTV", "FUJI"]
+
+# ── Live picture quality ────────────────────────────────────────────────
+#
+# The tiers a viewer can pick between. Leave the section out and there is
+# one, the built-in encode: deinterlace, square pixels, H.264 6 Mbit/s.
+#
+# On demand, one at a time — not ABR. A viewer chooses a tier, the daemon
+# runs one encode for it, and everyone watching that channel at that tier
+# shares it. Offering all of them in one manifest for the player to switch
+# between would mean standing up every tier for every viewer: two or three
+# simultaneous H.264 encodes of the same picture, on a box whose encoder is
+# an N100's iGPU, to serve a switch nobody on a LAN needs.
+#
+# All tiers of a channel come off one tune and one lease, and share one
+# caption decode. A second tier costs an ffmpeg, not an adapter.
+#
+#   [live]
+#   # Shared by every tier — a hardware decode is set up once for the
+#   # machine, not once per bitrate.
+#   input_args = ["-hwaccel", "vaapi",
+#                 "-hwaccel_device", "/dev/dri/renderD128",
+#                 "-hwaccel_output_format", "vaapi"]
+#
+#   # The table key is what appears in URLs and on disk. `order` sorts them
+#   # and picks the default (lowest first).
+#   [live.quality.1080p]
+#   order       = 1
+#   label       = "1080p"
+#   bandwidth   = 6500000
+#   output_args = ["-vf", "yadif=0,scale=trunc(iw*sar/2)*2:ih,setsar=1",
+#                  "-c:v", "libx264", "-preset", "superfast", "-tune", "zerolatency",
+#                  "-b:v", "6M", "-maxrate", "7M", "-bufsize", "12M",
+#                  "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k"]
+#
+#   [live.quality.720p]
+#   order       = 2
+#   label       = "720p"
+#   bandwidth   = 3000000
+#   output_args = ["-vf", "yadif=0,scale=1280:720,setsar=1",
+#                  "-c:v", "libx264", "-preset", "superfast", "-tune", "zerolatency",
+#                  "-b:v", "2.5M", "-maxrate", "3M", "-bufsize", "6M",
+#                  "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k"]
+#
+# Two things not to put in output_args. `-g`: the keyframe interval is
+# computed from the segment length, because every HLS segment has to begin
+# with an IDR frame. And anything about the SAR other than normalizing it —
+# ISDB-T HD is 1440x1080 with non-square pixels and hls.js does not honour
+# the SAR in the H.264 VUI, so a tier that scales to a fixed size must set
+# setsar=1 and pick a size that is already the right shape.
+#
+# A tier with no output_args gets the built-in *software* chain (yadif +
+# libx264). That is the wrong thing to leave empty if input_args set up a
+# hardware decode: the frames arrive as VAAPI surfaces and yadif cannot
+# read them. Either name a filter chain per tier, or leave input_args out.
 
 # ── After a recording finishes ──────────────────────────────────────────
 #
@@ -48,9 +143,17 @@ enable = false
 #   input_args  = ["-hwaccel", "vaapi",
 #                  "-hwaccel_device", "/dev/dri/renderD128",
 #                  "-hwaccel_output_format", "vaapi"]
-#   output_args = ["-vf", "deinterlace_vaapi,scale_vaapi=w=1920:h=1080",
+#   output_args = ["-vf", "deinterlace_vaapi,scale_vaapi=w=trunc(iw*sar/2)*2:h=ih,setsar=1",
 #                  "-c:v", "h264_vaapi", "-b:v", "6M",
 #                  "-c:a", "aac", "-b:a", "192k"]
+#
+# Whatever encoder you name, scale the width by the source's SAR and set the
+# output's to 1 — do not hardcode 1920x1080. ISDB-T codes HD as 1440x1080 with
+# non-square pixels (SAR 4:3 → DAR 16:9), and browsers do not reliably honour
+# the SAR in the H.264 VUI, so it has to be baked into the geometry. A fixed
+# 1920x1080 gets HD right by coincidence (1440 × 4/3 is 1920) and stretches
+# every 4:3 SD subchannel into a 16:9 frame. `trunc(iw*sar/2)*2` is right for
+# both, and rounds to an even width because H.264 needs one.
 #
 # Raspberry Pi 4: h264_v4l2m2m. Raspberry Pi 5 has no hardware H.264 encoder
 # at all — leave these empty and expect roughly realtime.

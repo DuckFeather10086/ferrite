@@ -19,11 +19,17 @@ import (
 // fakeTuner returns a stream of constant chunks until ctx cancels.
 type fakeTuner struct {
 	makeStream func(ctx context.Context) tuner.TsStream
+	tunes      atomic.Int64
 }
 
 func (f *fakeTuner) Tune(ctx context.Context, _ int, _ string) (tuner.TsStream, error) {
+	f.tunes.Add(1)
 	return f.makeStream(ctx), nil
 }
+
+// tuneCount is how many times the frontend was actually tuned — the
+// number that says whether tiers are sharing a tune or fighting for one.
+func (f *fakeTuner) tuneCount() int64 { return f.tunes.Load() }
 
 type holdStream struct {
 	ctx   context.Context
@@ -79,7 +85,7 @@ func newPool(t *testing.T, ft *fakeTuner) *tuner.Pool {
 			{Name: "nhk", Tuning: map[string]string{"SERVICE_ID": "1024"}},
 		},
 	}
-	return tuner.NewPool(ft, channels, []int{0}, 4)
+	return tuner.NewPool(ft, channels, config.ISDBTAdapters(0), 4)
 }
 
 // writeFakeFFmpeg drops a shell-script fake-ffmpeg into dir and
@@ -118,7 +124,7 @@ func TestManager_OpenCreatesPlaylist(t *testing.T) {
 		OutputRoot: t.TempDir(),
 		FFmpegBin:  writeFakeFFmpeg(t),
 	}
-	s, err := m.Open(context.Background(), "mx")
+	s, err := m.Open(context.Background(), "mx", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,11 +154,11 @@ func TestManager_OpenSecondTimeReturnsSameSession(t *testing.T) {
 		OutputRoot: t.TempDir(),
 		FFmpegBin:  writeFakeFFmpeg(t),
 	}
-	s1, err := m.Open(context.Background(), "mx")
+	s1, err := m.Open(context.Background(), "mx", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	s2, err := m.Open(context.Background(), "mx")
+	s2, err := m.Open(context.Background(), "mx", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,11 +177,11 @@ func TestManager_TouchUpdatesLastSeen(t *testing.T) {
 		OutputRoot: t.TempDir(),
 		FFmpegBin:  writeFakeFFmpeg(t),
 	}
-	s, _ := m.Open(context.Background(), "mx")
+	s, _ := m.Open(context.Background(), "mx", "")
 	defer m.Close("mx")
 	before := s.lastSeen
 	time.Sleep(50 * time.Millisecond)
-	if m.Touch("mx") == nil {
+	if m.Touch("mx", "") == nil {
 		t.Fatal("Touch returned nil for existing session")
 	}
 	if !s.lastSeen.After(before) {
@@ -191,7 +197,7 @@ func TestManager_TouchReturnsNilForUnknownChannel(t *testing.T) {
 		OutputRoot: t.TempDir(),
 		FFmpegBin:  writeFakeFFmpeg(t),
 	}
-	if m.Touch("ghost") != nil {
+	if m.Touch("ghost", "") != nil {
 		t.Fatal("expected nil for unknown channel")
 	}
 }
@@ -210,7 +216,7 @@ func TestManager_JanitorClosesIdleSessions(t *testing.T) {
 	defer cancel()
 	go m.Run(ctx)
 
-	s, err := m.Open(context.Background(), "mx")
+	s, err := m.Open(context.Background(), "mx", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +226,7 @@ func TestManager_JanitorClosesIdleSessions(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		m.mu.Lock()
-		_, exists := m.sessions["mx"]
+		_, exists := m.sessions[sessionKey{channel: "mx", quality: DefaultQualityName}]
 		m.mu.Unlock()
 		if !exists {
 			return
@@ -284,7 +290,7 @@ func TestManager_AcquireFailurePropagates(t *testing.T) {
 		OutputRoot: t.TempDir(),
 		FFmpegBin:  writeFakeFFmpeg(t),
 	}
-	_, err := m.Open(context.Background(), "mx")
+	_, err := m.Open(context.Background(), "mx", "")
 	if err == nil {
 		t.Fatal("expected acquire error")
 	}

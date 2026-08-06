@@ -19,6 +19,8 @@
 //	DELETE /api/recordings/{id}         delete a recording and its file
 //	POST /api/record                    start recording now
 //	POST /api/record/{id}/stop          stop an in-progress recording
+//	GET  /api/scan                      is a channel scan running?
+//	POST /api/scan                      sweep the band (SSE progress)
 //	GET  /stream.m3u8                   live HLS, whatever is tuned
 //	GET  /api/live/{channel}.m3u8       live HLS playlist for one channel
 //	GET  /api/live/{channel}/{seg}.ts   live HLS segment
@@ -52,6 +54,7 @@ import (
 	"github.com/DuckFeather10086/ferrite/internal/netaddr"
 	"github.com/DuckFeather10086/ferrite/internal/postprocess"
 	"github.com/DuckFeather10086/ferrite/internal/recorder"
+	"github.com/DuckFeather10086/ferrite/internal/scan"
 	"github.com/DuckFeather10086/ferrite/internal/store"
 	"github.com/DuckFeather10086/ferrite/internal/tuner"
 )
@@ -96,6 +99,12 @@ type Deps struct {
 	// served for all non-/api routes with an index.html SPA fallback;
 	// nil disables UI serving (tests, headless deployments).
 	Web fs.FS
+	// Scanner sweeps the band for channels. Nil disables /api/scan.
+	Scanner *scan.Runner
+	// ChannelsFile is where the scan writes, and where Channels is
+	// re-read from afterwards. Empty means a scan's results only reach
+	// the daemon on the next restart.
+	ChannelsFile string
 }
 
 // NewRouter returns an http.Handler with all endpoints wired.
@@ -145,12 +154,21 @@ func NewRouter(d Deps) http.Handler {
 		r.Post("/record", d.handleRecordNow)
 		r.Post("/record/{id}/stop", d.handleRecordStop)
 
+		r.Get("/scan", d.handleScanStatus)
+		r.Post("/scan", d.handleScan)
+
 		r.Get("/av-offsets", d.handleListAVOffsets)
 		r.Delete("/av-offsets/{channel}", d.handleForgetAVOffset)
 
+		// The quality is a path segment rather than a query parameter
+		// because it is a directory on disk and a directory in the URL:
+		// ffmpeg writes {channel}/{quality}/streamN.ts, and a relative
+		// segment URI in the media playlist has to resolve beside it.
+		// Only the master playlist takes ?q=, because that is the one URL
+		// a person or a bookmark types.
 		r.Get("/live/{channel}.m3u8", d.handleLivePlaylist)
-		r.Get("/live/{channel}/"+videoPlaylistName, d.handleLiveVideoPlaylist)
-		r.Get("/live/{channel}/{segment}", d.handleLiveSegment)
+		r.Get("/live/{channel}/{quality}/"+videoPlaylistName, d.handleLiveVideoPlaylist)
+		r.Get("/live/{channel}/{quality}/{segment}", d.handleLiveSegment)
 		r.Post("/live/{channel}/stop", d.handleLiveStop)
 		r.Post("/live/{channel}/switch", d.handleLiveSwitch)
 	})
@@ -255,6 +273,12 @@ func (d Deps) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if d.Tuners != nil {
 		resp["adapters"] = d.Tuners.Status()
 	}
+	if d.HLS != nil {
+		// The live quality tiers on offer, first one the default. Reported
+		// here rather than on an endpoint of its own because the player
+		// already fetches this, and the list is fixed at startup.
+		resp["live_qualities"] = d.HLS.QualityList()
+	}
 	if d.Recorder != nil {
 		// Ad-hoc recordings only; scheduled ones are in /api/recordings.
 		resp["recording"] = d.Recorder.Active()
@@ -277,9 +301,10 @@ func (d Deps) handleChannels(w http.ResponseWriter, r *http.Request) {
 		Aliases     []string `json:"aliases,omitempty"`
 		ServiceID   uint16   `json:"service_id"`
 	}
-	rows := make([]out, 0, len(d.Channels.Channels))
-	for i := range d.Channels.Channels {
-		c := &d.Channels.Channels[i]
+	all := d.Channels.All()
+	rows := make([]out, 0, len(all))
+	for i := range all {
+		c := &all[i]
 		rows = append(rows, out{
 			Name:        c.Name,
 			DisplayName: c.DisplayName(),
@@ -579,7 +604,7 @@ func (d Deps) handleLivePlaylist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	channel := chi.URLParam(r, "channel")
-	s, err := d.HLS.Open(r.Context(), channel)
+	s, err := d.HLS.Open(r.Context(), channel, requestedQuality(r))
 	if err != nil {
 		writeTunerErr(w, err)
 		return
@@ -593,7 +618,7 @@ func (d Deps) handleLivePlaylist(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusGatewayTimeout, "stream did not start: "+err.Error())
 		return
 	}
-	writePlaylist(w, masterPlaylist(s.Channel, "", subsAnnounced(r.Context(), s)))
+	writePlaylist(w, masterPlaylist(s, d.qualityOf(s), "", subsAnnounced(r.Context(), s)))
 }
 
 // handleLiveVideoPlaylist serves the media playlist the master points at.
@@ -613,7 +638,7 @@ func (d Deps) handleLiveVideoPlaylist(w http.ResponseWriter, r *http.Request) {
 	// Touch, not Open: a player only learns this URL from a master playlist,
 	// which means the session already exists. Opening here would let a stale
 	// player re-tune a channel nobody asked for.
-	s := d.HLS.Touch(channel)
+	s := d.HLS.Touch(channel, chi.URLParam(r, "quality"))
 	if s == nil {
 		http.NotFound(w, r)
 		return
@@ -656,7 +681,7 @@ func (d Deps) handleLiveSegment(w http.ResponseWriter, r *http.Request) {
 	// pulled; Open is unnecessary here because a viewer that's
 	// requesting segments must have already hit .m3u8 to learn their
 	// names. If they bypass that, return 404 rather than auto-tuning.
-	s := d.HLS.Touch(channel)
+	s := d.HLS.Touch(channel, chi.URLParam(r, "quality"))
 	if s == nil {
 		http.NotFound(w, r)
 		return
@@ -711,8 +736,9 @@ func (d Deps) handleLiveSwitch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	quality := requestedQuality(r)
 	closed := d.HLS.CloseOthers(channel)
-	s, err := d.HLS.Open(r.Context(), channel)
+	s, err := d.HLS.Open(r.Context(), channel, quality)
 	if errors.Is(err, tuner.ErrNoAdapter) {
 		// Between closing the others and claiming the adapter, something can
 		// take it back: a player still polling the channel it was watching
@@ -725,7 +751,7 @@ func (d Deps) handleLiveSwitch(w http.ResponseWriter, r *http.Request) {
 			slog.Info("live: adapter was taken back mid-switch; closing and retrying",
 				"channel", channel, "closed", again)
 			closed = append(closed, again...)
-			s, err = d.HLS.Open(r.Context(), channel)
+			s, err = d.HLS.Open(r.Context(), channel, quality)
 		}
 	}
 	if err != nil {
@@ -738,11 +764,12 @@ func (d Deps) handleLiveSwitch(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"channel": s.Channel,
+		"quality": s.Quality,
 		// Both URLs now serve this channel. "stream" is the one to hand a
 		// player: it is stable across channel changes. "playlist" addresses
 		// this channel specifically, which is what the web UI's <video> needs.
 		"stream":   StreamPath,
-		"playlist": "/" + livePrefix + url.PathEscape(s.Channel) + ".m3u8",
+		"playlist": livePlaylistPath(s),
 		"closed":   closed,
 	})
 }
@@ -767,18 +794,51 @@ func (d Deps) handleStreamM3U8(w http.ResponseWriter, r *http.Request) {
 	// A viewer that only polls this URL never touches
 	// /api/live/{channel}.m3u8, so without this the idle janitor would
 	// close the session under a player that is actively watching it.
-	d.HLS.Touch(s.Channel)
+	d.HLS.Touch(s.Channel, s.Quality)
 
 	if _, err := os.Stat(s.PlaylistPath); err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "stream not started yet")
 		return
 	}
-	writePlaylist(w, masterPlaylist(s.Channel, livePrefix, subsAnnounced(r.Context(), s)))
+	writePlaylist(w, masterPlaylist(s, d.qualityOf(s), livePrefix, subsAnnounced(r.Context(), s)))
 }
 
-// videoPlaylistName is where a channel's media playlist is served, under the
-// channel's own path so its segment URIs resolve beside it.
+// videoPlaylistName is where a tier's media playlist is served, under the
+// tier's own path so its segment URIs resolve beside it.
 const videoPlaylistName = "video.m3u8"
+
+// qualityParam is how the one URL a person types asks for a tier:
+// /api/live/NHK_G.m3u8?q=720p. Everything below the master playlist takes
+// it as a path segment instead — those URLs are ours to write, and a
+// relative segment URI has to resolve inside the tier's directory.
+const qualityParam = "q"
+
+// requestedQuality reads the tier out of a request. Empty is normal and
+// means "whatever the default is"; an unknown name is treated the same
+// way rather than refused, because the alternative is a stale bookmark
+// getting an error page instead of television.
+func requestedQuality(r *http.Request) string {
+	return r.URL.Query().Get(qualityParam)
+}
+
+// qualityOf is the tier a session is running, as the manifest needs to
+// describe it.
+func (d Deps) qualityOf(s *hls.Session) hls.QualityInfo {
+	if d.HLS != nil {
+		for _, q := range d.HLS.QualityList() {
+			if q.Name == s.Quality {
+				return q
+			}
+		}
+	}
+	return hls.QualityInfo{Name: s.Quality, Label: s.Quality, Bandwidth: 6_500_000}
+}
+
+// livePlaylistPath is the master playlist URL for a session, tier and all.
+func livePlaylistPath(s *hls.Session) string {
+	return "/" + livePrefix + url.PathEscape(s.Channel) + ".m3u8?" +
+		qualityParam + "=" + url.QueryEscape(s.Quality)
+}
 
 // masterPlaylist composes the multivariant playlist: the video rendition, and
 // the WebVTT subtitle rendition when internal/caption has produced one.
@@ -792,8 +852,8 @@ const videoPlaylistName = "video.m3u8"
 // Both URLs carry the captions on purpose: Safari and iOS play HLS natively and
 // pick up a subtitle rendition from the manifest, so a bookmark on an iPad
 // gets captions without anything of ours running in the browser.
-func masterPlaylist(channel, prefix string, withSubs bool) []byte {
-	base := prefix + url.PathEscape(channel) + "/"
+func masterPlaylist(s *hls.Session, q hls.QualityInfo, prefix string, withSubs bool) []byte {
+	base := prefix + url.PathEscape(s.Channel) + "/" + url.PathEscape(s.Quality) + "/"
 	var b bytes.Buffer
 	b.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n")
 	if withSubs {
@@ -804,7 +864,13 @@ func masterPlaylist(channel, prefix string, withSubs bool) []byte {
 			"subs", "日本語", "ja", base+caption.SubsPlaylist)
 	}
 	// The bitrate and codecs the HLS session encodes to (see internal/hls).
-	b.WriteString(`#EXT-X-STREAM-INF:BANDWIDTH=6500000,CODECS="avc1.640028,mp4a.40.2"`)
+	//
+	// One variant, always: this is a tier the viewer chose, not a ladder
+	// for the player to climb. Listing the others would make a player
+	// switch away from the choice — and standing them all up to be
+	// switchable is several simultaneous encodes of the same picture,
+	// which is what the on-demand design exists to avoid.
+	fmt.Fprintf(&b, `#EXT-X-STREAM-INF:BANDWIDTH=%d,CODECS="avc1.640028,mp4a.40.2"`, q.Bandwidth)
 	if withSubs {
 		b.WriteString(`,SUBTITLES="subs"`)
 	}
@@ -923,14 +989,23 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 }
 
 // writeTunerErr maps a tune failure onto a status code: a busy tuner is
-// 409 (the caller can stop something and retry), anything else is a
-// real fault worth surfacing as 502.
+// 409 (the caller can stop something and retry), a channel this box has no
+// frontend for is 501, and anything else is a real fault worth surfacing
+// as 502.
+//
+// The 501 is worth its own code rather than folding into the 409. "Tuner
+// busy" invites a retry, and a client that retries a BS channel on a
+// terrestrial-only box will do so forever; "not implemented" says the
+// hardware is missing, which is the actual repair.
 func writeTunerErr(w http.ResponseWriter, err error) {
-	if errors.Is(err, tuner.ErrNoAdapter) {
+	switch {
+	case errors.Is(err, tuner.ErrNoCapableAdapter):
+		writeErr(w, http.StatusNotImplemented, err.Error())
+	case errors.Is(err, tuner.ErrNoAdapter):
 		writeErr(w, http.StatusConflict, err.Error())
-		return
+	default:
+		writeErr(w, http.StatusBadGateway, err.Error())
 	}
-	writeErr(w, http.StatusBadGateway, err.Error())
 }
 
 func slogRequestLogger(next http.Handler) http.Handler {

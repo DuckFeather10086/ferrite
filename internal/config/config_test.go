@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -91,17 +92,133 @@ channels_file = "`+channelsPath+`"
 	}
 }
 
-func TestLoad_RejectsMissingChannelsFile(t *testing.T) {
+func TestLoad_RequiresChannelsFilePath(t *testing.T) {
 	dir := t.TempDir()
 	tomlPath := filepath.Join(dir, "isdbd.toml")
 	mustWrite(t, tomlPath, `
 http_port = 8010
 storage_root = "`+dir+`/var"
-channels_file = "/does/not/exist.json"
 `)
 	_, err := Load(tomlPath)
 	if err == nil || !strings.Contains(err.Error(), "channels_file") {
 		t.Fatalf("expected channels_file error, got %v", err)
+	}
+}
+
+// But a path to a file that does not exist yet must load. A fresh install
+// has no channel list and produces one by scanning at first start; failing
+// here would make the only way to get the file be to already have it.
+func TestLoad_AllowsAChannelsFileThatIsNotThereYet(t *testing.T) {
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "isdbd.toml")
+	mustWrite(t, tomlPath, `
+http_port = 8010
+storage_root = "`+dir+`/var"
+channels_file = "`+dir+`/not-scanned-yet.json"
+`)
+	if _, err := Load(tomlPath); err != nil {
+		t.Fatalf("a missing channels.json must not block startup: %v", err)
+	}
+}
+
+// The bare `adapters = [0]` form has to keep meaning what it always did,
+// and the `[[adapter]]` form has to be the only other way of saying it.
+func TestAdapterList(t *testing.T) {
+	dir := t.TempDir()
+	channelsPath := filepath.Join(dir, "channels.json")
+	mustWrite(t, channelsPath, `{"version":1,"channels":[]}`)
+	base := "http_port = 8010\nstorage_root = \"" + dir + "/var\"\nchannels_file = \"" + channelsPath + "\"\n"
+
+	load := func(t *testing.T, body string) (*Daemon, error) {
+		t.Helper()
+		p := filepath.Join(dir, strings.ReplaceAll(t.Name(), "/", "_")+".toml")
+		mustWrite(t, p, base+body)
+		return Load(p)
+	}
+
+	t.Run("legacy list is terrestrial", func(t *testing.T) {
+		d, err := load(t, "adapters = [0, 2]\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []Adapter{{N: 0, Systems: []string{"ISDBT"}}, {N: 2, Systems: []string{"ISDBT"}}}
+		if got := d.AdapterList(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("table form, case normalized", func(t *testing.T) {
+		d, err := load(t, "[[adapter]]\nn = 0\nsystems = [\"isdbt\"]\n\n[[adapter]]\nn = 1\nsystems = [\"ISDBS\"]\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []Adapter{{N: 0, Systems: []string{"ISDBT"}}, {N: 1, Systems: []string{"ISDBS"}}}
+		if got := d.AdapterList(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %+v, want %+v", got, want)
+		}
+		// Defaults() seeds Adapters with [0]; writing only [[adapter]] must
+		// not leave that behind as a phantom third frontend.
+		if len(d.Adapters) != 0 {
+			t.Fatalf("legacy list should be cleared, got %v", d.Adapters)
+		}
+	})
+
+	t.Run("table form without systems is terrestrial", func(t *testing.T) {
+		d, err := load(t, "[[adapter]]\nn = 3\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []Adapter{{N: 3, Systems: []string{"ISDBT"}}}
+		if got := d.AdapterList(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("both forms is a mistake worth failing on", func(t *testing.T) {
+		_, err := load(t, "adapters = [0]\n\n[[adapter]]\nn = 1\nsystems = [\"ISDBS\"]\n")
+		if err == nil || !strings.Contains(err.Error(), "not both") {
+			t.Fatalf("expected an either/or error, got %v", err)
+		}
+	})
+}
+
+// The three ways hls_root resolves. The unset-variable case is the one that
+// matters: `hls_root = "$RUNTIME_DIRECTORY/hls"` is the config this repo
+// ships, and outside systemd os.ExpandEnv alone would silently turn it into
+// the absolute path "/hls".
+func TestLiveRoot(t *testing.T) {
+	dir := t.TempDir()
+	d := &Daemon{StorageRoot: filepath.Join(dir, "var")}
+
+	got, err := d.LiveRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "var", "hls"); got != want {
+		t.Errorf("unset hls_root: got %q, want %q", got, want)
+	}
+
+	runtimeDir := filepath.Join(dir, "run")
+	t.Setenv("FERRITE_TEST_RUNTIME_DIR", runtimeDir)
+	d.HLSRoot = "$FERRITE_TEST_RUNTIME_DIR/hls"
+	got, err = d.LiveRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(runtimeDir, "hls"); got != want {
+		t.Errorf("expanded hls_root: got %q, want %q", got, want)
+	}
+	if st, err := os.Stat(got); err != nil || !st.IsDir() {
+		t.Errorf("LiveRoot should create the directory: %v", err)
+	}
+
+	d.HLSRoot = "$FERRITE_TEST_UNSET_RUNTIME_DIR/hls"
+	got, err = d.LiveRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "var", "hls"); got != want {
+		t.Errorf("unset variable should fall back to storage_root: got %q, want %q", got, want)
 	}
 }
 

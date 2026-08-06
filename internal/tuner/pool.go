@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +19,14 @@ import (
 // ties) the incoming claim. Callers should surface this as "tuner
 // busy", not as a hardware failure.
 var ErrNoAdapter = errors.New("tuner: no adapter available")
+
+// ErrNoCapableAdapter means no adapter in the pool can receive the
+// channel's delivery system at all — a BS channel on a terrestrial-only
+// box. Distinct from ErrNoAdapter on purpose: that one is "come back in a
+// minute", this one will never succeed, and conflating them turns a
+// missing tuner into an unexplained lock timeout reported as a weak
+// signal.
+var ErrNoCapableAdapter = errors.New("tuner: no adapter supports this delivery system")
 
 // preemptTimeout bounds how long a preemptor waits for the evicted
 // holder to actually let go. A killed `dvbr` child is reaped in well
@@ -86,18 +96,24 @@ type Pool struct {
 
 // NewPool builds a Pool over the given adapters. bufChunks bounds
 // each subscriber's queue; a sensible default is 8 (≈ 768 KiB).
-func NewPool(cli Tuner, channels *config.Channels, adapters []int, bufChunks int) *Pool {
+//
+// Each adapter carries the delivery systems its frontend can tune (see
+// config.Adapter); a claim is only ever offered adapters that can receive
+// the channel it names. On a uniform terrestrial box — every adapter
+// ["ISDBT"], every channel ISDBT — that filter passes everything and the
+// selection is exactly what it was before.
+func NewPool(cli Tuner, channels *config.Channels, adapters []config.Adapter, bufChunks int) *Pool {
 	if bufChunks < 1 {
 		bufChunks = 8
 	}
 	slots := make(map[int]*adapterSlot, len(adapters))
 	order := make([]int, 0, len(adapters))
 	for _, a := range adapters {
-		if _, dup := slots[a]; dup {
+		if _, dup := slots[a.N]; dup {
 			continue
 		}
-		slots[a] = &adapterSlot{adapter: a}
-		order = append(order, a)
+		slots[a.N] = &adapterSlot{adapter: a.N, systems: a.Systems}
+		order = append(order, a.N)
 	}
 	sort.Ints(order)
 	return &Pool{
@@ -118,13 +134,33 @@ func NewPool(cli Tuner, channels *config.Channels, adapters []int, bufChunks int
 // visible to same-channel sharing: a second viewer arriving mid-tune
 // should join that tune, not be told the tuner is busy.
 type adapterSlot struct {
-	adapter  int
+	adapter int
+	// systems is what this frontend can tune, upper-cased. Empty means
+	// unknown, which is read as "anything" — a pool built without
+	// capability information has to keep behaving as it did.
+	systems  []string
 	session  *tuneSession
 	reserved *Reservation
 	claimed  bool
 }
 
 func (s *adapterSlot) free() bool { return s.session == nil && s.reserved == nil }
+
+// supports reports whether this adapter can receive system. An empty
+// system (a channel that does not say) or an unlabelled adapter matches
+// everything: the filter exists to keep a BS channel off a terrestrial
+// frontend, not to make an under-described setup unusable.
+func (s *adapterSlot) supports(system string) bool {
+	if system == "" || len(s.systems) == 0 {
+		return true
+	}
+	for _, have := range s.systems {
+		if have == system {
+			return true
+		}
+	}
+	return false
+}
 
 // prio reports the effective priority of the slot's current holder.
 // Caller must hold Pool.mu.
@@ -284,6 +320,10 @@ func (p *Pool) AcquireAt(ctx context.Context, channel string, prio Priority) (*L
 		return nil, fmt.Errorf("tuner: channel %q not found", channel)
 	}
 	canonical := ch.Name
+	// What kind of frontend this channel needs. Applied below to idle
+	// selection and to preemption, but *not* to same-channel sharing: an
+	// adapter already tuned to it has settled the question.
+	system := ch.DeliverySystem()
 
 	p.mu.Lock()
 	// 1. Same-channel share: any adapter already on it gets reused,
@@ -303,10 +343,15 @@ func (p *Pool) AcquireAt(ctx context.Context, channel string, prio Priority) (*L
 		}
 	}
 
-	// 2. Idle adapter, else 3. evict a lower-priority holder.
-	pick := p.idleSlotLocked()
+	// 2. Idle adapter, else 3. evict a lower-priority holder — considering
+	//    only adapters that can receive this channel.
+	if !p.capableLocked(system) {
+		p.mu.Unlock()
+		return nil, p.noCapableAdapter(strconv.Quote(canonical), system)
+	}
+	pick := p.idleSlotLocked(system)
 	if pick == nil {
-		victim := p.victimLocked(prio)
+		victim := p.victimLocked(prio, system)
 		if victim == nil {
 			p.mu.Unlock()
 			return nil, ErrNoAdapter
@@ -398,11 +443,23 @@ func (p *Pool) AcquireAt(ctx context.Context, channel string, prio Priority) (*L
 // Reserve claims an adapter without tuning it, for a caller that drives
 // the hardware out-of-process. Evicts a strictly lower-priority holder
 // if no adapter is idle. Release when done.
-func (p *Pool) Reserve(ctx context.Context, prio Priority) (*Reservation, error) {
+//
+// system names the delivery system the caller is going to tune ("ISDBT",
+// "ISDBS"); "" takes whatever is free. It has to be passed in rather than
+// derived, because the point of a Reservation is that the caller — a
+// `dvbr epg` pass, a blind frequency scan — does its own tuning, and the
+// Pool cannot see what for. Handing back an adapter that cannot receive
+// what the caller is about to ask of it is the failure this exists to
+// prevent, and out-of-process it is the least debuggable version of it.
+func (p *Pool) Reserve(ctx context.Context, prio Priority, system string) (*Reservation, error) {
 	p.mu.Lock()
-	pick := p.idleSlotLocked()
+	if !p.capableLocked(system) {
+		p.mu.Unlock()
+		return nil, p.noCapableAdapter("this reservation", system)
+	}
+	pick := p.idleSlotLocked(system)
 	if pick == nil {
-		victim := p.victimLocked(prio)
+		victim := p.victimLocked(prio, system)
 		if victim == nil {
 			p.mu.Unlock()
 			return nil, ErrNoAdapter
@@ -436,24 +493,30 @@ func (p *Pool) Reserve(ctx context.Context, prio Priority) (*Reservation, error)
 	return res, nil
 }
 
-// idleSlotLocked returns the lowest-numbered unused, untransitioning
-// slot. Caller must hold p.mu.
-func (p *Pool) idleSlotLocked() *adapterSlot {
+// idleSlotLocked returns the lowest-numbered unused, untransitioning slot
+// that can receive system. Caller must hold p.mu.
+func (p *Pool) idleSlotLocked(system string) *adapterSlot {
 	for _, adapter := range p.order {
-		if slot := p.adapters[adapter]; slot.free() && !slot.claimed {
+		if slot := p.adapters[adapter]; slot.free() && !slot.claimed && slot.supports(system) {
 			return slot
 		}
 	}
 	return nil
 }
 
-// victimLocked picks the lowest-priority holder that prio outranks,
-// or nil when there is none. Caller must hold p.mu.
-func (p *Pool) victimLocked(prio Priority) *adapterSlot {
+// victimLocked picks the lowest-priority holder that prio outranks and
+// that can receive system, or nil when there is none. Caller must hold
+// p.mu.
+//
+// Capability is checked here as well as in idleSlotLocked, and it has to
+// be: evicting a terrestrial tune to make room for a BS channel that the
+// same frontend cannot receive costs a viewer their picture and gains
+// nothing.
+func (p *Pool) victimLocked(prio Priority, system string) *adapterSlot {
 	var best *adapterSlot
 	for _, adapter := range p.order {
 		slot := p.adapters[adapter]
-		if slot.claimed || slot.free() {
+		if slot.claimed || slot.free() || !slot.supports(system) {
 			continue
 		}
 		if slot.prio() >= prio {
@@ -464,6 +527,33 @@ func (p *Pool) victimLocked(prio Priority) *adapterSlot {
 		}
 	}
 	return best
+}
+
+// capableLocked reports whether any adapter at all can receive system,
+// busy or not. Caller must hold p.mu.
+func (p *Pool) capableLocked(system string) bool {
+	for _, adapter := range p.order {
+		if p.adapters[adapter].supports(system) {
+			return true
+		}
+	}
+	return false
+}
+
+// noCapableAdapter builds the error for a claim no frontend can serve,
+// naming both what was asked for and what is installed — the whole point
+// of the distinction is that the message tells you to buy a tuner rather
+// than to check the aerial.
+func (p *Pool) noCapableAdapter(what, system string) error {
+	p.mu.Lock()
+	have := make([]string, 0, len(p.order))
+	for _, adapter := range p.order {
+		slot := p.adapters[adapter]
+		have = append(have, fmt.Sprintf("%d:%s", adapter, strings.Join(slot.systems, "+")))
+	}
+	p.mu.Unlock()
+	return fmt.Errorf("%w: %s needs %s, adapters are [%s]",
+		ErrNoCapableAdapter, what, system, strings.Join(have, " "))
 }
 
 // evict tears down slot's current holder and waits for it to let go.
@@ -542,9 +632,13 @@ func (p *Pool) release(adapter int, sess *tuneSession, sub *fanout.Sub, prio Pri
 // AdapterStatus reports current adapter usage. Snapshot, not
 // live-updating.
 type AdapterStatus struct {
-	Adapter int    `json:"adapter"`
-	Channel string `json:"channel,omitempty"`
-	Refs    int    `json:"refs"`
+	Adapter int `json:"adapter"`
+	// Systems is what this frontend can tune. Reported because "no adapter
+	// supports this delivery system" is otherwise a claim with nothing on
+	// screen to check it against.
+	Systems []string `json:"systems,omitempty"`
+	Channel string   `json:"channel,omitempty"`
+	Refs    int      `json:"refs"`
 	// Prio is the effective priority of the current holder, as a
 	// string ("live", "record", "background"); empty when idle.
 	Prio string `json:"prio,omitempty"`
@@ -559,7 +653,7 @@ func (p *Pool) Status() []AdapterStatus {
 	out := make([]AdapterStatus, 0, len(p.order))
 	for _, adapter := range p.order {
 		slot := p.adapters[adapter]
-		st := AdapterStatus{Adapter: adapter}
+		st := AdapterStatus{Adapter: adapter, Systems: slot.systems}
 		switch {
 		case slot.reserved != nil:
 			st.Reserved = true
@@ -581,8 +675,10 @@ func (p *Pool) Status() []AdapterStatus {
 // clear "tuner busy" instead of accepting it and failing async.
 func (p *Pool) CanServe(channel string, prio Priority) bool {
 	canonical := channel
+	var system string
 	if ch := p.channels.Find(channel); ch != nil {
 		canonical = ch.Name
+		system = ch.DeliverySystem()
 	}
 
 	p.mu.Lock()
@@ -593,5 +689,5 @@ func (p *Pool) CanServe(channel string, prio Priority) bool {
 			return true
 		}
 	}
-	return p.idleSlotLocked() != nil || p.victimLocked(prio) != nil
+	return p.idleSlotLocked(system) != nil || p.victimLocked(prio, system) != nil
 }

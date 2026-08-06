@@ -8,11 +8,18 @@ import { WatchAddresses } from "@/components/WatchAddresses";
 import {
   CHANNEL_GROUP_ORDER,
   channelGroup,
+  qualityQuery,
   stopLive,
   switchLive,
   useChannels,
   useStatus,
 } from "@/lib/api";
+
+// Where the viewer's quality choice is kept. Same shape as the player's
+// caption preference and for the same reason: it is a property of this
+// screen and this connection, not of the daemon, and having to re-pick it
+// on every visit is what makes a setting feel broken.
+const QUALITY_KEY = "ferrite.liveQuality";
 
 export default function LivePage() {
   const { data: channels } = useChannels();
@@ -22,6 +29,20 @@ export default function LivePage() {
   const [playUrl, setPlayUrl] = useState<string | null>(null);
   const [tuning, setTuning] = useState(false);
   const [fatal, setFatal] = useState<string | null>(null);
+  // null until the daemon has said which tiers it has, so the first tune
+  // asks for nothing and gets the default rather than a stale name.
+  const [quality, setQuality] = useState<string | null>(null);
+
+  const qualities = useMemo(() => status?.live_qualities ?? [], [status]);
+
+  // Adopt the remembered choice once, and only if the daemon still offers
+  // it — the tier list is config, and a name that has been renamed or
+  // removed must not pin the player to a tier that does not exist.
+  useEffect(() => {
+    if (quality || !qualities.length) return;
+    const saved = typeof window === "undefined" ? null : localStorage.getItem(QUALITY_KEY);
+    setQuality(saved && qualities.some((q) => q.name === saved) ? saved : qualities[0].name);
+  }, [quality, qualities]);
 
   // Sidebar order (GR first), which is also the order the arrow keys walk.
   // channels.json's raw order starts with cable muxes this antenna cannot
@@ -46,18 +67,20 @@ export default function LivePage() {
     if (active || !ordered.length) return;
     if (tuned) {
       setActive(tuned);
-      setPlayUrl(playlistFor(tuned));
+      setPlayUrl(playlistFor(tuned, quality));
     } else {
       setActive(ordered[0].name);
     }
-  }, [active, ordered, tuned]);
+  }, [active, ordered, tuned, quality]);
 
   // One endpoint does the whole channel change: it closes any other
   // session, tunes, and answers only once the playlist is on disk. Doing
   // it by hand as stop-then-open is what this page used to do, and with a
   // single adapter the wrong order deadlocks — two live sessions have
   // equal priority and will not evict each other.
-  const watch = useCallback(async (name: string) => {
+  const watch = useCallback(
+    async (name: string, tier?: string | null) => {
+    const q = tier === undefined ? quality : tier;
     setActive(name);
     setFatal(null);
     setPlayUrl(null);
@@ -71,8 +94,12 @@ export default function LivePage() {
     // instance, but only once React has run the effect: one frame.
     await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
     try {
-      await switchLive(name);
-      setPlayUrl(playlistFor(name));
+      const out = await switchLive(name, q ?? undefined);
+      // The daemon says which tier it actually started — an unknown name
+      // gets the default rather than an error, and the control should show
+      // what is playing rather than what was asked for.
+      setQuality(out.quality ?? q ?? null);
+      setPlayUrl(playlistFor(name, out.quality ?? q));
     } catch (e) {
       // A recording holds the adapter, or the frontend never locked. The
       // reason is on the response, and hls.js would never see it.
@@ -80,7 +107,27 @@ export default function LivePage() {
     } finally {
       setTuning(false);
     }
-  }, []);
+    },
+    [quality],
+  );
+
+  // Changing tier is a re-tune at the new quality: the daemon starts (or
+  // joins) that encode, and the player reloads onto its playlist. There is
+  // no in-manifest switch to make — one variant is on offer by design, so
+  // that a tier nobody asked for is never being encoded.
+  const chooseQuality = useCallback(
+    (name: string) => {
+      if (name === quality) return;
+      setQuality(name);
+      try {
+        localStorage.setItem(QUALITY_KEY, name);
+      } catch {
+        /* private mode; the choice just does not outlive the page */
+      }
+      if (active && playUrl) void watch(active, name);
+    },
+    [quality, active, playUrl, watch],
+  );
 
   const stop = useCallback(async () => {
     if (!active) return;
@@ -119,6 +166,9 @@ export default function LivePage() {
             fatal={fatal}
             onPrev={() => step(-1)}
             onNext={() => step(1)}
+            qualities={qualities}
+            quality={quality}
+            onQuality={chooseQuality}
           />
 
           {/* Idle: a channel is selected and nothing is playing. The
@@ -155,6 +205,10 @@ export default function LivePage() {
 // The channel's playlist is the multivariant one: it names the caption
 // rendition beside the video, and the daemon composes it per request so the
 // same manifest works from here and from /stream.m3u8.
-function playlistFor(channel: string) {
-  return `/api/live/${encodeURIComponent(channel)}.m3u8`;
+//
+// ?q= names the tier. It carries one variant, not a ladder — see
+// internal/hls/quality.go for why the choice is the viewer's and not the
+// player's.
+function playlistFor(channel: string, quality?: string | null) {
+  return `/api/live/${encodeURIComponent(channel)}.m3u8${qualityQuery(quality)}`;
 }
