@@ -89,7 +89,9 @@ dvb-rs stdout → b25-rs stdin → b25-rs stdout → fanout.Broadcaster
   - `api/` — chi router for `/api/...` + serves `internal/web/dist`.
     **List endpoints must answer `[]`, not `null`** — wrap them in `orEmpty`.
     A nil slice is invisible in Go and crashes every other client.
-  - `web/` — `//go:embed dist` of Next.js `output: 'export'` build.
+  - `web/` — `//go:embed dist` of Next.js `output: 'export'` build. Which
+    includes `web/public/fonts/` — the ARIB caption font travels in the binary,
+    see the invariant on ASS font sizes.
 
 ## Current implementation status
 
@@ -159,11 +161,11 @@ Implemented and tested (race-clean):
   in file order. Diverging means one tool reads a channel while another acts on
   a different one. `bun test` needs no network and no API key.
 - `web/` — Bun + Next.js 16 (App Router, TypeScript, Tailwind CSS).
-  Four pages: Live (hls.js player + record now / stop), Guide (EPG, one
-  click books a programme), Schedules (create/cancel), Recordings
-  (watch, stop a running one, convert, download, delete). Static
-  `output: 'export'`; all
-  data fetching is client-side via SWR against the `/api/*` endpoints.
+  Four pages: Live (hls.js player + captions on/off + record now / stop),
+  Guide (EPG, one click books a programme), Schedules (create/cancel),
+  Recordings (watch, stop a running one, convert, download, delete). Static
+  `output: 'export'`; all data fetching is client-side via SWR against the
+  `/api/*` endpoints.
   Colour lives in one place — the `@theme` block in `app/globals.css`,
   from which Tailwind derives the utilities (`text-dim`, `border-line`),
   so components carry class names and not `style={{ color: "var(…)" }}`.
@@ -187,6 +189,33 @@ Implemented and tested (race-clean):
   human pass over `channels.json` would tidy it.
 - Watch-one-channel-while-recording-another needs a second tuner; with
   one adapter the recording wins and live drops.
+
+**Verified in a browser and against libass (2026-08-06, ARIB placement):** the
+same recording's `.ass`, measured in the page and burned onto its own MP4 with
+ffmpeg, now agree: the caption lands at plane x 338 → ink at 340 in a 1920-wide
+frame, two lines filling the background boxes the same file draws, and the
+overlay tracks the picture to 0.2px as opened, resized and fullscreen. Before
+the fix the overlay was laid out across the letterbox bars (box 1230px wide for a
+995.6px picture) and the glyphs were 90% of the cell in the browser and 72% under
+libass. With the font now served by the daemon the browser measures its line box
+at 1.3950 em — the number `ass::DEFAULT_FONT_SIZE_RATIO` was derived from — so
+the em comes out at exactly 36 plane units and a run of *n* cells at exactly
+40 *n*: 3 cells 120, 9 cells 360, measured. The `.woff2` is served as
+`font/woff2`, `immutable`, 1,015,868 bytes.
+
+**Verified in a browser (2026-08-06, where captions sit and how they go on):**
+headless Chromium 1217 against this box, caption boxes measured out of the UA
+shadow tree over CDP. A recording's `.vtt` cue used to be drawn 76px above the
+bottom of a 560px picture (13.6%) whether or not the control bar was up — the
+browser's own reservation, unreachable by `line:-1`; with `line:94%` in the file
+it lands 31px above it (5.6%), just clear of where the scrubber draws, and
+`cue.line` reads back as `94`. On the Live page the new `CAPTIONS On` fetches
+`subs.m3u8` and every `sub{N}.vtt`, the cues appear at the same 5.6%, and across
+`TBS1 → NHK総合 → TBS1` the choice survives each channel change
+(`subtitlePreference`) with the track showing on arrival. Segment clamping holds:
+consecutive pieces of one caption run `19.194→20.016`, `20.016→22.017`,
+`22.022→22.931` — contiguous, and never two cues on screen at once, where before
+the fix `activeCues` held the same line twice.
 
 **Verified in a browser (2026-08-05, the recordings player):** headless
 Chromium against two real NHK recordings on this box. The MP4 plays
@@ -213,8 +242,9 @@ at the frame the on-screen clock agrees with. DELETE took all four files.
 PID found from the PMT (0x130), cue timeline anchored by ffprobe, and the
 WebVTT segment for `stream13.ts` holding exactly the cue overlapping that
 segment's real PTS window (43511.667–43513.669 vs cue 43510.789–43514.476).
-The browser rendering of that rendition — now the browser's own captions menu
-on the Live page's player — has not been checked in a browser yet.
+The browser rendering of that rendition has since been checked in a browser —
+see the 2026-08-06 note above, which is also what turned up the two things wrong
+with it: no reachable switch, and every caption drawn twice.
 
 **Hardware-verified (2026-07-30, single Siano adapter, Tokyo):** EPG
 preempted by record and by live; record-now → file grows ~1.4 MB/s →
@@ -276,18 +306,45 @@ mid-recording finalizing as 'done'.
   that first one rather than composing a manifest that silently means "this
   channel has no subtitles tonight". `{ch}/video.m3u8` only ever *serves* a
   session, it never opens one.
-- **The captions control is the browser's, not ours.** hls.js turns the
-  manifest's subtitle rendition into a native `TextTrack`
-  (`renderTextTracksNatively`, its default), which is what puts captions in the
-  player's own control bar — where a viewer already looks for them, present in
-  fullscreen, and gone with the controls. An overlay button of ours was the
-  first attempt and it could not be got rid of: it sits above the video, so it
-  is on screen whether or not the controls are. `DEFAULT=NO` keeps captions off
-  until asked, hls.js maps a selection made in that menu back onto the subtitle
-  track to load, and the player carries the choice into the next channel as
-  `subtitlePreference` — detaching the media clears the selection, so without
-  that every channel change would quietly turn captions back off. This is also
-  the only caption UI iOS Safari can be given, since hls.js does not run there.
+- **The caption *rendering* is the browser's; the caption *switch* has to be
+  ours.** hls.js turns the manifest's subtitle rendition into a native
+  `TextTrack` (`renderTextTracksNatively`, its default), which is what draws
+  captions inside the browser's own fullscreen video and what an iPad gets from
+  the manifest with nothing of ours running. Leaving the switch to the browser
+  too was the first attempt and it made live captions unreachable: Chromium's
+  control bar has **no captions button at all** (checked against the
+  accessibility tree — pause, fullscreen, mute, and an overflow ⋮), so the only
+  way in was ⋮ → "show closed captions menu" → 日本語, two levels down a menu
+  nobody opens. The Live page therefore carries `CAPTIONS On|Off` under the
+  picture, like the Recordings player's own control and for the same reason it is
+  not an overlay: a control above the video is on screen whether or not the
+  native controls are. Setting `TextTrack.mode` *is* the switch — hls.js reads
+  that change back and starts loading the rendition, which is how it maps its own
+  menu selections — so a choice made in the browser's menu still works and is
+  picked up by the button rather than fought with. `DEFAULT=NO` keeps captions
+  off until asked, and the choice rides into the next channel as
+  `subtitlePreference` (detaching the media clears the selection, so without that
+  every channel change would quietly turn captions back off). What the button
+  reports as *available* comes from `hls.subtitleTracks`, not from the element: a
+  `TextTrack` cannot be removed once added, so the last channel's track outlives
+  a channel change and going by that would offer captions on a channel sending
+  none.
+- **Where a WebVTT cue sits is ours to say, and the only setting that works is a
+  bare `line:<percent>`.** A browser's default placement is not the bottom of the
+  picture: it reserves room for its control bar whether or not the controls are
+  showing — measured at 13.6% of the picture height in Chromium 1217 — and reads
+  as a subtitle floating in the lower third. Snap-to-lines cannot go below that
+  reservation (`line:-1` lands in exactly the same place as `line:auto`), so the
+  percentage form is the way down, and it places the box by its *bottom* edge:
+  `line:94%` sits just clear of the progress bar (~96%) and a caption of two,
+  three or four lines grows upward from there. Written bare, with no line
+  alignment after it: WebVTT allows `line:94%,end` and hls.js parses it, but
+  Chromium's own parser discards the whole setting when it sees the comma
+  (`cue.line` comes back `auto`) and implements no `lineAlign` to align with. The
+  live rendition goes through hls.js's parser and a recording's `.vtt` through the
+  browser's, so the form has to satisfy both — and `internal/caption` and
+  libaribcaption-rs's `render/vtt.rs` have to agree on it, or a channel's captions
+  move when you record it.
 - **Live TV is one URL, and a playlist's segment URIs are relative to
   where the playlist is served.** `/stream.m3u8` is what any player or
   bookmark gets (the `live_hls.py` contract): a channel change must not
@@ -351,6 +408,20 @@ mid-recording finalizing as 'done'.
   segment is being produced: on screen *now*, for as long as it stays. Trusting
   the provisional end instead would drop a long caption out of the segments past
   it, and a player never refetches a segment it already has.
+- **And it is cut at the segment boundary, or it is drawn twice.** That
+  provisional end is the reason: a caption spanning a boundary belongs in both
+  segments, but in the first one it ends where the segment does and in the second
+  it ends where the broadcast finally said. A player dedups cues by their start,
+  end and text — hls.js hashes exactly those three — so those are two cues to it,
+  and it draws the line twice with the stale copy hanging over the caption after
+  it (this is what live captions looked like: every caption doubled, since almost
+  all of them outlive a 2s segment). Nor can the publisher fix it by rewriting the
+  segment: a player fetches one the moment it appears in the playlist and never
+  looks again, so it always has the *first* version. `writeSegment` therefore
+  clamps every cue to `[segment start, segment end)`. The pieces then meet instead
+  of overlapping — the caption stays on screen across the boundary, drawn once —
+  and no two cues in the rendition are ever active at the same time, which also
+  matters because a percentage `line:` is not laid out to avoid collisions.
 - **A subtitle rendition mirrors the video playlist, and `#EXTINF` lies.** A
   player fetches the subtitle fragment covering the position it is playing, so
   segment N of `subs.m3u8` must cover the same window as segment N of the video
@@ -430,6 +501,39 @@ mid-recording finalizing as 'done'.
 - **`import ASS from 'assjs'` must stay dynamic, inside an effect.** The module
   calls `document.createElement` at load time, and the static export prerenders
   every page at build time, where there is no document.
+- **ASS.js reads the video's size once, so it must not be constructed before the
+  video has one.** It fits the caption plane the script declares to the picture,
+  which it derives from `videoWidth`/`videoHeight` — and silently falls back to
+  the element's own box while those are still 0. That fallback is wrong here by
+  construction: the player's box is 16:9 but *wider* than the 16:9 picture inside
+  it (`max-h-[70vh]` caps the height, so the video letterboxes), so the whole
+  plane was stretched across the black bars — every caption ~120px left of where
+  the broadcast put it and a quarter too wide, which is the "not quite right" a
+  viewer reports. Nothing recovers from it: the resolution is fixed in the
+  constructor and its `ResizeObserver` only watches the element, which does not
+  change size when metadata arrives. So the effect waits for `loadedmetadata`.
+  Measured after the fix: the ASS box matches the picture to 0.2px as opened,
+  after a window resize, and in fullscreen.
+- **An ASS `Fontsize` is a line box, not an em, and that makes the caption font
+  load-bearing twice.** libass, following VSFilter, scales the face so that
+  `usWinAscent + usWinDescent` equals the size asked for; ASS.js does the same
+  through canvas `fontBoundingBox*`. So a 36-unit ARIB cell has to be asked for
+  as 36 × the font's own ratio (`ass::DEFAULT_FONT_SIZE_RATIO`, 1.395 for the
+  rounded gothic the script names), and asking for 36 flat — which this renderer
+  did until it was measured — puts a 26-unit glyph in the cell it drew a
+  background for. Then the *browser* needs the named family to actually resolve,
+  because ASS.js measures the name in the script while the browser draws the
+  Japanese from whatever it falls back to: two fonts, two ratios, wrong size
+  again. So the font ships with the daemon — `web/public/fonts/`, which the
+  export copies into `internal/web/dist` and `go:embed` puts in the binary — and
+  `globals.css` declares it, with a locally installed copy preferred ahead of the
+  file and the platform gothics behind it as a last resort. Nothing is fetched
+  from the internet; the LAN-with-no-internet rule still holds. Two things go
+  with it: the player waits on `document.fonts.load` before constructing, since
+  ASS.js caches the measurement per family name, and `staticHandler` serves
+  `/fonts/` `immutable` rather than `no-store` like the rest of the bundle — a
+  megabyte, asked for every time a recording is opened, versioned by its own
+  filename. Which is the rule for replacing it: rename the file.
 - **The file endpoints answer HEAD, not just GET.** "Is this there?" is a
   question a client asks before committing — the Recordings page asks it to
   know whether a recording has captions before offering to show them, and a
