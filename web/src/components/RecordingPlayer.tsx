@@ -10,6 +10,18 @@ import {
   type Recording,
 } from "@/lib/api";
 
+// `HTMLMediaElement.HAVE_METADATA`, spelled out because the constant is only on
+// the element and this is about a video that may not exist yet.
+const HAVE_METADATA = 1;
+
+// The font family an ASS script's default style names, which is the one ASS.js
+// will measure. Ours always writes the same one, but reading it out of the file
+// keeps that a fact about the file rather than an assumption here.
+function assFontFamily(script: string) {
+  const style = script.match(/^Style:\s*[^,]*,\s*([^,]+)/m);
+  return style?.[1]?.trim() || "sans-serif";
+}
+
 // How the captions are drawn. ARIB broadcasts place a caption on the
 // screen — over the shot it belongs to, clear of the face that is talking —
 // and the .ass keeps that placement, which is the reason the post-pass
@@ -108,6 +120,24 @@ export function RecordingPlayer({ rec, channelLabel, onClose }: Props) {
   // and this page is prerendered at build time by the static export, where
   // there is no document. It also keeps ~40 KB out of the bundle every
   // other page pays for.
+  //
+  // Two things have to be true before it is constructed, and both are things
+  // it reads *once*:
+  //
+  //   - The video's intrinsic size. ASS.js takes the caption plane the script
+  //     declares (960×540) and fits it to the picture, which it works out from
+  //     `videoWidth`/`videoHeight` — and falls back to the element's own box
+  //     when they are still 0. That fallback is silently wrong for us: the
+  //     player's box is 16:9 but wider than the picture inside it, so the whole
+  //     plane was being stretched across the letterbox bars, every caption
+  //     drawn ~120px left of where the broadcast put it and a quarter too wide.
+  //     Nothing recovers from it either — the resolution it derives is fixed at
+  //     construction and its ResizeObserver only watches the element, which
+  //     never changes size when metadata arrives.
+  //   - The caption font. ASS.js measures the family the script names to
+  //     convert an ASS size (a line box) into a font size, so that family has
+  //     to be resolvable *before* it measures — it caches the result per name.
+  //     See the @font-face in globals.css, which aliases it to a real one.
   useEffect(() => {
     if (effective !== "ass" || assText === null) return;
     const video = videoRef.current;
@@ -115,17 +145,29 @@ export function RecordingPlayer({ rec, channelLabel, onClose }: Props) {
     if (!video || !box) return;
 
     let live = true;
-    void import("assjs")
-      .then((mod) => {
-        if (!live) return;
-        assRef.current = new mod.default(assText, video, { container: box });
-      })
-      .catch((e) => {
-        if (live) setError(e instanceof Error ? e.message : String(e));
-      });
+    const start = () => {
+      if (!live) return;
+      void Promise.all([
+        import("assjs"),
+        // Never a reason to fail on: with no matching local font the caption
+        // still draws, in whatever the browser substitutes.
+        document.fonts.load(`36px "${assFontFamily(assText)}"`).catch(() => []),
+      ])
+        .then(([mod]) => {
+          if (!live) return;
+          assRef.current = new mod.default(assText, video, { container: box });
+        })
+        .catch((e) => {
+          if (live) setError(e instanceof Error ? e.message : String(e));
+        });
+    };
+
+    if (video.readyState >= HAVE_METADATA) start();
+    else video.addEventListener("loadedmetadata", start, { once: true });
 
     return () => {
       live = false;
+      video.removeEventListener("loadedmetadata", start);
       assRef.current?.destroy();
       assRef.current = null;
     };

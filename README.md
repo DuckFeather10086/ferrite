@@ -141,6 +141,16 @@ cd ferrite-v1.0.0-linux-amd64
 sudo cp ferrite dvb-rs b25-rs /usr/local/bin/
 ```
 
+## Bundled font
+
+`web/public/fonts/MPLUSRounded1c-Regular-v22.woff2` — M PLUS Rounded 1c,
+OFL 1.1, with the notice and licence beside it. It is the rounded gothic
+ARIB captions are drawn in, and it ships because an `.ass` sidecar's sizes
+are only right for the font it names: an ASS size is a line box rather than
+an em, so the wrong font draws the words at the wrong size for the boxes the
+same file draws. The only webfont here — everything else uses the system
+stack. Replacing it means renaming the file: `/fonts/` is served immutable.
+
 ## Runtime requirements
 
 - A USB ISDB-T tuner at `/dev/dvb/adapter*/`.

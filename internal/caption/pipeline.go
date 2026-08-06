@@ -325,9 +325,47 @@ func (p *Pipeline) publish(ctx context.Context) error {
 	return nil
 }
 
+// bottomLine is where a caption sits when the broadcast did not move it up.
+//
+// Not the browser's own default, which is nowhere near the bottom of the
+// picture: a browser reserves room for its control bar whether or not the
+// controls are showing — measured at 13.6% of the picture height in Chromium
+// 1217 — and a subtitle floating in the lower third of the frame is what that
+// looks like. Snap-to-lines cannot go below that reservation (`line:-1` lands in
+// exactly the same place as `line:auto`), so the percentage form is the way down:
+// 94% leaves the caption clear of the progress bar, which sits at about 96%.
+// Measured there at 5.6% of the picture height, and a caption of several lines
+// grows *upward* from it rather than off the bottom.
+//
+// Bare, with no line alignment after it. WebVTT allows `line:94%,end` and hls.js
+// parses it, but Chromium's own parser throws the whole setting away when it sees
+// the comma — and a percentage line is placed by the box's bottom edge there
+// anyway. The live rendition goes through hls.js and a recording's sidecar
+// through the browser's parser, so the form has to satisfy both.
+//
+// libaribcaption-rs's WebVTT renderer writes the same setting for a recording's
+// sidecar; the two have to agree or a channel's captions move when you record it.
+const bottomLine = " line:94%"
+
+// topLine is two lines down from the top, which clears the channel logos in the
+// corner. A broadcast moves a caption up when something at the bottom of the
+// frame matters, and following it there is the point of carrying the flag.
+const topLine = " line:1"
+
 // writeSegment writes the cues overlapping [startMs, endMs) as one WebVTT
-// segment. A cue spanning a boundary is written into both segments, which is
-// how WebVTT-in-HLS is meant to work.
+// segment, each clamped to the segment's own window.
+//
+// Clamping is what keeps a caption from being drawn twice. A caption spanning a
+// boundary belongs in both segments, but its *times* cannot be the same in both:
+// while it is still on screen its end is provisional (the end of the segment
+// being written), and by the next segment the real end has arrived. A player
+// dedups cues by their start, end and text — hls.js hashes exactly those three —
+// so two copies of one caption with different ends are two cues to it, and it
+// draws the line twice, the stale copy hanging over the caption after it. Nor is
+// that a race the publisher can win by rewriting the segment: a player fetches a
+// segment the moment it appears and never looks at it again. Cut into
+// per-segment pieces, the copies are contiguous instead of overlapping — the
+// caption stays on screen across the boundary and is only ever drawn once.
 func (p *Pipeline) writeSegment(name string, startMs, endMs int64) error {
 	var body strings.Builder
 	// Cue times are broadcast PTS, and the map says which instant that is: the
@@ -358,6 +396,14 @@ func (p *Pipeline) writeSegment(name string, startMs, endMs int64) error {
 			if end <= startMs || cue.StartMs >= endMs {
 				continue
 			}
+			// Its piece of this segment, so the pieces either side of a
+			// boundary meet rather than overlap.
+			if cue.StartMs < startMs {
+				cue.StartMs = startMs
+			}
+			if end > endMs {
+				end = endMs
+			}
 			cue.EndMs = end
 			body.WriteString(formatCue(cue))
 			body.WriteString("\n")
@@ -367,9 +413,9 @@ func (p *Pipeline) writeSegment(name string, startMs, endMs int64) error {
 }
 
 func formatCue(cue Cue) string {
-	line := ""
+	line := bottomLine
 	if cue.Top {
-		line = " line:1"
+		line = topLine
 	}
 	return fmt.Sprintf("%s --> %s%s\n%s\n",
 		vttTimestamp(cue.StartMs), vttTimestamp(cue.EndMs), line, escapeVTT(cue.Text))

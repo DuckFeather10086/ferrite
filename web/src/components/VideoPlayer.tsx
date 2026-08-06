@@ -34,17 +34,23 @@ function playThenUnmute(video: HTMLVideoElement) {
 }
 
 // The viewer's caption choice, read off the media element rather than held
-// as state, because the control that sets it is the browser's own captions
-// menu and not anything of ours. Returns null when captions are off.
+// as state, because the browser's own captions menu can set it too. Returns
+// null when captions are off.
 function subtitleChoice(video: HTMLVideoElement) {
-  const tracks = video.textTracks;
-  for (let i = 0; i < tracks.length; i++) {
-    const t = tracks[i];
-    if ((t.kind === "subtitles" || t.kind === "captions") && t.mode === "showing") {
-      return { name: t.label, lang: t.language };
-    }
+  for (const t of captionTracks(video)) {
+    if (t.mode === "showing") return { name: t.label, lang: t.language };
   }
   return null;
+}
+
+// The tracks a viewer would call subtitles. hls.js turns the manifest's WebVTT
+// rendition into one of these (renderTextTracksNatively), so there is normally
+// either one or none — none being an ordinary night on a channel that sends no
+// captions.
+function captionTracks(video: HTMLVideoElement) {
+  return Array.from(video.textTracks).filter(
+    (t) => t.kind === "subtitles" || t.kind === "captions",
+  );
 }
 
 // A cold tune holds the manifest request open server-side for up to
@@ -83,15 +89,16 @@ const HLS_CONFIG = {
 // first play() resolves. enableWorker=true offloads remuxing from the
 // main thread (the previous `false` caused stutter on high-bitrate CS).
 //
-// Captions have no control here on purpose. hls.js renders the manifest's
-// subtitle rendition as a native TextTrack (renderTextTracksNatively, its
-// default), which puts it in the browser's own captions menu on the control
-// bar — the same place a viewer looks for subtitles on every other video on
-// the web, present in fullscreen, and gone when the controls are. It is also
-// the only caption UI iOS Safari can be given, since there hls.js does not
-// run at all. The manifest says DEFAULT=NO, so captions start off as they do
-// on a television, and hls.js maps a selection made in that menu back onto
-// the subtitle track it has to load.
+// Captions are a native TextTrack — hls.js turns the manifest's WebVTT
+// rendition into one (renderTextTracksNatively, its default), which is what lets
+// the browser draw them inside its own fullscreen video, and what an iPad gets
+// from the manifest with nothing of ours running. Turning them *on*, though, is
+// the button under the picture: Chrome's control bar has no captions button at
+// all (checked against the accessibility tree — pause, fullscreen, mute, and an
+// overflow ⋮), so the only browser-provided way in is two levels down that menu,
+// which is where live captions went to die. The manifest still says DEFAULT=NO,
+// so they start off as they do on a television, and a choice made in the
+// browser's menu is picked up here rather than fought with.
 export function VideoPlayer({ src, fatal, onPrev, onNext }: VideoPlayerProps) {
   const boxRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -105,11 +112,16 @@ export function VideoPlayer({ src, fatal, onPrev, onNext }: VideoPlayerProps) {
   // never installed the recovery path, so the first hiccup after a
   // manual retry was fatal.
   const [reload, setReload] = useState(0);
-  // What the viewer last picked in the browser's captions menu, carried
-  // across channel changes. Detaching the media resets the track selection,
-  // so without this every change of channel would silently turn captions
-  // back off — and the viewer would have to find the menu again each time.
+  // What the viewer last chose, carried across channel changes. Detaching the
+  // media resets the track selection, so without this every change of channel
+  // would silently turn captions back off — and hls.js needs it as
+  // `subtitlePreference` to load the new channel's rendition at all.
   const subsPrefRef = useRef<{ name: string; lang: string } | null>(null);
+  // Captions as the control below the picture sees them: `on` is whether a
+  // track is showing, `available` whether this stream carries one at all. Never
+  // assumed — both are read back from the player by `syncSubs`, since the
+  // browser's own captions menu sets the same thing behind us.
+  const [subs, setSubs] = useState({ on: false, available: false });
 
   const destroy = useCallback(() => {
     const v = videoRef.current;
@@ -123,6 +135,55 @@ export function VideoPlayer({ src, fatal, onPrev, onNext }: VideoPlayerProps) {
       hlsRef.current = null;
     }
     if (v) v.removeAttribute("src");
+  }, []);
+
+  // The caption control's state belongs to the player, not to us: hls.js adds
+  // the track when it parses a manifest and disables it on detach, and the
+  // browser's own captions menu sets the same modes.
+  //
+  // Whether captions are *available* is the manifest's answer and not the
+  // element's, because a TextTrack cannot be removed once it has been added — so
+  // after a channel change the last channel's track is still on the element, and
+  // going by that would offer captions on a channel sending none. hls.js
+  // republishes `subtitleTracks` per manifest, which is the truth; the element is
+  // the fallback for iOS Safari, where hls.js does not run and the native player
+  // owns the renditions.
+  const syncSubs = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const tracks = captionTracks(video);
+    const available = hlsRef.current
+      ? hlsRef.current.subtitleTracks.length > 0
+      : tracks.length > 0;
+    setSubs({ on: tracks.some((t) => t.mode === "showing"), available });
+  }, []);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const tracks = video.textTracks;
+    syncSubs();
+    tracks.addEventListener("addtrack", syncSubs);
+    tracks.addEventListener("removetrack", syncSubs);
+    tracks.addEventListener("change", syncSubs);
+    return () => {
+      tracks.removeEventListener("addtrack", syncSubs);
+      tracks.removeEventListener("removetrack", syncSubs);
+      tracks.removeEventListener("change", syncSubs);
+    };
+  }, [syncSubs]);
+
+  // Setting the mode *is* turning captions on: the browser draws a showing
+  // track, and hls.js reads the same change back to start loading the rendition
+  // (it is how it maps its own menu selections). Nothing else is needed.
+  const showSubs = useCallback((on: boolean) => {
+    const video = videoRef.current;
+    if (!video) return;
+    for (const t of captionTracks(video)) t.mode = on ? "showing" : "disabled";
+    // Remembered for the next channel, where hls.js re-selects the rendition by
+    // name and language; without it a channel change turns captions back off.
+    subsPrefRef.current = on ? subtitleChoice(video) : null;
+    setSubs((s) => ({ ...s, on }));
   }, []);
 
   useEffect(() => {
@@ -159,7 +220,12 @@ export function VideoPlayer({ src, fatal, onPrev, onNext }: VideoPlayerProps) {
       hlsRef.current = h;
       h.loadSource(src);
       h.attachMedia(video);
-      h.on(Hls.Events.MANIFEST_PARSED, () => playThenUnmute(video));
+      h.on(Hls.Events.MANIFEST_PARSED, () => {
+        playThenUnmute(video);
+        // Whether this channel is sending captions is in the manifest just
+        // parsed, and nothing on the element changes to say so.
+        syncSubs();
+      });
       h.on(Hls.Events.ERROR, (_evt, data) => {
         if (!data.fatal) return;
         // Cold tunes start mid-GOP: the first segment can carry
@@ -197,7 +263,7 @@ export function VideoPlayer({ src, fatal, onPrev, onNext }: VideoPlayerProps) {
       video.removeEventListener("loadstart", onWaiting);
       destroy();
     };
-  }, [src, reload, destroy]);
+  }, [src, reload, destroy, syncSubs]);
 
   // Fullscreen the container rather than the <video>, so the overlays
   // ("Tuning…", an error) are still visible in fullscreen.
@@ -241,46 +307,80 @@ export function VideoPlayer({ src, fatal, onPrev, onNext }: VideoPlayerProps) {
   const shown = fatal ? "error" : status;
 
   return (
-    // 16:9, but capped so the programme title and the record button stay
-    // above the fold on a laptop. Past the cap the box is wider than the
-    // picture and the video letterboxes inside it — invisibly, the bars
-    // being the same black.
-    <div
-      ref={boxRef}
-      className="relative aspect-video max-h-[70vh] overflow-hidden rounded-lg bg-black"
-    >
-      <video
-        ref={videoRef}
-        // No source means no timeline to scrub and no volume to set: with
-        // `controls` always on, an idle player showed a native control bar
-        // reading 0:00 under the Watch button.
-        controls={Boolean(src)}
-        playsInline
-        muted
-        tabIndex={0}
-        className="h-full w-full"
-      />
+    <div className="flex flex-col gap-2">
+      {/* 16:9, but capped so the programme title and the record button stay
+          above the fold on a laptop. Past the cap the box is wider than the
+          picture and the video letterboxes inside it — invisibly, the bars
+          being the same black. */}
+      <div
+        ref={boxRef}
+        className="relative aspect-video max-h-[70vh] overflow-hidden rounded-lg bg-black"
+      >
+        <video
+          ref={videoRef}
+          // No source means no timeline to scrub and no volume to set: with
+          // `controls` always on, an idle player showed a native control bar
+          // reading 0:00 under the Watch button.
+          controls={Boolean(src)}
+          playsInline
+          muted
+          tabIndex={0}
+          className="h-full w-full"
+        />
 
-      {shown === "loading" && src && (
-        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2">
-          <div className="h-6 w-6 animate-spin rounded-full border border-white/25 border-t-white" />
-          <span className="font-mono text-[11px] text-white/70">Tuning…</span>
-        </div>
-      )}
-
-      {shown === "error" && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/80 px-6 text-center">
-          <div>
-            <p className="text-sm font-medium text-rec">Cannot play this channel</p>
-            <p className="mt-1 text-xs text-dim">{fatal ?? error ?? "The stream did not open."}</p>
+        {shown === "loading" && src && (
+          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2">
+            <div className="h-6 w-6 animate-spin rounded-full border border-white/25 border-t-white" />
+            <span className="font-mono text-[11px] text-white/70">Tuning…</span>
           </div>
-          {!fatal && (
-            <button onClick={() => setReload((n) => n + 1)} className="btn">
-              Retry
+        )}
+
+        {shown === "error" && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/80 px-6 text-center">
+            <div>
+              <p className="text-sm font-medium text-rec">Cannot play this channel</p>
+              <p className="mt-1 text-xs text-dim">
+                {fatal ?? error ?? "The stream did not open."}
+              </p>
+            </div>
+            {!fatal && (
+              <button onClick={() => setReload((n) => n + 1)} className="btn">
+                Retry
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Under the picture, not over it: an overlay control is on screen
+          whether or not the native controls are, and this is the row the
+          Recordings player puts the same choice in. `z-10` because the page
+          lays its "▶ Watch" overlay across the whole player while idle. */}
+      <div className="relative z-10 flex items-center gap-1.5">
+        <span className="eyebrow">captions</span>
+        <div className="flex overflow-hidden rounded-md border border-line">
+          {[
+            { on: true, label: "On" },
+            { on: false, label: "Off" },
+          ].map((choice) => (
+            <button
+              key={choice.label}
+              onClick={() => showSubs(choice.on)}
+              disabled={!subs.available}
+              title={
+                subs.available
+                  ? "The broadcast's own subtitles, drawn by the browser"
+                  : "This stream is carrying no subtitle track"
+              }
+              className={`cursor-pointer px-2 py-1 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-30 ${
+                subs.on === choice.on ? "bg-fg text-canvas" : "bg-panel text-dim hover:bg-raised"
+              }`}
+            >
+              {choice.label}
             </button>
-          )}
+          ))}
         </div>
-      )}
+      </div>
     </div>
   );
 }

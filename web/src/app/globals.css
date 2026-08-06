@@ -41,6 +41,45 @@
     monospace;
 }
 
+/* ── the ARIB caption font ────────────────────────────────────────────
+   The one webfont this UI bundles, and the exception to the rule above,
+   because a caption is not text the device gets to choose a font for.
+
+   An .ass sidecar names the rounded gothic ARIB specifies, and the sizes
+   in it are only right for *that* font: an ASS size is a line box, not an
+   em, so `arib-caption` multiplies each cell by this font's own line box
+   (1.395 em — see ass::DEFAULT_FONT_SIZE_RATIO) to ask for a 36-unit
+   glyph. A missing family is then worse than a substituted one, because
+   ASS.js *measures* the family the script names to undo that
+   multiplication while the browser *draws* the Japanese from whatever it
+   falls back to: two fonts, two line boxes, and the caption comes out the
+   wrong size for the background box the same file drew — measured at 90%
+   of the cell in the browser, and 72% for libass on the same file.
+
+   So the file ships with the daemon (it is inside internal/web/dist, and
+   from there inside the binary): served off the LAN like everything else,
+   no internet, and the metrics are the ones the sidecar was written for
+   rather than the ones the device happens to have. The `local()` sources
+   come first — an installed copy is the same design and saves a megabyte
+   — and the platform gothics are the last resort if the file itself is
+   ever missing, at ~4% off in line box.
+
+   OFL 1.1, notice and license in public/fonts/. Replacing the file means
+   renaming it: the daemon serves /fonts/ as immutable. */
+@font-face {
+  font-family: "Rounded Mplus 1c";
+  src:
+    local("Rounded Mplus 1c"), local("M PLUS Rounded 1c"),
+    url("/fonts/MPLUSRounded1c-Regular-v22.woff2") format("woff2"),
+    local("Noto Sans CJK JP"), local("Noto Sans JP"),
+    local("Hiragino Kaku Gothic ProN"), local("Hiragino Sans"),
+    local("Yu Gothic UI"), local("Yu Gothic"), local("Meiryo"),
+    local("MS Gothic"), local("Droid Sans Fallback");
+  /* The player waits on document.fonts.load before it measures anything,
+     so there is nothing to swap in late. */
+  font-display: block;
+}
+
 @layer base {
   body {
     background: var(--color-canvas);

@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -164,6 +165,19 @@ func NewRouter(d Deps) http.Handler {
 	return r
 }
 
+// fontDir is where the UI bundle keeps the caption font (web/public/fonts).
+// Named here because its contents are served on different terms from the rest
+// of the bundle — see staticHandler.
+const fontDir = "fonts"
+
+func init() {
+	// Go's built-in table has no entry for .woff2 and a release image need not
+	// carry /etc/mime.types, which would leave the caption font sniffed as
+	// application/octet-stream. Browsers accept a font regardless, but saying
+	// what it is costs one line.
+	_ = mime.AddExtensionType(".woff2", "font/woff2")
+}
+
 // staticHandler serves the embedded UI bundle. Real files are served
 // as-is. For paths that don't match a file, it tries the .html suffix
 // (Next.js static export). Everything else falls back to index.html for
@@ -176,9 +190,17 @@ func staticHandler(fsys fs.FS) http.HandlerFunc {
 			writeErr(w, http.StatusNotFound, "not found")
 			return
 		}
-		// Never cache UI assets — they're embedded in the binary and
-		// change across restarts.
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		if strings.HasPrefix(r.URL.Path, "/"+fontDir+"/") {
+			// The exception to the line below: a font is a megabyte, its
+			// name carries its version (replacing one means renaming it),
+			// and the Recordings player asks for it every time a viewer
+			// opens a recording with ARIB captions.
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			// Never cache UI assets — they're embedded in the binary and
+			// change across restarts.
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		}
 		name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
 		if name != "" && !isFile(fsys, name) {
 			// Try .html suffix for static-export routes (e.g. /guide → guide.html).
