@@ -68,15 +68,25 @@ dvb-rs stdout → b25-rs stdin → b25-rs stdout → fanout.Broadcaster
     table.
   - `caption/` — the live subtitle rendition: a second fanout consumer feeds
     `arib-caption cues`, and this segments the resulting cues into WebVTT
-    beside the video segments (`subs.m3u8`, `sub{N}.vtt`, `master.m3u8`).
-  - `hls/` — per-channel session: acquire lease → ffmpeg subprocess
-    → m3u8 dir. Refcounted; teardown when last viewer leaves. On start
-    it delays audio via `-af asetpts` to correct ISDB's A/V skew — ports
-    the live_hls.py auto-offset (config `ffprobe_bin` / `probe_seconds`).
-    The measurement is **cached per channel** in `av_offsets`; only a
-    cache miss pays the ffprobe pass. Output is normalized to square
-    pixels (1440x1080 SAR 4:3 → 1920x1080 SAR 1:1) because hls.js does
-    not reliably honour the SAR in the H.264 VUI.
+    beside the video segments (`subs.m3u8`, `sub{N}.vtt`). One `Pipeline`
+    (one decoder, one subscription) per *channel*, with one `Rendition`
+    attached per quality tier — the words are the same at every bitrate, the
+    segment numbering is not.
+  - `hls/` — one session per channel *and quality*: acquire lease → ffmpeg
+    subprocess → `{hls_root}/{channel}/{quality}/`. Refcounted; teardown when
+    the last viewer leaves. On start it delays audio via `-af asetpts` to
+    correct ISDB's A/V skew — ports the live_hls.py auto-offset (config
+    `ffprobe_bin` / `probe_seconds`). The measurement is **cached per
+    channel** in `av_offsets`; only a cache miss pays the ffprobe pass.
+    Output is normalized to square pixels (1440x1080 SAR 4:3 → 1920x1080
+    SAR 1:1) because hls.js does not reliably honour the SAR in the H.264
+    VUI. `quality.go` holds the tier list and the one place the GOP is
+    derived from the segment length.
+  - `scan/` — building `channels.json` from the air: sweep UHF 13–62, one
+    `Pool.Reserve(PrioBackground)` per transport, `dvb-rs scan --merge
+    --add-new` folding each mux that locks into the document. Runs at first
+    start when there is no channel list, and on `POST /api/scan` (SSE
+    progress) thereafter.
   - `postprocess/` — what happens to a recording after the tuner lets go:
     transcode to an `.mp4` a browser can open, plus `.ass`/`.vtt` sidecars
     from `arib-caption`. Serialized, niced, and it waits while any recording
@@ -142,6 +152,7 @@ Implemented and tested (race-clean):
   + `/api/recordings/{id}/file` (download/stream, Range-capable) and
   `DELETE /api/recordings/{id}` (file + row),
   `/api/record` + `/api/record/{id}/stop` (record now / stop),
+  `/api/scan` (GET: is one running; POST: sweep the band, SSE progress),
   `/api/live/{channel}.m3u8` + segments, `/api/live/{channel}/stop`, and
   `/api/live/{channel}/switch` (change channel: close other sessions,
   tune, wait for the playlist). Also serves the embedded web UI
@@ -287,17 +298,29 @@ mid-recording finalizing as 'done'.
   whole curated list. It now refuses when the target is an existing channel
   list (`--force` overrides). Auditing means scanning to a scratch path and
   diffing, or `--merge`.
+- **`--merge` folds *names* in; `--merge --add-new` also creates records.**
+  Merging matches on SERVICE_ID + FREQUENCY, keeps whatever name a human
+  curated and adds the broadcast name as an alias — which is all a rescan of
+  a known mux should do. Building a list from nothing is the other job, and
+  the one a fresh install has: without `--add-new`, a sweep over an empty
+  document finds every service in the band and writes none of them. A service
+  is only ever added when the **SDT** named it; a placeholder means the SDT
+  could not be read and the names are PAT program numbers, which is not
+  enough to decide what belongs in a channel list (`515.14MHz#23864` was
+  exactly that — in the PAT, absent from the SDT, zero bytes when tuned).
+  Those are reported in `MergeReport::nameless` so a mux that produced
+  nothing says why.
 - **Both live URLs are multivariant playlists, composed per request.**
   `/stream.m3u8` and `/api/live/{ch}.m3u8` are the same manifest — video plus
   the WebVTT caption rendition — differing only in how far their URIs reach back
-  to `/api/live/`, so `masterPlaylist(channel, prefix, …)` builds it rather than
-  anything writing one to disk. Both carry the captions on purpose: Safari and
+  to `/api/live/`, so `masterPlaylist(session, quality, prefix, …)` builds it
+  rather than anything writing one to disk. Both carry the captions on purpose: Safari and
   iOS play HLS natively and pick a subtitle rendition out of the manifest, so an
   iPad bookmark gets captions with nothing of ours running in the browser. The
-  media playlist therefore needs a URL of its own (`{ch}/video.m3u8`) — a master
-  that referenced itself is not something a player can follow — and it is served
-  with ffmpeg's `-hls_base_url` prefix *stripped*, since from inside the
-  channel's path those URIs would resolve one directory too deep. A rendition is
+  media playlist therefore needs a URL of its own (`{ch}/{quality}/video.m3u8`)
+  — a master that referenced itself is not something a player can follow — and
+  it is served with ffmpeg's `-hls_base_url` prefix *stripped*, since from
+  inside the tier's path those URIs would resolve two directories too deep. A rendition is
   announced only when `subs.m3u8` exists: naming a playlist that 404s makes some
   players abandon the stream. But a player reads a master *once* and never
   re-fetches it, and a session's first `subs.m3u8` lands a publish tick after the
@@ -541,11 +564,76 @@ mid-recording finalizing as 'done'.
   registered with `r.Get` alone answers **405** to a HEAD, and a client reads
   that as "no". `http.ServeContent` already does the right thing for HEAD, so
   the handlers need nothing; only the registration does.
+- **Live picture quality is a tier the viewer picks, on demand, one at a
+  time.** `[live.quality.*]` in the config; the tier is a path segment in
+  every URL below the master playlist (`/api/live/{ch}/{q}/…`) and a `?q=`
+  on the master, because a relative segment URI has to resolve inside the
+  tier's own directory. The manifest carries **one** variant, never a ladder:
+  ABR would mean standing every tier up for every viewer, which is two or
+  three simultaneous H.264 encodes of the same picture on an N100's iGPU to
+  serve a switch nobody on a LAN needs. Three things follow. All tiers of a
+  channel share one tune and one lease (`hls.channelTune`), released when the
+  last viewer of the last tier goes — a second tier costs an ffmpeg, not an
+  adapter. They share one caption *decode* but get one *rendition* each,
+  because a player matches a subtitle fragment to the video fragment it is
+  playing and two encodes started minutes apart number their segments from
+  their own zero. And `-g` is never a tier's to set: every HLS segment must
+  begin with an IDR frame, so the GOP is `segmentSeconds × outputFPS`,
+  appended after whatever the tier asked for.
+- **Segment length, GOP and playlist window move together.** `hls_time 1`,
+  `-g 30` (1s × 30p after yadif), `hls_list_size 12`. The segment length is
+  the floor on live latency and the GOP has to divide it exactly, or ffmpeg
+  cuts at the next keyframe and segment durations drift off the advertised
+  `#EXTINF`. Halving the segment doubles the count, so the window a player
+  can reach back into stays ~12s. The player's share of the same budget is
+  `liveSyncDurationCount` in `VideoPlayer.tsx`; `lowLatencyMode` there does
+  nothing without `EXT-X-PART` and is kept only for the day LL-HLS is worth
+  its compatibility cost.
+- **Live segments belong on a tmpfs, and that is about writes, not latency.**
+  `hls_root = "$RUNTIME_DIRECTORY/hls"`, with `RuntimeDirectory=ferrite` in the
+  unit — systemd creates the directory and exports the variable, so the same
+  config works for the user unit (`/run/user/{uid}/ferrite`) and the system one
+  (`/run/ferrite`) with no uid written down, and `config.LiveRoot` falls back to
+  `storage_root` with a warning when the variable is absent (running from the
+  checkout by hand). A live session is a rolling write-and-delete of ~65 GB a
+  day at 6 Mbit/s on the same disk a recording is streaming to.
+  **`RuntimeDirectorySize=` is not a unit directive** — it is a logind setting
+  sizing the whole of `/run/user/{uid}`, and systemd 255 answers it in a unit
+  with "Unknown key name" and carries on. Nothing is lost: the usage is bounded
+  by `delete_segments` + `hls_list_size 12`, about 10 MB per channel per
+  quality (measured 4.3 MB with one 720p session), and the idle janitor closes
+  what nobody is watching. `clearStaleSegments` stays — a reboot starts empty,
+  but the same directory is reused every time a session on that channel opens.
+- **An adapter is labelled with what it can tune, and a claim only ever sees
+  the ones that can serve it.** `[[adapter]] n = 0, systems = ["ISDBT"]`;
+  the bare `adapters = [0]` form still parses and means the same thing. The
+  filter runs before idle selection *and* before preemption — evicting a
+  terrestrial tune to make room for a BS channel the same frontend cannot
+  receive costs a viewer their picture and gains nothing — and a channel
+  nothing can receive gets `ErrNoCapableAdapter` (HTTP 501), not
+  `ErrNoAdapter` (409). The distinction is the point: on a mixed card
+  (PT3 = 2×T + 2×S) dispatching to the wrong half does not fail, it waits out
+  the frontend lock timeout and reports a weak signal, which sends you up a
+  ladder to look at the aerial.
+- **A channel scan goes through the Pool like everything else, one
+  reservation per transport.** A sweep owns the frontend for ten minutes or
+  more; live playback and recordings have to be able to take it back, and
+  reserving per-mux means a preemption is never more than one transport away.
+  Being preempted ends the sweep rather than re-reserving immediately — but
+  each mux is merged as it is found, so nothing is lost. A `dvbr_bin` that
+  cannot be run aborts on the first transport instead of reporting fifty
+  quiet frequencies, because "the whole band is empty" and "the scanner is
+  not installed" are otherwise the same output.
 - **The transcode's ffmpeg arguments are configuration, not a codec name.**
   `transcode.input_args` / `output_args` are whole argument lists because the
   filter chain and the encoder go together: VAAPI wants `deinterlace_vaapi` +
   `scale_vaapi`, software wants `yadif` + `scale`, and naming only the encoder
-  produces an ffmpeg that fails at runtime. The default is software, which
+  produces an ffmpeg that fails at runtime. Whichever encoder, **scale the
+  width by the source SAR** — `scale_vaapi=w=trunc(iw*sar/2)*2:h=ih,setsar=1`,
+  which this ffmpeg accepts (checked on the iGPU against a real 1440x1080
+  recording: out 1920x1080 SAR 1:1). A hardcoded `w=1920:h=1080` is right for
+  HD only by coincidence, 1440 × 4/3 being 1920, and stretches every 4:3 SD
+  subchannel into a 16:9 frame. The default is software, which
   works anywhere; this box's config selects VAAPI (measured on the N100: 4.9×
   realtime at 68% of one core, against 2.2× at 309% for libx264 — the CPU
   headroom is the point, since live HLS keeps encoding while this runs).
