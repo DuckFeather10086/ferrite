@@ -1,5 +1,126 @@
 # Handoff
 
+## NEXT UP — the WebVTT caption flicker, and why it is a segmentation problem
+
+**Symptom.** Watching live with captions in **Text** mode, the caption box
+visibly blinks — it is torn down and rebuilt at every segment boundary. In
+**ARIB** mode it does not.
+
+**Mechanism, established.** A WebVTT cue has to be cut to the segment window it
+is published in (`caption.writeSegment`), or a caption spanning a boundary is
+published twice with different ends and a player draws it twice — that is the
+`internal/caption` invariant in CLAUDE.md and it is not negotiable. But a player
+dedups cues on start *and end and text* (hls.js hashes exactly those three), so
+the cut pieces are **different cues** to it and it rebuilds the box at each one.
+Visible in the published files:
+
+```
+sub12.vtt   09:46:36.963 --> 09:46:37.963   <舞台で共演してから>
+sub13.vtt   09:46:37.963 --> 09:46:38.850   <舞台で共演してから>
+            09:46:38.850 --> 09:46:38.963   <仲良くなった timelesz>   ← a 113ms sliver
+sub14.vtt   09:46:38.963 --> 09:46:39.963   <仲良くなった timelesz>
+```
+
+The rate is the **segment count and nothing else** — no alignment and no
+cleverness about *where* to cut changes it. Halving the segment doubles it.
+
+**Already done, and half of it is gone.** Segments went 1s → 2s (`afe1526`),
+which took a caption from spanning 2.5 segments on average to 1.7 — 1.5 rebuilds
+each down to 0.67, with about a third of captions now fitting inside one segment
+and never rebuilding at all. Measured off the published `.vtt` files rather than
+out of a browser (`scratchpad/recue.py` pattern: count distinct segment numbers
+per caption text; rebuilds = Σ(n−1)). The cost was latency, ~3s → ~6s at the
+live edge, which is why it did not go further.
+
+**The proposal that costs no latency.** Segment the *subtitle rendition* coarser
+than the video. HLS allows a subtitle rendition its own segmentation — a player
+matches subtitle fragments to video by **time**, not by index — so `subs.m3u8`
+could publish one 8s fragment per 8 video segments and cut the rebuild rate by
+4× at 2s video segments, with the video and its latency untouched.
+
+Where to work:
+
+- `internal/caption/pipeline.go`, `publish()`. It currently mirrors the video
+  playlist one-for-one and names each piece after the video segment's sequence
+  number. The change is to group N consecutive video segments into one subtitle
+  window and write `subs.m3u8` with its own `#EXTINF` and `#EXT-X-MEDIA-SEQUENCE`.
+- The window boundaries are already exact: `windowStarts` measures every video
+  segment's first video PTS out of the segment itself (`pts.go`), so a grouped
+  window is just `starts[i]` to `starts[i+N]` — no arithmetic on declared
+  durations.
+- **`sub{N}.json` must not move.** The ARIB overlay fetches it by
+  `frag.sn` of the *video* fragment; that naming is the whole reason it needs no
+  bookkeeping on either side. Only the `.vtt` grouping changes.
+- A caption still gets cut at the coarser boundaries, so the doubling guard has
+  to keep holding — the pieces must remain contiguous and never overlap.
+
+**What to check afterwards, and how.** The rebuild count per caption (above);
+that no two cues are ever active at once (`activeCues.length <= 1` over a run);
+that a viewer joining mid-caption still sees it, since the subtitle fragment
+covering the playhead is now up to 8s of content; and that the two renditions
+still agree about *when* a caption is on screen — CLAUDE.md's invariant is that
+they must, or switching ARIB↔Text moves the caption in time. The harness for the
+last one is the ARIB-vs-VTT onset comparison that measured 99.4% agreement.
+
+**Do not chase timing on this box by eye.** Live measurement here was noisy
+until the encoder had headroom: the captions-off baseline for segment regularity
+moved 3% → 8% on programme content alone, and a single 180s A/B blamed the wrong
+component twice. Measure off the published files where possible; when a browser
+is needed, keep the session alive (a script that only reads
+`$RUNTIME_DIRECTORY/hls` never touches the API, and the idle janitor closes the
+session out from under it after 60s — which silently truncated several
+"180-second" runs to ~70).
+
+## 2026-08-07 — live ARIB captions, and an encoder that had no headroom
+
+Two PRs, merged: ferrite #10 and libaribcaption-rs #2.
+
+**The feature.** Live captions were WebVTT only — the words, and none of the
+colours, background boxes, stroke, enclosure, ruby, or the DRCS glyphs a `.vtt`
+can only spell `〓`. Now `arib-caption cues --regions` serialises the whole
+`model::Caption` (new `render::json`), `internal/caption` publishes it as
+`sub{N}.json` beside the `.vtt`, and `web/src/lib/aribCaption.ts` draws the
+broadcast's own caption plane on a canvas over the picture. The WebVTT rendition
+is untouched and still announced: it is what an iPad gets from the manifest with
+nothing of ours running, and the only thing visible inside a bare fullscreen
+video. Verified against libass — same ink bounding box to the pixel — and on air.
+
+**Two mistakes worth not repeating**, both written into CLAUDE.md as invariants:
+
+1. The JSON rendition shipped first *without* the open-cue extension, on the
+   reasoning that the overlay holds its own cue list so neither of WebVTT's
+   adjustments applied. The clamping genuinely does not apply. The extension is
+   not an adjustment at all — it is the **only statement the publisher makes
+   that a caption is still on screen**, since the real end arrives with the next
+   caption. Without it the segments went silent past the decoder's five-second
+   guess, and the hole had to be filled at the other end with an invented
+   30-second lifetime, which is what left captions on screen long after the
+   broadcast moved on.
+2. "The caption pipeline's ffprobe is making the segments irregular" was
+   concluded from a single A/B and was **not established**. See the note above
+   about measurement noise. The real cause was the encoder.
+
+**The encoder.** ~1 live segment in 5 came out between 0.37s and 1.74s against
+an advertised 1.001s. Not reception (a recording off the same tune: 307,018
+packets, zero continuity breaks). Not the caption decode (`arib-caption` is
+**2.3% of one core**). One 720p `libx264 -tune zerolatency` measured **99.8% of
+a core** — 1.0× realtime with no margin, on a box with three cores idle, because
+zerolatency trades frame threading for latency. At that operating point anything
+moves a keyframe. Both live tiers are on VAAPI now: 13.9% of a core at 720p,
+18% at 1080p, one segment in sixty off-nominal. `usermod -aG render` is done on
+this box, which is what keeps the GPU reachable from a user unit that outlives
+the login session.
+
+**Also.** `internal/caption/pts.go` reads a segment's first video PTS itself
+rather than spawning ffprobe — same number (delta 0 ms), and cheap enough that
+every window is measured rather than derived, which retired `reanchorEvery`.
+`hls.Manager.reportDrops` now says out loud when fanout is discarding broadcast
+data because the encoder cannot keep up (47 chunks in the first 20s of a session
+before VAAPI, 14 after). Caption and quality controls moved inside the player
+with a fullscreen button — which is also why ARIB captions used to be invisible
+fullscreen: the page had no fullscreen button of its own, so the only way in was
+the native one, which takes the bare video and leaves the canvas behind.
+
 ## 2026-07-30 (last) — EPG coverage 9 → 38 services, and a list that matches the air
 
 Reported: "quite a lot of channels still have no EPG, and what is
