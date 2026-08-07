@@ -159,10 +159,11 @@ const HLS_CONFIG = {
   // day LL-HLS is worth its compatibility cost; what actually shortens the
   // live edge is the line below.
   lowLatencyMode: true,
-  // How far back from the live edge to start playing, in segments. hls.js
-  // defaults to 3, which at the daemon's 1s segments is 3s of buffer the
-  // viewer is watching from behind — and was 6s at the 2s segments this
-  // pairs with. Two is the least that still absorbs one late segment.
+  // How far back from the live edge to start playing, in *segments* — so it is
+  // half the latency budget and the daemon's segment length is the other half.
+  // hls.js defaults to 3, which at the daemon's 2s segments would be 6s of
+  // buffer the viewer is watching from behind. Two is the least that still
+  // absorbs one late segment, and 2 × 2s is where the live edge sits.
   liveSyncDurationCount: 2,
   manifestLoadPolicy: {
     default: {

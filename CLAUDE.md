@@ -725,15 +725,28 @@ mid-recording finalizing as 'done'.
   ARM board wants its own encoder in that shape: `h264_v4l2m2m` on a Pi 4,
   `h264_rkmpp` on Rockchip — and nothing on a Pi 5, which has no hardware H.264
   encoder at all.
-- **Segment length, GOP and playlist window move together.** `hls_time 1`,
-  `-g 30` (1s × 30p after yadif), `hls_list_size 12`. The segment length is
-  the floor on live latency and the GOP has to divide it exactly, or ffmpeg
-  cuts at the next keyframe and segment durations drift off the advertised
-  `#EXTINF`. Halving the segment doubles the count, so the window a player
-  can reach back into stays ~12s. The player's share of the same budget is
-  `liveSyncDurationCount` in `VideoPlayer.tsx`; `lowLatencyMode` there does
-  nothing without `EXT-X-PART` and is kept only for the day LL-HLS is worth
-  its compatibility cost.
+- **Segment length, GOP and playlist window move together.** `hls_time 2`,
+  `-g 60` (2s × 30p after yadif), `hls_list_size 6`. The GOP has to divide the
+  segment exactly, or ffmpeg cuts at the next keyframe and segment durations
+  drift off the advertised `#EXTINF` — so it is derived
+  (`segmentSeconds × outputFPS`) and never a tier's to set. Halving the segment
+  doubles the count, so the window a player can reach back into stays ~12s. The
+  player's share of the same budget is `liveSyncDurationCount` in
+  `VideoPlayer.tsx`; `lowLatencyMode` there does nothing without `EXT-X-PART`
+  and is kept only for the day LL-HLS is worth its compatibility cost.
+- **The segment length is also the caption flicker, and that is the trade it is
+  set by.** A WebVTT cue must be cut to the segment window it is published in or
+  a caption spanning a boundary is drawn twice — so a caption spanning N
+  segments arrives as N cues with different times, and a player, which dedups on
+  start *and end and text*, tears the box down and rebuilds it at each boundary.
+  That rebuild is the flicker, its rate is the segment count and nothing else,
+  and no amount of cleverness about *where* to cut changes it. Measured on this
+  box: at 1s a caption spanned 2.5 segments on average (1.5 rebuilds each); at
+  2s, 1.7 (0.67 each, with a third of captions now fitting inside one segment
+  and never rebuilding at all). The cost is latency — the floor is one segment,
+  plus `liveSyncDurationCount` more that the player sits behind the edge. The
+  ARIB overlay does not have the problem at any length: it keys cues by
+  `start_ms` and redraws only when the caption itself changes.
 - **Live segments belong on a tmpfs, and that is about writes, not latency.**
   `hls_root = "$RUNTIME_DIRECTORY/hls"`, with `RuntimeDirectory=ferrite` in the
   unit — systemd creates the directory and exports the variable, so the same

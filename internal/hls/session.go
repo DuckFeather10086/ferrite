@@ -61,15 +61,25 @@ const DefaultIdleTimeout = 60 * time.Second
 //   - playlistSegments is how far back a player can reach, in segments.
 //     segmentSeconds × playlistSegments ≈ 12s of window.
 //
-// The GOP handed to x264 is segmentSeconds × outputFPS, and that
+// The GOP handed to the encoder is segmentSeconds × outputFPS, and that
 // relationship is a hard constraint rather than a tuning choice: an HLS
 // segment must begin with an IDR frame, so a GOP that does not divide
 // the segment length makes ffmpeg cut late, at the next keyframe, and
 // segments drift away from the duration the playlist advertises.
+//
+// The length is also what decides how often the browser rebuilds a caption.
+// A WebVTT cue has to be cut to the segment window it is published in, or a
+// caption spanning a boundary is drawn twice — so a caption spanning N
+// segments arrives as N cues with different times, and a player, which dedups
+// on start *and end and text*, tears the box down and builds a new one at every
+// boundary. That rebuild is visible as a flicker, and its rate is the segment
+// count and nothing else: no alignment, no cleverness about where to cut.
+// Halving the segment doubles it. So the length trades latency against that,
+// and playlistSegments moves the other way to hold the reachable window at ~12s.
 const (
-	segmentSeconds   = 1
+	segmentSeconds   = 2
 	outputFPS        = 30
-	playlistSegments = 12
+	playlistSegments = 6
 )
 
 // Acquirer is the tuner.Pool seam (tests pass a fake).
