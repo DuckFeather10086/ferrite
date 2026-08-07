@@ -1,10 +1,43 @@
 # Handoff
 
-## NEXT UP — the WebVTT caption flicker, and why it is a segmentation problem
+## ~~NEXT UP~~ CLOSED 2026-08-07 — the WebVTT caption flicker
+
+**Closed without further work, deliberately.** The mechanism below is worth
+keeping because it explains why the segment length is the only lever; the
+proposal that followed it was wrong and is recorded so it is not re-proposed.
+
+**It is already rare.** At 2s segments, measured off the published files:
+**4 rebuilds in 150s — one every ~37 seconds.** The ceiling is one per segment
+(0.5/s), but captions are not that dense, so the real rate is a fifteenth of it.
+The 1s → 2s change did the work; what is left is not worth a design change.
+
+**The proposal that was rejected.** Segmenting the subtitle rendition coarser
+than the video (HLS permits it; a player matches subtitle fragments by time
+rather than index). Three reasons it does not pay:
+
+- **The window does not fit.** `hls_list_size 6` × 2s is a 12s window. 4s
+  subtitle fragments leave exactly 3 in it — the minimum a live playlist is
+  expected to hold — for a 2× improvement, not the 4× first claimed. 6s leaves
+  2, 8s leaves 1.5. Going coarser means giving the subtitle playlist a lifetime
+  of its own, diverging from the video's, which is more state to keep right.
+- **It trades an index alignment for a time alignment.** One-for-one is a stated
+  invariant, it is verified, and it is what lets `sub{N}` be named after the
+  video segment's own sequence number — which is exactly what the browser
+  overlay's `frag.sn` → `sub{N}.json` lookup rests on, with no bookkeeping on
+  either side. Live HLS has enough time-alignment traps without adding one to
+  buy 0.03/s.
+- **The overlay does not have the problem at all.** ARIB mode keys cues by
+  `start_ms` and redraws only when the caption itself changes, at any segment
+  length. The flicker is the older form's, and it is now within its own noise.
+
+If it is ever reopened, the lever is the segment length and nothing else — see
+the segment-length invariant in CLAUDE.md, which now carries this decision too.
+
+---
 
 **Symptom.** Watching live with captions in **Text** mode, the caption box
-visibly blinks — it is torn down and rebuilt at every segment boundary. In
-**ARIB** mode it does not.
+blinks — it is torn down and rebuilt at each segment boundary. In **ARIB** mode
+it does not.
 
 **Mechanism, established.** A WebVTT cue has to be cut to the segment window it
 is published in (`caption.writeSegment`), or a caption spanning a boundary is
@@ -31,36 +64,6 @@ and never rebuilding at all. Measured off the published `.vtt` files rather than
 out of a browser (`scratchpad/recue.py` pattern: count distinct segment numbers
 per caption text; rebuilds = Σ(n−1)). The cost was latency, ~3s → ~6s at the
 live edge, which is why it did not go further.
-
-**The proposal that costs no latency.** Segment the *subtitle rendition* coarser
-than the video. HLS allows a subtitle rendition its own segmentation — a player
-matches subtitle fragments to video by **time**, not by index — so `subs.m3u8`
-could publish one 8s fragment per 8 video segments and cut the rebuild rate by
-4× at 2s video segments, with the video and its latency untouched.
-
-Where to work:
-
-- `internal/caption/pipeline.go`, `publish()`. It currently mirrors the video
-  playlist one-for-one and names each piece after the video segment's sequence
-  number. The change is to group N consecutive video segments into one subtitle
-  window and write `subs.m3u8` with its own `#EXTINF` and `#EXT-X-MEDIA-SEQUENCE`.
-- The window boundaries are already exact: `windowStarts` measures every video
-  segment's first video PTS out of the segment itself (`pts.go`), so a grouped
-  window is just `starts[i]` to `starts[i+N]` — no arithmetic on declared
-  durations.
-- **`sub{N}.json` must not move.** The ARIB overlay fetches it by
-  `frag.sn` of the *video* fragment; that naming is the whole reason it needs no
-  bookkeeping on either side. Only the `.vtt` grouping changes.
-- A caption still gets cut at the coarser boundaries, so the doubling guard has
-  to keep holding — the pieces must remain contiguous and never overlap.
-
-**What to check afterwards, and how.** The rebuild count per caption (above);
-that no two cues are ever active at once (`activeCues.length <= 1` over a run);
-that a viewer joining mid-caption still sees it, since the subtitle fragment
-covering the playhead is now up to 8s of content; and that the two renditions
-still agree about *when* a caption is on screen — CLAUDE.md's invariant is that
-they must, or switching ARIB↔Text moves the caption in time. The harness for the
-last one is the ARIB-vs-VTT onset comparison that measured 99.4% agreement.
 
 **Do not chase timing on this box by eye.** Live measurement here was noisy
 until the encoder had headroom: the captions-off baseline for segment regularity
