@@ -692,13 +692,16 @@ func (d Deps) handleLiveSegment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Segments are .ts, but the same directory also holds the subtitle
-	// rendition written by internal/caption — its playlists and .vtt
-	// segments. Serving those as video/mp2t makes a player discard them.
+	// renditions written by internal/caption — its playlist, its .vtt
+	// segments, and the .json the ARIB overlay draws from. Serving those as
+	// video/mp2t makes a player discard them.
 	switch {
 	case strings.HasSuffix(segment, ".m3u8"):
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	case strings.HasSuffix(segment, ".vtt"):
 		w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
+	case strings.HasSuffix(segment, ".json"):
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	default:
 		w.Header().Set("Content-Type", "video/mp2t")
 	}

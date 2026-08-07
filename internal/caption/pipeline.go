@@ -20,8 +20,27 @@
 //     playing; if the windows do not correspond, it fetches the wrong file and
 //     the cues inside it are never shown.
 //
-// The anchor — which PTS the first listed segment starts at — is measured once
-// per session with ffprobe, since only the segment itself knows.
+// Which PTS a segment starts at is measured out of the segment, since only the
+// segment knows — every one of them, once each, by reading its first video PES
+// header directly (see pts.go). It used to be one ffprobe per five segments
+// with the rest of the window derived from the durations the playlist declares;
+// that spawn turned out to be stalling the encoder enough to make the segments
+// irregular, so the caption pipeline was corrupting the very thing it measured.
+//
+// # Two forms of the same words
+//
+// Beside each `sub{N}.vtt` this writes a `sub{N}.json`: the whole decoded
+// caption for that window — cells, colours, sizes, ruby, the DRCS bitmaps a
+// `.vtt` can only spell 〓 — for a browser that draws the caption itself instead
+// of handing the words to the player. It is not in any playlist and no player
+// asks for it; the overlay knows which video fragment it is playing and fetches
+// the JSON of that number, which works because writeSegment already names both
+// after the video segment's own sequence number.
+//
+// The WebVTT rendition stays exactly as it was. It is what Safari and an iPad
+// get from the manifest with nothing of ours running, and it is what the browser
+// draws inside its own fullscreen video, where a canvas overlay is invisible.
+// This adds a form; it does not replace one.
 package caption
 
 import (
@@ -33,7 +52,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -57,6 +75,12 @@ type Cue struct {
 	Open bool   `json:"open"`
 	Top  bool   `json:"top"`
 	Text string `json:"text"`
+	// Caption is the whole decoded caption — cells, colours, sizes, DRCS
+	// bitmaps — as `cues --regions` serialises it. Carried through untouched
+	// and republished verbatim: nothing here understands it, and re-encoding
+	// a document to write it back out unchanged is only a way to lose a field.
+	// Absent when the decoder was not asked for regions.
+	Caption json.RawMessage `json:"caption,omitempty"`
 }
 
 // How many cues to keep. At one line every two seconds this is over an hour,
@@ -79,9 +103,6 @@ const maxCues = 2048
 type Pipeline struct {
 	// Bin is the arib-caption executable. Empty disables captions.
 	Bin string
-	// FFprobeBin measures the anchor PTS. Without it the rendition cannot be
-	// timed, so captions stay off.
-	FFprobeBin string
 
 	Channel string
 	// Sub is a second subscription to the same tune the video comes from.
@@ -110,10 +131,10 @@ type Rendition struct {
 	dir      string
 	playlist string
 
-	// Guarded by the owning Pipeline's mu.
-	anchorMs  int64
-	anchorSeq int64
-	haveAnc   bool
+	// The measured start of each listed segment, by sequence number, so a
+	// segment is read once however many ticks it stays in the playlist.
+	// Touched only by the publish loop, which is single-goroutine.
+	starts map[int64]int64
 }
 
 // Dir is where this rendition writes, for callers that need to check
@@ -143,16 +164,6 @@ func (p *Pipeline) Detach(r *Rendition) {
 	}
 }
 
-// reanchorEvery bounds how far a segment window may be derived from declared
-// durations before the timeline is measured again.
-//
-// ffmpeg writes #EXTINF:2.002 while the segments really run about 11 ms shorter,
-// so adding durations up drifts — a quarter of a second by segment 20, and past
-// a whole segment within the hour. Re-measuring every few segments keeps the
-// error inside a video frame or two, and costs one ffprobe per five segments
-// however long they are.
-const reanchorEvery = 5
-
 // SubsPlaylist is the name of the subtitle media playlist. It lives in Dir and
 // is served like a segment; the multivariant playlist that points at it is
 // composed by the API, which knows the URL it is being served from.
@@ -169,13 +180,15 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	if p.Sub == nil {
 		return errors.New("caption: no TS subscription")
 	}
-	if p.FFprobeBin == "" {
-		return errors.New("caption: ffprobe is needed to anchor the cue timeline")
-	}
 
 	// `cues` prints a JSON object per line as each cue closes, flushed
 	// immediately — a caption is only worth something while it is on screen.
-	child, err := proc.SpawnOpt(ctx, proc.SpawnOpts{Stdin: true}, p.Bin, "cues")
+	//
+	// --regions attaches the whole caption model to each line, which is the
+	// JSON rendition's entire content. One decoder either way: the words and
+	// the placement come out of the same pass, so the two renditions cannot
+	// describe different captions.
+	child, err := proc.SpawnOpt(ctx, proc.SpawnOpts{Stdin: true}, p.Bin, "cues", "--regions")
 	if err != nil {
 		return fmt.Errorf("caption: spawn %s: %w", p.Bin, err)
 	}
@@ -226,7 +239,11 @@ func (p *Pipeline) Run(ctx context.Context) error {
 // readCues collects cues until stdout closes.
 func (p *Pipeline) readCues(r io.Reader) {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 8*1024), 64*1024)
+	// A line is a few hundred bytes of words plus, with --regions, the whole
+	// caption: ~4 KB for an ordinary two-line caption and more for one built
+	// out of DRCS bitmaps. Over the limit a scanner stops at the line rather
+	// than skipping it, so the ceiling is generous on purpose.
+	scanner.Buffer(make([]byte, 0, 16*1024), 1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || line[0] != '{' {
@@ -319,39 +336,17 @@ func (p *Pipeline) publish(ctx context.Context, r *Rendition) error {
 		return nil
 	}
 
-	// Measure the timeline on the newest listed segment, so the windows either
-	// side of it are derived from at most a few durations.
-	newest := segments[len(segments)-1]
-	if err := p.anchor(ctx, r, newest); err != nil {
-		return err
+	// Measured before the lock is taken: this reads files, and the same mutex
+	// is held by the goroutine draining cues off the decoder.
+	starts, ok := r.windowStarts(segments)
+	if !ok {
+		// Nothing in the playlist could be measured — a session whose segments
+		// are being written as this runs. The next tick tries again.
+		return nil
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
-	// Start times, computed outward from the anchor rather than accumulated
-	// from the head of the stream: forward by adding each segment's duration,
-	// backward by subtracting the previous one's.
-	starts := make([]int64, len(segments))
-	anchorAt := -1
-	for i, seg := range segments {
-		if seg.seq == r.anchorSeq {
-			anchorAt = i
-			break
-		}
-	}
-	if anchorAt < 0 {
-		// The anchor rotated out between measuring and here; the next pass
-		// re-measures.
-		return nil
-	}
-	starts[anchorAt] = r.anchorMs
-	for i := anchorAt + 1; i < len(segments); i++ {
-		starts[i] = starts[i-1] + int64(segments[i-1].duration*1000)
-	}
-	for i := anchorAt - 1; i >= 0; i-- {
-		starts[i] = starts[i+1] - int64(segments[i].duration*1000)
-	}
 
 	live := make(map[string]bool, len(segments))
 	var playlist strings.Builder
@@ -360,12 +355,27 @@ func (p *Pipeline) publish(ctx context.Context, r *Rendition) error {
 
 	for i, seg := range segments {
 		start := starts[i]
+		// The window ends where the next one begins — measured, not declared.
+		// Only the newest segment has nothing after it to end against, and
+		// there its own #EXTINF is all there is.
 		end := start + int64(seg.duration*1000)
+		if i+1 < len(segments) {
+			end = starts[i+1]
+		}
 		name := fmt.Sprintf("sub%d.vtt", seg.seq)
 		if err := p.writeSegment(r, name, start, end); err != nil {
 			return err
 		}
 		live[name] = true
+		// The second form of the same window, for the overlay that draws
+		// captions itself. It is not in the playlist and no player asks for
+		// it: the browser knows which video fragment it is playing and fetches
+		// the JSON of that number. See writeSegmentJSON.
+		jsonName := fmt.Sprintf("sub%d.json", seg.seq)
+		if err := p.writeSegmentJSON(r, jsonName, seg.seq, start, end); err != nil {
+			return err
+		}
+		live[jsonName] = true
 		fmt.Fprintf(&playlist, "#EXTINF:%.3f,\n%s\n", seg.duration, name)
 	}
 
@@ -373,16 +383,19 @@ func (p *Pipeline) publish(ctx context.Context, r *Rendition) error {
 		return err
 	}
 
-	// Prune every .vtt the playlist no longer references, mirroring ffmpeg's
-	// delete_segments. Read the directory rather than trusting what this
-	// process wrote: a session reusing the channel's directory inherits the
-	// previous run's segments, whose sequence numbers are unrelated to this
-	// run's and would otherwise pile up.
+	// Prune every segment of either form the playlist no longer references,
+	// mirroring ffmpeg's delete_segments. Read the directory rather than
+	// trusting what this process wrote: a session reusing the channel's
+	// directory inherits the previous run's segments, whose sequence numbers
+	// are unrelated to this run's and would otherwise pile up.
 	entries, err := os.ReadDir(r.dir)
 	if err == nil {
 		for _, entry := range entries {
 			name := entry.Name()
-			if !strings.HasPrefix(name, "sub") || !strings.HasSuffix(name, ".vtt") {
+			if !strings.HasPrefix(name, "sub") {
+				continue
+			}
+			if !strings.HasSuffix(name, ".vtt") && !strings.HasSuffix(name, ".json") {
 				continue
 			}
 			if !live[name] {
@@ -480,6 +493,77 @@ func (p *Pipeline) writeSegment(r *Rendition, name string, startMs, endMs int64)
 	return writeFileAtomic(filepath.Join(r.dir, name), []byte(body.String()))
 }
 
+// jsonSegment is one window's worth of structured cues: the same selection the
+// WebVTT segment beside it makes, and the window itself so a consumer can put
+// the cues on its own clock.
+//
+// Cues is never nil. A `null` where a list belongs is invisible in Go and
+// crashes the other end, which is the same rule the API's list endpoints have.
+type jsonSegment struct {
+	Segment int64 `json:"segment"`
+	// The broadcast PTS window this segment covers, in milliseconds — measured
+	// on the video segment of the same number (see anchor). It is the whole
+	// bridge between the cue times, which are raw broadcast PTS, and a player's
+	// own timeline: the fragment starting at frag.start on that timeline starts
+	// at StartMs on this one, and one subtraction converts every cue.
+	StartMs int64 `json:"start_ms"`
+	EndMs   int64 `json:"end_ms"`
+	Cues    []Cue `json:"cues"`
+}
+
+// writeSegmentJSON writes the cues on screen during [startMs, endMs) as the
+// structured form of the same segment.
+//
+// Of the two things writeSegment does to a cue, one applies here and one does
+// not, and the difference is what each is for.
+//
+//   - **The open-cue extension applies.** It is not a workaround for how a
+//     player holds cues — it is the only statement this ever makes that a
+//     caption is *still on screen*. An ARIB caption's end arrives with the next
+//     caption, so until then all the decoder can offer is a guess
+//     (`PROVISIONAL_MS`, five seconds); publishing that guess and stopping there
+//     leaves every caption that outlives it missing from the segments in
+//     between, with nothing to say whether it ended or is simply still up. So an
+//     open cue runs to the end of whatever window is being written — on screen
+//     *now*, for as long as it stays — and the window it is written into is what
+//     bounds it. Getting this wrong is not subtle: the consumer has to invent a
+//     lifetime for the hole, and any number it invents outlives the broadcast's.
+//   - **The clamping does not.** That one *is* about how a player holds cues:
+//     one dedups by start, end and text, so an uncut caption spanning a boundary
+//     reads as two cues and gets drawn twice. A consumer of this keys on
+//     `start_ms` alone, so the same caption arriving in four segments is one
+//     caption seen four times, and cutting its start would make it four
+//     different ones.
+//
+// Which leaves the two renditions asserting exactly the same thing at every
+// instant — see the invariant in CLAUDE.md. They have to: a viewer switching
+// between them must not see the caption move in time.
+func (p *Pipeline) writeSegmentJSON(r *Rendition, name string, seq, startMs, endMs int64) error {
+	doc := jsonSegment{Segment: seq, StartMs: startMs, EndMs: endMs, Cues: []Cue{}}
+	if endMs > startMs {
+		for _, cue := range p.cues {
+			// The window bounds an open cue in *both* directions, which is why
+			// this is an assignment and not the max writeSegment appears to
+			// take: that one extends and then clamps to the same window, so what
+			// it really states is the window's own end. Two renditions saying
+			// different things about when a caption left the screen is a caption
+			// that jumps when the viewer switches between them.
+			if cue.Open {
+				cue.EndMs = endMs
+			}
+			if cue.EndMs <= startMs || cue.StartMs >= endMs {
+				continue
+			}
+			doc.Cues = append(doc.Cues, cue)
+		}
+	}
+	body, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(filepath.Join(r.dir, name), body)
+}
+
 func formatCue(cue Cue) string {
 	line := bottomLine
 	if cue.Top {
@@ -503,66 +587,63 @@ func escapeVTT(text string) string {
 	return strings.ReplaceAll(text, ">", "&gt;")
 }
 
-// anchor measures the PTS the given segment starts at, when the last
-// measurement is more than reanchorEvery segments away.
-func (p *Pipeline) anchor(ctx context.Context, r *Rendition, seg segment) error {
-	p.mu.Lock()
-	fresh := r.haveAnc && seg.seq-r.anchorSeq < reanchorEvery && seg.seq >= r.anchorSeq
-	p.mu.Unlock()
-	if fresh {
-		return nil
-	}
+// windowStarts is the broadcast PTS each listed segment begins at.
+//
+// Every one of them is *measured*, out of the segment itself, and each segment
+// is measured exactly once — a segment does not change after ffmpeg closes it,
+// so the answer is cached by sequence number for as long as the playlist
+// references it. That is what retires the old arrangement, where one segment
+// was probed and the rest of the window was derived by adding up the durations
+// the playlist declares. Two things go with it: the drift those declared
+// durations accumulate, and the subprocess the probe used to be — which was
+// itself making the segments irregular (see pts.go).
+//
+// Reports false when nothing could be measured at all. A segment that cannot be
+// read on its own is filled in from a neighbour, since a playlist entry whose
+// file is a moment from existing is ordinary rather than exceptional.
+func (r *Rendition) windowStarts(segments []segment) ([]int64, bool) {
+	starts := make([]int64, len(segments))
+	known := make([]bool, len(segments))
+	fresh := make(map[int64]int64, len(segments))
+	any := false
 
-	path := filepath.Join(r.dir, seg.name)
-	pts, err := firstVideoPTS(ctx, p.FFprobeBin, path)
-	if err != nil {
-		return err
-	}
-
-	p.mu.Lock()
-	first := !r.haveAnc
-	r.anchorMs = int64(pts * 1000)
-	r.anchorSeq = seg.seq
-	r.haveAnc = true
-	p.mu.Unlock()
-	if first {
-		slog.Info("caption: anchored cue timeline",
-			"channel", p.Channel, "segment", seg.name, "pts_s", pts)
-	} else {
-		slog.Debug("caption: re-anchored cue timeline",
-			"channel", p.Channel, "segment", seg.name, "pts_s", pts)
-	}
-	return nil
-}
-
-// firstVideoPTS reads the presentation timestamp of a segment's first video
-// packet. With ffmpeg's -copyts this is a broadcast PTS, the same clock the
-// captions carry.
-func firstVideoPTS(ctx context.Context, ffprobeBin, path string) (float64, error) {
-	cmd := exec.CommandContext(ctx, ffprobeBin,
-		"-v", "error",
-		"-select_streams", "v:0",
-		"-show_entries", "packet=pts_time",
-		"-read_intervals", "%+#1",
-		"-of", "csv=p=0",
-		path,
-	)
-	out, err := cmd.Output()
-	if err != nil {
-		return 0, fmt.Errorf("caption: ffprobe %s: %w", filepath.Base(path), err)
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(line), ","))
-		if line == "" {
+	for i, seg := range segments {
+		if ms, ok := r.starts[seg.seq]; ok {
+			starts[i], known[i], any = ms, true, true
+			fresh[seg.seq] = ms
 			continue
 		}
-		pts, err := strconv.ParseFloat(line, 64)
+		ms, err := firstVideoPTS(filepath.Join(r.dir, seg.name))
 		if err != nil {
+			// Not worth a log line: the newest segment is routinely still
+			// being written when this runs, and the next tick will have it.
 			continue
 		}
-		return pts, nil
+		starts[i], known[i], any = ms, true, true
+		fresh[seg.seq] = ms
 	}
-	return 0, fmt.Errorf("caption: no video PTS in %s", filepath.Base(path))
+	// Only what the playlist still lists, so the map cannot outgrow the window.
+	r.starts = fresh
+	if !any {
+		return nil, false
+	}
+
+	// Fill the gaps from whichever side has an answer, using the declared
+	// durations for the one hop. Forward first, then backward for anything at
+	// the head that had nothing before it.
+	for i := 1; i < len(segments); i++ {
+		if !known[i] && known[i-1] {
+			starts[i] = starts[i-1] + int64(segments[i-1].duration*1000)
+			known[i] = true
+		}
+	}
+	for i := len(segments) - 2; i >= 0; i-- {
+		if !known[i] && known[i+1] {
+			starts[i] = starts[i+1] - int64(segments[i].duration*1000)
+			known[i] = true
+		}
+	}
+	return starts, true
 }
 
 // readPlaylist parses the segment list of an ffmpeg-written media playlist.

@@ -66,12 +66,13 @@ dvb-rs stdout → b25-rs stdin → b25-rs stdout → fanout.Broadcaster
     update store row.
   - `scheduler/` — `robfig/cron` driving recordings from `schedules`
     table.
-  - `caption/` — the live subtitle rendition: a second fanout consumer feeds
-    `arib-caption cues`, and this segments the resulting cues into WebVTT
-    beside the video segments (`subs.m3u8`, `sub{N}.vtt`). One `Pipeline`
-    (one decoder, one subscription) per *channel*, with one `Rendition`
-    attached per quality tier — the words are the same at every bitrate, the
-    segment numbering is not.
+  - `caption/` — the live subtitle renditions: a second fanout consumer feeds
+    `arib-caption cues --regions`, and this segments the resulting cues into
+    WebVTT beside the video segments (`subs.m3u8`, `sub{N}.vtt`) *and* into the
+    structured form the browser's own ARIB overlay draws (`sub{N}.json`). One
+    `Pipeline` (one decoder, one subscription) per *channel*, with one
+    `Rendition` attached per quality tier — the words are the same at every
+    bitrate, the segment numbering is not.
   - `hls/` — one session per channel *and quality*: acquire lease → ffmpeg
     subprocess → `{hls_root}/{channel}/{quality}/`. Refcounted; teardown when
     the last viewer leaves. On start it delays audio via `-af asetpts` to
@@ -172,8 +173,8 @@ Implemented and tested (race-clean):
   in file order. Diverging means one tool reads a channel while another acts on
   a different one. `bun test` needs no network and no API key.
 - `web/` — Bun + Next.js 16 (App Router, TypeScript, Tailwind CSS).
-  Four pages: Live (hls.js player + captions on/off + record now / stop),
-  Guide (EPG, one click books a programme), Schedules (create/cancel),
+  Four pages: Live (hls.js player + `ARIB | Text | Off` captions + record now /
+  stop), Guide (EPG, one click books a programme), Schedules (create/cancel),
   Recordings (watch, stop a running one, convert, download, delete). Static
   `output: 'export'`; all data fetching is client-side via SWR against the
   `/api/*` endpoints.
@@ -200,6 +201,28 @@ Implemented and tested (race-clean):
   human pass over `channels.json` would tidy it.
 - Watch-one-channel-while-recording-another needs a second tuner; with
   one adapter the recording wins and live drops.
+
+**Verified in a browser and on the air (2026-08-06, live ARIB captions):** the
+overlay draws what the broadcast sent. Against libass first, since that is the
+cheap question: one caption of a real recording — ruby, a DRCS glyph, an
+enclosure box — drawn on a canvas at 1920×1080 and the same caption burned onto
+the same frame by `ffmpeg -vf ass`, with the shipped `.woff2` registered for
+fontconfig so both used the one font. Ink bounding box **identical** (x
+319..1528, y 852..993 against 851..993), background boxes identical (rows
+838..1017), 0.5% of pixels differing by more than 8 and all of them on glyph
+edges — the difference image is hairline outlines, not ghosts. Then live on this
+box, headless Chromium 1217 against NHK 総合: `ARIB` enabled itself off the
+manifest, the canvas had ink 2s later, and the caption came up yellow in the
+broadcast's own two boxed lines with an emergency 震度4 superimpose in white on
+green above it — none of which reaches the `.vtt`. Placement holds under a
+letterboxed picture (box 1296 wide, picture 767.8, canvas within 0.19px of the
+picture and not the box). Exactly one form at a time: switching to `Text` blanks
+the canvas to `display:none` and puts one cue on the native track; taking the
+bare video into fullscreen does the same and reverses on the way out, with `ARIB`
+still lit as the choice. And the two clocks agree — with the text track kept
+`hidden` beside the overlay, canvas ink and `activeCues` matched on **99.4%** of
+180 samples over 45s across 6 captions, the only disagreement a single 0.25s
+sample at a boundary.
 
 **Verified in a browser and against libass (2026-08-06, ARIB placement):** the
 same recording's `.ass`, measured in the page and burned onto its own MP4 with
@@ -329,29 +352,100 @@ mid-recording finalizing as 'done'.
   that first one rather than composing a manifest that silently means "this
   channel has no subtitles tonight". `{ch}/video.m3u8` only ever *serves* a
   session, it never opens one.
-- **The caption *rendering* is the browser's; the caption *switch* has to be
-  ours.** hls.js turns the manifest's subtitle rendition into a native
-  `TextTrack` (`renderTextTracksNatively`, its default), which is what draws
-  captions inside the browser's own fullscreen video and what an iPad gets from
-  the manifest with nothing of ours running. Leaving the switch to the browser
-  too was the first attempt and it made live captions unreachable: Chromium's
-  control bar has **no captions button at all** (checked against the
+- **Live captions come in two forms and exactly one is mounted, same as a
+  recording's.** `ARIB | Text | Off` under the picture. *Text* is the WebVTT
+  rendition drawn by the browser as a native `TextTrack` — the words at the
+  bottom, and it is what an iPad gets from the manifest with nothing of ours
+  running. *ARIB* is the broadcast's own caption plane on a canvas over the
+  video, drawn from `sub{N}.json` by `web/src/lib/aribCaption.ts`: the colours,
+  the per-cell background boxes, the enclosure rules, ruby, and the DRCS glyphs a
+  `.vtt` can only spell 〓. Both at once is the same words rendered twice. The
+  VTT rendition therefore stays announced in the master playlist whatever the
+  overlay does — this work added a form, it did not replace one.
+- **The caption *switch* has to be ours, whichever form is drawing.** Leaving it
+  to the browser was the first attempt and it made live captions unreachable:
+  Chromium's control bar has **no captions button at all** (checked against the
   accessibility tree — pause, fullscreen, mute, and an overflow ⋮), so the only
   way in was ⋮ → "show closed captions menu" → 日本語, two levels down a menu
-  nobody opens. The Live page therefore carries `CAPTIONS On|Off` under the
-  picture, like the Recordings player's own control and for the same reason it is
-  not an overlay: a control above the video is on screen whether or not the
-  native controls are. Setting `TextTrack.mode` *is* the switch — hls.js reads
-  that change back and starts loading the rendition, which is how it maps its own
-  menu selections — so a choice made in the browser's menu still works and is
-  picked up by the button rather than fought with. `DEFAULT=NO` keeps captions
-  off until asked, and the choice rides into the next channel as
-  `subtitlePreference` (detaching the media clears the selection, so without that
-  every channel change would quietly turn captions back off). What the button
+  nobody opens. On the Live page the control goes *inside* the player, and so
+  does every other setting the player has — captions, quality, fullscreen, in one
+  bar across the top that fades with the pointer like the browser's own. Under
+  the picture is where they started and it is the wrong place: everything below
+  the player is unreachable for as long as the viewer is watching fullscreen,
+  which is the state where a caption control matters most. The *bottom* of the
+  picture is not available either, being where the native bar and the captions
+  both are. Nothing is left below, so the player is now exactly the picture and
+  the page's idle "▶ Watch" overlay lands on it rather than on it plus a strip.
+  `DEFAULT=NO` keeps captions off until asked, and the
+  choice rides into the next channel as `subtitlePreference` (detaching the media
+  clears the selection, so without that every channel change would quietly turn
+  captions back off). A choice made in the browser's own menu is still picked up
+  rather than fought with — but only in the *on* direction: a track going
+  `disabled` is what hls.js does to every track as it detaches, so adopting that
+  would throw the viewer's choice away on each channel change. What the control
   reports as *available* comes from `hls.subtitleTracks`, not from the element: a
   `TextTrack` cannot be removed once added, so the last channel's track outlives
   a channel change and going by that would offer captions on a channel sending
   none.
+- **In ARIB mode the text track is `hidden`, not `disabled`, and
+  `hls.subtitleDisplay` is what keeps it that way.** Hidden means hls.js still
+  treats the rendition as selected and keeps loading it
+  (`subtitle-track-controller`'s `onTextTracksChanged` reads a hidden track as
+  the current one) while the browser draws nothing — so the fullscreen fallback
+  below is a mode flip rather than a wait for the next subtitle fragment. But
+  hls.js re-selects the rendition after every channel change and sets it
+  `showing` when it does, which would put the browser's own captions underneath
+  ours; `hls.subtitleDisplay = false` is the knob that says "select it, do not
+  display it", and it has to be set before the first selection, not after.
+- **Fullscreen decides which caption form can be drawn here too, exactly as on
+  the Recordings page.** The canvas is a sibling of the `<video>`, so the
+  player's *native* fullscreen button — which takes the video alone and cannot be
+  talked out of it — leaves the overlay behind on the page. `effective` therefore
+  falls back from `arib` to `vtt` for as long as the bare video is fullscreen and
+  reverses on the way out; the control keeps showing the viewer's choice, because
+  this is a rendering fallback and not a change of mind. Our own fullscreen
+  button takes the container, which is the only way to watch fullscreen with the
+  broadcast's placement — so the Live player has to *have* one. It did not at
+  first, only the `f` key, which left the native button as the only way in and
+  therefore left ARIB captions looking as though they simply did not work
+  fullscreen. It lives in the in-player bar above, inside the element being
+  fullscreened.
+- **The ARIB overlay puts broadcast PTS on the player's clock in the browser,
+  from two numbers it is already given.** `sub{N}.json` states the PTS window it
+  was cut to and hls.js states where fragment N sits on the media timeline
+  (`frag.start`, in the same seconds as `video.currentTime`); the difference is a
+  constant, refreshed on every `FRAG_LOADED`, and one subtraction converts every
+  cue. Nothing re-times anything downstream. The sidecar is not in any playlist
+  and no player asks for it — it is named after the *video* segment's own
+  sequence number, which hls.js hands back as `frag.sn`, so the browser already
+  knows which file it wants. Only `frag.type === 'main'`: the subtitle and audio
+  renditions number their fragments separately, and an init segment has no
+  sequence number at all.
+- **The JSON rendition drops the clamping and keeps the extension, and the two
+  are not the same kind of thing.** The clamping is about how a *player* holds
+  cues: one dedups by start, end and text, so an uncut caption spanning a
+  boundary reads as two cues and gets drawn twice. The overlay keys on `start_ms`
+  alone and replaces in place, so a caption delivered in five segments is one
+  caption seen five times — and cutting its start would make it five different
+  ones. The extension is not a workaround at all: it is the *only* statement the
+  publisher ever makes that a caption is still on screen. An ARIB caption's end
+  arrives with the next caption, so until then all the decoder has is a guess
+  (`PROVISIONAL_MS`, five seconds), and publishing that guess and stopping leaves
+  every caption that outlives it missing from the windows in between, with
+  nothing to say whether it ended or is simply still up. Shipped that way once:
+  the hole then has to be filled at the other end, and the 30-second lifetime
+  invented to fill it is what left captions on screen long after the broadcast
+  had moved on.
+- **So an open cue's end is the end of the window it is written into, in both
+  renditions, and they have to agree to the millisecond.** An assignment, not a
+  max — `writeSegment` appears to extend upward but then clamps to the same
+  window, so what it really states is the window's own end, and
+  `writeSegmentJSON` states the same. The overlay then takes `end_ms` exactly as
+  given and invents nothing. Two renditions disagreeing about when a caption left
+  the screen is a caption that jumps when the viewer switches between them, which
+  is the same class of bug as the two disagreeing about `line:94%`. Checked by
+  capturing both forms of every window off a live tune and comparing the cue
+  counts; they matched on all of them.
 - **Where a WebVTT cue sits is ours to say, and the only setting that works is a
   bare `line:<percent>`.** A browser's default placement is not the bottom of the
   picture: it reserves room for its control bar whether or not the controls are
@@ -557,6 +651,28 @@ mid-recording finalizing as 'done'.
   `/fonts/` `immutable` rather than `no-store` like the rest of the bundle — a
   megabyte, asked for every time a recording is opened, versioned by its own
   filename. Which is the rule for replacing it: rename the file.
+- **Canvas is the mirror of that, and the ratio comes back as the baseline.**
+  `ctx.font = "36px …"` **is** the em, so an ARIB cell's height goes in
+  unmultiplied — writing `36 × 1.395` there, the number the `.ass` needs, would
+  draw the glyph 40% too big. The font's own proportions are still load-bearing,
+  just at the other end: ARIB centres the character in its cell and a font's ink
+  is not centred on its baseline, so the baseline is `cell centre + (ascent −
+  descent) / 2` with both read off `measureText` (`fontBoundingBoxAscent`
+  /`Descent`, which is what libass's `usWinAscent + usWinDescent` comes out as in
+  Chromium for this font). Both numbers are measured rather than assumed, and the
+  cache they land in is thrown away when `document.fonts.load` resolves — the
+  same trap ASS.js sets by measuring per family name, reached from the other
+  side. Width is measured too, and only ever *squeezed*, never stretched: a
+  fullwidth glyph in a half-width MSZ cell is what a television squeezes to 50%,
+  and measuring keeps that right when the decoder has already substituted a
+  halfwidth character or the named font did not resolve.
+- **A caption plane is fitted to the picture, not to the element — in the live
+  player as well.** Same trap, same 70vh height cap: past it the box is wider
+  than the 16:9 video inside it and the bars are the same black as everything
+  else, so laying the plane across them looks merely "not quite right". The
+  overlay computes the `object-fit: contain` rectangle from
+  `videoWidth`/`videoHeight` itself and positions the canvas on that; measured at
+  0.19px against a picture 528px narrower than its box.
 - **The file endpoints answer HEAD, not just GET.** "Is this there?" is a
   question a client asks before committing — the Recordings page asks it to
   know whether a recording has captions before offering to show them, and a
@@ -580,6 +696,35 @@ mid-recording finalizing as 'done'.
   their own zero. And `-g` is never a tier's to set: every HLS segment must
   begin with an IDR frame, so the GOP is `segmentSeconds × outputFPS`,
   appended after whatever the tier asked for.
+- **The live encoder needs headroom, and running it at exactly realtime is what
+  makes everything else look broken.** A single 720p live encode with
+  `libx264 -preset superfast -tune zerolatency` measured **99.8% of one core**
+  on this box — 1.0× realtime, no margin, with three other cores idle, because
+  zerolatency trades frame threading for latency and sliced threads do not scale
+  out. At that operating point any perturbation pushes the encoder behind:
+  keyframes move, ffmpeg's HLS muxer cuts late and then early to catch up, and
+  segments come out at 0.37s or 1.74s against an advertised `#EXTINF:1.001` —
+  which then cuts WebVTT cues into 100 ms slivers, since a cue is clamped to the
+  segment window it is published in. The fanout drops chunks for the encoder
+  alone (`reportDrops`), so the picture is what suffers while a recording taken
+  off the *same* tune stays byte-perfect: 307,018 packets, zero continuity
+  breaks. So the tiers encode on the iGPU — measured 7.0× realtime at ~10% of a
+  core for 720p and 4.9× at ~14% for 1080p, and 1 segment in 60 off-nominal
+  where it had been 15 in 69.
+  Two traps this cost a day to find. Chasing the *trigger* rather than the
+  cause: the caption pipeline's ffprobe was one perturbation among many, and
+  "captions on" measured 22% off-nominal against 3% off — but the baseline
+  itself moved from 3% to 8% on programme content alone, so single 180s runs
+  could not tell a real effect from a noisy one. And blaming the wrong
+  component: `arib-caption` parses every packet of a 17 Mbit/s stream and costs
+  **2.3% of a core**, so the caption decode was never the expense.
+  A note for other hardware: this is per-platform configuration, not code —
+  `[live] input_args` plus each tier's `output_args`, the same shape the
+  post-pass transcode uses. Software (`yadif` + `libx264`) is what
+  `DefaultOutputArgs` still is and what a daemon with no tier config gets. An
+  ARM board wants its own encoder in that shape: `h264_v4l2m2m` on a Pi 4,
+  `h264_rkmpp` on Rockchip — and nothing on a Pi 5, which has no hardware H.264
+  encoder at all.
 - **Segment length, GOP and playlist window move together.** `hls_time 1`,
   `-g 30` (1s × 30p after yadif), `hls_list_size 12`. The segment length is
   the floor on live latency and the GOP has to divide it exactly, or ffmpeg
