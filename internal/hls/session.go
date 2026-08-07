@@ -61,15 +61,25 @@ const DefaultIdleTimeout = 60 * time.Second
 //   - playlistSegments is how far back a player can reach, in segments.
 //     segmentSeconds × playlistSegments ≈ 12s of window.
 //
-// The GOP handed to x264 is segmentSeconds × outputFPS, and that
+// The GOP handed to the encoder is segmentSeconds × outputFPS, and that
 // relationship is a hard constraint rather than a tuning choice: an HLS
 // segment must begin with an IDR frame, so a GOP that does not divide
 // the segment length makes ffmpeg cut late, at the next keyframe, and
 // segments drift away from the duration the playlist advertises.
+//
+// The length is also what decides how often the browser rebuilds a caption.
+// A WebVTT cue has to be cut to the segment window it is published in, or a
+// caption spanning a boundary is drawn twice — so a caption spanning N
+// segments arrives as N cues with different times, and a player, which dedups
+// on start *and end and text*, tears the box down and builds a new one at every
+// boundary. That rebuild is visible as a flicker, and its rate is the segment
+// count and nothing else: no alignment, no cleverness about where to cut.
+// Halving the segment doubles it. So the length trades latency against that,
+// and playlistSegments moves the other way to hold the reachable window at ~12s.
 const (
-	segmentSeconds   = 1
+	segmentSeconds   = 2
 	outputFPS        = 30
-	playlistSegments = 12
+	playlistSegments = 6
 )
 
 // Acquirer is the tuner.Pool seam (tests pass a fake).
@@ -105,10 +115,14 @@ type Manager struct {
 	// existed. See quality.go for why this is on demand and not ABR.
 	Qualities []Quality
 
-	// CaptionBin is the arib-caption executable. When set (and FFprobeBin
-	// is too), each session also decodes the tune's caption PID into a
-	// WebVTT rendition beside its segments. Empty means no captions —
-	// the picture is identical either way.
+	// CaptionBin is the arib-caption executable. When set, each session also
+	// decodes the tune's caption PID into the subtitle renditions beside its
+	// segments — WebVTT for the player to draw, and the structured form the
+	// browser's own ARIB overlay draws. Empty means no captions; the picture
+	// is identical either way.
+	//
+	// It no longer needs FFprobeBin: internal/caption reads a segment's first
+	// video PTS itself rather than spawning a probe for it.
 	CaptionBin string
 
 	// A/V sync (see config.Daemon). ProbeSeconds is the ffprobe sampling
@@ -297,7 +311,10 @@ type Session struct {
 	ownsSub  bool // sub was taken with Subscribe, so it has to be given back
 	ff       *proc.Process
 	lastSeen time.Time
-	closed   bool
+	// What sub.Dropped read at the last sweep, so a report is the chunks lost
+	// since rather than the running total. Guarded by the Manager's mu.
+	dropsSeen uint64
+	closed    bool
 
 	// This session's slice of the channel's caption decode, when there is
 	// one: its own subs.m3u8, mirroring its own segments.
@@ -637,7 +654,11 @@ func (m *Manager) unsubscribe(t *channelTune, sub *fanout.Sub, owns bool) {
 // channel's decoder if it is not already running. Returns nil when
 // captions are not configured.
 func (m *Manager) attachCaptions(t *channelTune, dir, playlist string) *caption.Rendition {
-	if m.CaptionBin == "" || m.FFprobeBin == "" {
+	// ffprobe is no longer part of this: internal/caption reads a segment's
+	// first video PTS itself, which is what stopped the caption pipeline from
+	// making the segmentation irregular. So captions turn on with the decoder
+	// alone.
+	if m.CaptionBin == "" {
 		return nil
 	}
 	m.mu.Lock()
@@ -645,10 +666,9 @@ func (m *Manager) attachCaptions(t *channelTune, dir, playlist string) *caption.
 	if first {
 		t.capSub = t.lease.Subscribe()
 		t.pipeline = &caption.Pipeline{
-			Bin:        m.CaptionBin,
-			FFprobeBin: m.FFprobeBin,
-			Channel:    t.channel,
-			Sub:        t.capSub,
+			Bin:     m.CaptionBin,
+			Channel: t.channel,
+			Sub:     t.capSub,
 			// Poll twice per segment. A rendition mirrors its video
 			// playlist, so polling slower than ffmpeg writes segments
 			// leaves the captions a segment behind the picture.
@@ -803,7 +823,43 @@ func (m *Manager) Run(ctx context.Context) error {
 			return nil
 		case <-t.C:
 			m.reapIdle(idle)
+			m.reportDrops()
 		}
+	}
+}
+
+// reportDrops says out loud when the encoder is being fed less than the
+// broadcast sent.
+//
+// fanout's policy is drop, not block — a stuck consumer must never stall the
+// tune — so when ffmpeg cannot read as fast as the adapter delivers, chunks are
+// discarded *for that subscriber alone* and nothing else notices. What the
+// encoder then sees is a transport stream with holes in it: `ac-tex damaged`
+// out of mpeg2video, `invalid band type` out of the AAC decoder, and segments
+// that come out at 0.37s or 1.74s instead of the 1.001s the playlist advertises,
+// because a lost frame moves the keyframe the muxer was going to cut on.
+//
+// It was invisible until it was looked for: a recording taken off the *same*
+// tune at the same time had 307,018 packets and not one continuity break, which
+// is what says the aerial and the descrambler are fine and the loss is ours.
+// Reported per tier, since a second encode is what tends to push the first one
+// over.
+func (m *Manager) reportDrops() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for key, s := range m.sessions {
+		if s.sub == nil || s.sub.Dropped == nil {
+			continue
+		}
+		total := s.sub.Dropped.Load()
+		if total == s.dropsSeen {
+			continue
+		}
+		lost := total - s.dropsSeen
+		s.dropsSeen = total
+		slog.Warn("hls: the encoder is not keeping up and broadcast data is being dropped",
+			"channel", key.channel, "quality", key.quality,
+			"chunks_lost", lost, "chunks_lost_total", total)
 	}
 }
 
@@ -1024,10 +1080,11 @@ func clearStaleSegments(dir string) error {
 			continue
 		}
 		name := e.Name()
+		ext := filepath.Ext(name)
 		if name == "stream.m3u8" ||
-			(len(name) > 6 && name[:6] == "stream" && filepath.Ext(name) == ".ts") ||
+			(len(name) > 6 && name[:6] == "stream" && ext == ".ts") ||
 			name == caption.SubsPlaylist ||
-			(strings.HasPrefix(name, "sub") && filepath.Ext(name) == ".vtt") {
+			(strings.HasPrefix(name, "sub") && (ext == ".vtt" || ext == ".json")) {
 			_ = os.Remove(filepath.Join(dir, name))
 		}
 	}

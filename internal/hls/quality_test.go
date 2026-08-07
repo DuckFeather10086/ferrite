@@ -3,6 +3,7 @@ package hls
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -149,7 +150,17 @@ func TestTierArgumentsReachFFmpeg(t *testing.T) {
 	}
 	argv := readFile(t, filepath.Join(s.Dir, "argv"))
 
-	for _, want := range []string{"-b:v 3M", "-g 30", "-hls_time 1", "-hls_list_size 12"} {
+	// Derived from the constants rather than written out, because what this
+	// pins is the *relationship* — the GOP is the segment length in frames,
+	// and neither it nor the segmenting is a tier's to set. Spelling the
+	// numbers out here would mean editing a literal every time the segment
+	// length is retuned, which is a test that fails for the wrong reason.
+	for _, want := range []string{
+		"-b:v 3M",
+		fmt.Sprintf("-g %d", segmentSeconds*outputFPS),
+		fmt.Sprintf("-hls_time %d", segmentSeconds),
+		fmt.Sprintf("-hls_list_size %d", playlistSegments),
+	} {
 		if !contains(argv, want) {
 			t.Errorf("argv is missing %q:\n%s", want, argv)
 		}
