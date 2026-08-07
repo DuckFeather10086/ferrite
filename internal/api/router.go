@@ -884,9 +884,9 @@ func masterPlaylist(s *hls.Session, q hls.QualityInfo, prefix string, withSubs b
 
 // subsWait bounds how long composing a master playlist will wait for a
 // session's first subtitle rendition. internal/caption publishes one a tick
-// (1s) after ffmpeg's first segment, plus the ffprobe that anchors the cue
-// timeline; three seconds covers that and stops a session whose decoder died
-// from holding every manifest request open.
+// (half a segment) after ffmpeg's first segment appears in the playlist; three
+// seconds covers that and stops a session whose decoder died from holding every
+// manifest request open.
 const subsWait = 3 * time.Second
 
 // subsAnnounced reports whether to name the caption rendition in the master

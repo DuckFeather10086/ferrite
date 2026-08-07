@@ -1,5 +1,6 @@
-// Package caption turns the ARIB caption PID of a live tune into an HLS
-// WebVTT rendition sitting beside the video segments.
+// Package caption turns the ARIB caption PID of a live tune into the subtitle
+// renditions sitting beside the video segments: WebVTT for a player to draw,
+// and the caption model itself for a browser that draws it.
 //
 // The decoding is not done here — `arib-caption` (the sibling Rust crate) reads
 // the same descrambled TS the video comes from and prints one JSON cue per
@@ -123,10 +124,10 @@ type Pipeline struct {
 // Rendition is one subtitle output: a subs.m3u8 in dir, mirroring the
 // video playlist at playlist segment for segment.
 //
-// The anchor lives here rather than on the Pipeline because it is a
-// property of one encode's segments — two qualities of the same channel
-// start at different moments and number their segments from their own
-// zero.
+// The measured segment starts live here rather than on the Pipeline because
+// they are a property of one encode's segments — two qualities of the same
+// channel start at different moments and number their segments from their own
+// zero, so the same sequence number means a different instant in each.
 type Rendition struct {
 	dir      string
 	playlist string
@@ -219,7 +220,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			// are no more cues.
 			return nil
 		case <-ticker.C:
-			err := p.publishAll(ctx)
+			err := p.publishAll()
 			// Publishing runs every second, so a persistent failure would
 			// flood the log — but a silent one means captions quietly stop
 			// while the picture keeps playing. Log each distinct failure once.
@@ -311,14 +312,14 @@ type segment struct {
 // publishAll refreshes every attached rendition. One rendition failing —
 // a quality whose ffmpeg has just died, say — must not stop the others,
 // so the first error is reported and the rest still run.
-func (p *Pipeline) publishAll(ctx context.Context) error {
+func (p *Pipeline) publishAll() error {
 	p.mu.Lock()
 	renditions := append([]*Rendition(nil), p.renditions...)
 	p.mu.Unlock()
 
 	var firstErr error
 	for _, r := range renditions {
-		if err := p.publish(ctx, r); err != nil && firstErr == nil {
+		if err := p.publish(r); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -327,7 +328,7 @@ func (p *Pipeline) publishAll(ctx context.Context) error {
 
 // publish re-reads one video playlist and writes its subtitle rendition to
 // match it.
-func (p *Pipeline) publish(ctx context.Context, r *Rendition) error {
+func (p *Pipeline) publish(r *Rendition) error {
 	segments, targetDuration, err := readPlaylist(r.playlist)
 	if err != nil {
 		return err
@@ -502,7 +503,7 @@ func (p *Pipeline) writeSegment(r *Rendition, name string, startMs, endMs int64)
 type jsonSegment struct {
 	Segment int64 `json:"segment"`
 	// The broadcast PTS window this segment covers, in milliseconds — measured
-	// on the video segment of the same number (see anchor). It is the whole
+	// on the video segment of the same number (see pts.go). It is the whole
 	// bridge between the cue times, which are raw broadcast PTS, and a player's
 	// own timeline: the fragment starting at frag.start on that timeline starts
 	// at StartMs on this one, and one subtraction converts every cue.

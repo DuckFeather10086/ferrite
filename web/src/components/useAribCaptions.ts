@@ -17,10 +17,10 @@ import {
 //
 // A cue's time is the PTS of the transport stream it was decoded from — hours
 // into the broadcast day — and `video.currentTime` starts near zero. Reconciling
-// the two is the job `X-TIMESTAMP-MAP` does for the WebVTT rendition, on the
-// server's side, which is why that rendition costs an ffprobe every few
-// segments: only the server can measure which PTS window a segment covers, and
-// it has to, because it is writing cue times a player will place on its own.
+// the two is the job `X-TIMESTAMP-MAP` does for the WebVTT rendition, and it
+// does it on the server's side: only the server can measure which PTS window a
+// segment covers, and it has to, because it is writing cue times a player will
+// then place on its own with no chance to correct them.
 //
 // Here it is free. `sub{N}.json` states the window it was cut to, hls.js states
 // where fragment N sits on the media timeline, and the difference between them
