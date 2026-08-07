@@ -539,14 +539,26 @@ mid-recording finalizing as 'done'.
   of overlapping — the caption stays on screen across the boundary, drawn once —
   and no two cues in the rendition are ever active at the same time, which also
   matters because a percentage `line:` is not laid out to avoid collisions.
-- **A subtitle rendition mirrors the video playlist, and `#EXTINF` lies.** A
-  player fetches the subtitle fragment covering the position it is playing, so
-  segment N of `subs.m3u8` must cover the same window as segment N of the video
-  — and the only way to know which PTS that is, is to measure it (one ffprobe
-  on the newest listed segment). Summing durations does not work: ffmpeg writes
-  `#EXTINF:2.002` for segments that really run ~11 ms shorter, which is a
-  quarter second of drift by segment 20 and more than a whole segment within
-  the hour. The measurement is therefore repeated every few segments, not once.
+- **A subtitle rendition mirrors the video playlist one segment for one, and
+  that alignment is by index and stays that way.** A player fetches the subtitle
+  fragment covering the position it is playing, so segment N of `subs.m3u8`
+  covers the same window as segment N of the video — and the only way to know
+  which PTS that is, is to measure it. Every listed segment is measured, once
+  each, by reading its first video PES header (`caption/pts.go`); summing the
+  declared durations instead is a workaround with no remaining justification,
+  and `#EXTINF` lies anyway (ffmpeg wrote `#EXTINF:2.002` for segments really
+  ~11 ms shorter, a quarter second of drift by segment 20).
+  **Segmenting the subtitle rendition coarser than the video has been considered
+  and rejected.** HLS permits it and it would cut the caption-rebuild rate (see
+  the segment-length invariant), but it buys little and costs the one property
+  worth keeping. At `hls_list_size 6` × 2s the window is 12s, so 4s subtitle
+  fragments leave exactly 3 in it — the minimum a live playlist is expected to
+  hold — for 2×, and anything coarser falls below it; going further means giving
+  the subtitle playlist a lifetime of its own, diverging from the video's. And
+  the problem does not justify it: measured 4 rebuilds in 150s (0.03/s) at 2s
+  segments. One-for-one is also what lets `sub{N}` be named after the video
+  segment's own sequence number, which is what the browser overlay's
+  `frag.sn` → `sub{N}.json` lookup rests on, on both sides, with no bookkeeping.
 - **`name` is the identifier; `display_name` is the label.** Every request
   takes `name`. What a UI *shows* is `config.Channel.DisplayName()`, served
   as `display_name` on `/api/channels`, because `channels.json` mixes three
