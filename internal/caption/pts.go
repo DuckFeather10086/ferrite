@@ -66,8 +66,13 @@ var errNoVideoPTS = errors.New("caption: no video PTS in segment")
 // firstVideoPTS is the presentation timestamp of a segment's first video
 // packet, in milliseconds.
 //
-// With ffmpeg's -copyts this is a broadcast PTS — the same clock the captions
-// are decoded against, which is the entire reason it is worth measuring.
+// With ffmpeg's -copyts *and* -muxdelay 0 this is a broadcast PTS — the same
+// clock the captions are decoded against, which is the entire reason it is
+// worth measuring. Both flags: -copyts stops ffmpeg rebasing the timeline to
+// zero, and -muxdelay 0 stops the MPEG-TS muxer adding its own 1.4s to what it
+// writes. Nothing here can tell the difference — a shifted segment reads back
+// perfectly self-consistently — so the check that this number means what it
+// says is a content one, against a recording of the same tune.
 func firstVideoPTS(path string) (int64, error) {
 	f, err := os.Open(path)
 	if err != nil {

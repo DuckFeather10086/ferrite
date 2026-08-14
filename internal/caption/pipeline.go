@@ -16,6 +16,10 @@
 //
 //   - Drop -copyts from the HLS session and every cue lands hours off, because
 //     the video restarts at zero while the captions still carry broadcast PTS.
+//   - Drop -muxdelay 0 with it and every cue lands 1.4s early, because the
+//     MPEG-TS muxer adds its muxdelay to the segments while the captions keep
+//     the broadcast's own numbers. That one is not visible from here: both
+//     sides of the bridge still agree with themselves.
 //   - The subtitle playlist must mirror the video playlist segment for segment.
 //     A player fetches the subtitle fragment covering the position it is
 //     playing; if the windows do not correspond, it fetches the wrong file and
