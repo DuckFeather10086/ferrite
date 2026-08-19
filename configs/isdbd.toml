@@ -58,9 +58,14 @@ epg_channels = [
   "NHK_G",            # 557.14
 ]
 
-# Live picture quality: two tiers, on demand. A viewer picks one and the
-# daemon runs one encode for it — nothing is encoded until somebody asks,
-# and both tiers of a channel come off the same tune and the same lease.
+# Picture quality: three tiers, on demand. A viewer picks one and the daemon
+# runs one encode for it — nothing is encoded until somebody asks, and every
+# tier of a channel comes off the same tune and the same lease.
+#
+# This table serves recordings too (internal/hls/vod.go): the Recordings page
+# offers Source — the post-pass MP4 itself, no encode — plus each tier below,
+# transcoded from the recording while it is watched and thrown away when
+# nobody is.
 #
 # Software x264 on purpose, unlike the recording post-pass below: live
 # wants zerolatency and the iGPU is busy with the post-pass often enough
@@ -113,6 +118,21 @@ output_args = ["-vf", "deinterlace_vaapi,scale_vaapi=w=1280:h=720,setsar=1",
                "-c:v", "h264_vaapi",
                "-b:v", "2.5M", "-maxrate", "3M", "-bufsize", "6M",
                "-c:a", "aac", "-b:a", "128k"]
+
+# The tier for a bad link: a phone on mobile data, or Tailscale over an
+# uplink that cannot hold 3 Mbit/s. 854x480 is 16:9 to within a pixel
+# (854/480 = 1.779), which is what setsar=1 requires — the width has to
+# already be the right shape, since the SAR is being declared square and
+# not honoured. Audio drops to 96k as well: at this bitrate it is a tenth
+# of the stream.
+[live.quality.480p]
+order       = 3
+label       = "480p"
+bandwidth   = 1300000
+output_args = ["-vf", "deinterlace_vaapi,scale_vaapi=w=854:h=480,setsar=1",
+               "-c:v", "h264_vaapi",
+               "-b:v", "1M", "-maxrate", "1.2M", "-bufsize", "2.5M",
+               "-c:a", "aac", "-b:a", "96k"]
 
 # This box: Intel N100 iGPU. Measured 4.9x realtime at 68% of one core, where
 # software is 2.2x at 309% — the CPU headroom is what matters, since live HLS

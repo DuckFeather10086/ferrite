@@ -175,6 +175,18 @@ func run(cfgPath, logLevel string) error {
 		},
 	}
 
+	// The same tiers, for a recording. Under storage_root and not the live
+	// tmpfs: a full-length tier is hundreds of megabytes of segments, which
+	// belongs on the disk the recording itself is on rather than in RAM.
+	vod := &hls.VOD{
+		OutputRoot:      filepath.Join(cfg.StorageRoot, "vod"),
+		FFmpegBin:       cfg.FFmpegBin,
+		FFmpegArgs:      cfg.Live.InputArgs,
+		Qualities:       liveQualities(cfg),
+		Offsets:         st,
+		AudioOffsetBias: cfg.AudioOffsetBias,
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(),
 		syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -205,6 +217,7 @@ func run(cfgPath, logLevel string) error {
 		Store:        st,
 		Tuners:       tunerPool,
 		HLS:          hlsMgr,
+		VOD:          vod,
 		Recorder:     adhoc,
 		Postprocess:  post,
 		// Bounds which files /api/recordings/{id}/file will serve and
@@ -231,6 +244,13 @@ func run(cfgPath, logLevel string) error {
 		}
 	}()
 	slog.Info("hls manager started", "dir", hlsRoot)
+
+	go func() {
+		if err := vod.Run(ctx); err != nil && ctx.Err() == nil {
+			slog.Warn("recording transcoder exited", "err", err)
+		}
+	}()
+	slog.Info("recording transcoder started", "dir", vod.OutputRoot)
 
 	if post != nil {
 		go func() {

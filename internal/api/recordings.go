@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -116,6 +117,78 @@ func (d Deps) derivedFile(ext, contentType string) http.HandlerFunc {
 	}
 }
 
+// handleRecordingPlaylist serves the media playlist of one recording at one
+// tier, starting the transcode if nobody is already watching it.
+//
+// Every request is also the touch that keeps the encode alive, which is why
+// this opens rather than merely looking one up: hls.js re-fetches a growing
+// EVENT playlist on a timer, and that timer is the session's heartbeat.
+//
+// The wait is for the first segment, not the whole encode — ffmpeg writes the
+// playlist once it has something in it, a second or two in.
+func (d Deps) handleRecordingPlaylist(w http.ResponseWriter, r *http.Request) {
+	rec, ok := d.lookupRecording(w, r)
+	if !ok {
+		return
+	}
+	if d.VOD == nil {
+		writeErr(w, http.StatusServiceUnavailable, "recording transcode not configured")
+		return
+	}
+	path, err := d.recordingPath(rec)
+	if err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	s, err := d.VOD.Open(r.Context(), rec.ID, path, rec.Channel, chi.URLParam(r, "quality"))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "transcode: "+err.Error())
+		return
+	}
+	if err := waitForFile(r.Context(), s.PlaylistPath, 30*time.Second); err != nil {
+		writeErr(w, http.StatusGatewayTimeout, "the transcode did not start: "+err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	// It grows until the encode reaches the end of the recording, so a
+	// cached copy is a playlist that stops early.
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeFile(w, r, s.PlaylistPath)
+}
+
+// handleRecordingSegment serves one segment of a running transcode.
+//
+// Touch, not Open: a client asking for a segment learned its name from the
+// playlist, so a session it cannot find is one that has been reaped — and 404
+// is the answer a player recovers from, by reloading the playlist and getting
+// a fresh encode. Starting one here instead would mean a stray request
+// silently spawning an ffmpeg nobody is waiting for.
+func (d Deps) handleRecordingSegment(w http.ResponseWriter, r *http.Request) {
+	if d.VOD == nil {
+		writeErr(w, http.StatusServiceUnavailable, "recording transcode not configured")
+		return
+	}
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	segment := chi.URLParam(r, "segment")
+	// Segments are flat filenames — the same guard the live ones get.
+	if strings.ContainsAny(segment, "/\\") || strings.HasPrefix(segment, ".") {
+		http.NotFound(w, r)
+		return
+	}
+	s := d.VOD.Touch(id, chi.URLParam(r, "quality"))
+	if s == nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "video/mp2t")
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeFile(w, r, filepath.Join(s.Dir, segment))
+}
+
 func describeMissingDerived(rec store.Recording, ext string) string {
 	id := strconv.FormatInt(rec.ID, 10)
 	switch rec.PostState {
@@ -187,6 +260,13 @@ func (d Deps) handleDeleteRecording(w http.ResponseWriter, r *http.Request) {
 				" is still running — POST /api/record/"+strconv.FormatInt(rec.ID, 10)+
 				"/stop first, or repeat with ?force=1 if the daemon was killed mid-recording")
 		return
+	}
+
+	// Stop any transcode of it first: an ffmpeg reading a file that is
+	// about to be unlinked keeps writing segments of a recording the caller
+	// has just deleted, and its output directory would outlive the row.
+	if d.VOD != nil {
+		d.VOD.Close(rec.ID)
 	}
 
 	fileDeleted := false
