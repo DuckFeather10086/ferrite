@@ -551,6 +551,17 @@ func (m *Manager) openSession(ctx context.Context, channel string, q Quality) (*
 		// still the broadcast's. Without this the video restarts at zero and
 		// every cue lands hours away.
 		"-copyts",
+		// And -copyts on its own does not keep them: the MPEG-TS muxer inside
+		// the HLS muxer adds `muxdelay` to every timestamp it writes, so the
+		// segments came out stamped exactly 1.4000s ahead of the broadcast
+		// (measured on ffmpeg 6.1.1 by finding a PES's own bytes in the source
+		// and reading back the two PTS: +1.4000s on every one of them, 0.0000s
+		// with this flag). The picture and the audio move together, so nothing
+		// about the stream looks wrong — but the captions do not move with them,
+		// being timed off the caption PID's own PTS, and a viewer sees every
+		// subtitle a second and a half before the shot it belongs to.
+		// `-muxpreload 0` is not part of it; this is the whole of it.
+		"-muxdelay", "0",
 	)
 	if af := audioOffsetFilter(audioOffset); af != "" {
 		args = append(args, "-af", af)

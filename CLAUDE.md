@@ -516,6 +516,21 @@ mid-recording finalizing as 'done'.
   `X-TIMESTAMP-MAP` by subtracting the video's first PTS — which only works
   because `-copyts` keeps the broadcast timestamps on the segments. Remove it
   and every cue lands hours away from the frame it belongs to.
+- **`-copyts` does not keep them on its own: `-muxdelay 0` is the other half.**
+  ffmpeg's MPEG-TS muxer — which is what `-f hls` writes through — adds its
+  `muxdelay` to every timestamp, so the segments were stamped exactly **1.4000s
+  ahead of the broadcast** (ffmpeg 6.1.1; `-muxpreload 0` is not involved).
+  Nothing about the stream looks wrong when this happens, which is why it
+  survived so long: the picture and the audio are shifted together, so they stay
+  in sync with each other, and every measurement the daemon makes *of a segment*
+  agrees with every other one. What does not move is the captions, whose times
+  come from the caption PID's own PTS and are therefore the broadcast's — so
+  every subtitle arrives a second and a half before the shot it belongs to.
+  Recordings never had it: the post-pass writes MP4, and its sidecars are
+  anchored on the `.ts`'s own timestamps. Anything that compares a segment's
+  clock with the broadcast's has to be checked against the *content* — decode a
+  segment's first frame and find it in a recording of the same tune — because
+  the numbers on both sides of a timestamp bug are self-consistent.
 - **A caption is published while it is still on screen.** An ARIB caption's end
   arrives with the *next* caption — 2 to 8 seconds later on NHK — so a rendition
   built from finished cues runs that far behind the picture, which is how the
