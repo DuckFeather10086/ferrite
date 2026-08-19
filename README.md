@@ -31,8 +31,8 @@ graph TB
     end
 
     TUNER -->|"lock & tune"| DVBR
-    DVBR -->|"SDT / EIT bytes"| B24
-    B24 -.->|"UTF-8 text"| DVBR
+    DVBR -->|"EIT / SDT bytes"| B24
+    B24 -.->|"UTF-8 text"| EPG
     DVBR -->|"encrypted TS"| B25
     CARD -.->|"PC/SC"| B25
     B25 -->|"plain TS"| FANOUT
@@ -42,7 +42,6 @@ graph TB
     CAP -.->|"cues"| SUBS
     REC -->|"when the tuner lets go"| POST
     CAP -.->|"sidecars"| POST
-    DVBR -->|"epg scan"| EPG
     EPG --> SCHED
     SCHED -->|"dispatch job"| REC
     HLS --> WEB
@@ -54,7 +53,9 @@ graph TB
 The hot path per active channel is a two-process pipe —
 `dvb-rs tune … | b25-rs -v 0 - -` — broadcast 1→N by `fanout` (slow
 consumers are dropped, never block live playback). `dvb-rs epg` feeds the
-EPG store on a timer. A second consumer of the same tune feeds
+EPG store on a timer — the titles reaching it as UTF-8 because `arib-b24`,
+which dvb-rs links rather than spawns, decoded them out of ARIB's own
+character set on the way. A second consumer of the same tune feeds
 `arib-caption`, because ffmpeg cannot decode ARIB captions: its
 `arib_caption` codec has no decoder unless it was built against
 libaribb24 or libaribcaption, and a distribution build is not.
