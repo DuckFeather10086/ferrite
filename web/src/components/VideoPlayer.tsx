@@ -47,6 +47,12 @@ const captionModes: {
 // sitting over the top of the programme.
 const CONTROLS_IDLE_MS = 2_500;
 
+// The same, for a finger. Longer, because there is no pointer sitting on the
+// picture to keep the bar awake: a touch wakes it once and then the clock runs
+// whatever the viewer is doing, so 2.5s is barely enough to read the row and
+// not enough to decide.
+const TOUCH_IDLE_MS = 5_000;
+
 // A labelled segmented control in the in-player bar. Everything the player
 // itself can be set to lives in one of these and looks the same — they are the
 // same kind of choice, and a viewer should not have to learn two shapes.
@@ -81,7 +87,10 @@ function OverlayButton({
       onClick={onClick}
       disabled={disabled}
       title={disabled ? (disabledTitle ?? title) : title}
-      className={`cursor-pointer px-2 py-1 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-30 ${
+      // Roomier where the pointer is a finger: an 11px label with 4px of
+      // padding is a comfortable mouse target and a coin-toss for a thumb, and
+      // these sit next to each other in a row.
+      className={`cursor-pointer px-2 py-1 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-30 pointer-coarse:px-3 pointer-coarse:py-2 ${
         on ? "bg-white text-black" : "bg-black/40 text-white/80 hover:bg-white/20"
       }`}
     >
@@ -457,13 +466,30 @@ export function VideoPlayer({
   // The controls fade out with the pointer, the way the browser's own do — they
   // sit over the picture now, so leaving them up would put a black gradient
   // across the top of every programme.
+  //
+  // A finger is not a pointer, and taking that literally is what made every
+  // setting the player has unreachable on a phone. A tap emits no `pointermove`
+  // at all, so nothing ever woke the bar; and a touch pointer ceases to exist
+  // when the finger lifts, which fires `pointerleave` — so on the rare tap that
+  // did drift enough to count as a move, the bar was hidden again by the end of
+  // the same tap. Both handlers are therefore mouse-only, and touch gets the
+  // gesture it expects instead: tap the picture to show the controls, tap again
+  // to dismiss them.
   const [controlsAwake, setControlsAwake] = useState(false);
   const sleepRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const wake = useCallback(() => {
+  const wake = useCallback((ms: number = CONTROLS_IDLE_MS) => {
     setControlsAwake(true);
     if (sleepRef.current) clearTimeout(sleepRef.current);
-    sleepRef.current = setTimeout(() => setControlsAwake(false), CONTROLS_IDLE_MS);
+    sleepRef.current = setTimeout(() => setControlsAwake(false), ms);
   }, []);
+  const sleep = useCallback(() => {
+    if (sleepRef.current) clearTimeout(sleepRef.current);
+    setControlsAwake(false);
+  }, []);
+  const touchToggle = useCallback(() => {
+    if (controlsAwake) sleep();
+    else wake(TOUCH_IDLE_MS);
+  }, [controlsAwake, sleep, wake]);
   useEffect(() => () => void (sleepRef.current && clearTimeout(sleepRef.current)), []);
 
   // Keyboard shortcuts, live only while the player has focus — arrow keys
@@ -512,8 +538,9 @@ export function VideoPlayer({
           screen, or fullscreen shows a 70%-tall video on a black field. */}
       <div
         ref={boxRef}
-        onPointerMove={wake}
-        onPointerLeave={() => setControlsAwake(false)}
+        onPointerMove={(e) => e.pointerType === "mouse" && wake()}
+        onPointerLeave={(e) => e.pointerType === "mouse" && sleep()}
+        onPointerDown={(e) => e.pointerType !== "mouse" && touchToggle()}
         className="relative aspect-video max-h-[70vh] overflow-hidden rounded-lg bg-black
                    [&:fullscreen]:aspect-auto [&:fullscreen]:h-full [&:fullscreen]:max-h-none [&:fullscreen]:rounded-none"
       >
@@ -543,6 +570,16 @@ export function VideoPlayer({
             They fade with the pointer the way the native ones do. */}
         {src && (
           <div
+            // A touch landing *on* the bar must not reach the toggle above it:
+            // the bar would be dismissed on `pointerdown`, and a button that has
+            // gone `pointer-events-none` never receives the click that follows,
+            // so every setting would be one tap from working and never work.
+            // Restart the idle clock instead — a viewer partway through the row
+            // is not idle.
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              wake(e.pointerType === "mouse" ? CONTROLS_IDLE_MS : TOUCH_IDLE_MS);
+            }}
             className={`absolute inset-x-0 top-0 z-20 flex flex-wrap items-center gap-x-4 gap-y-1.5 bg-gradient-to-b from-black/70 to-transparent px-2 py-1.5 transition-opacity duration-200 ${
               controlsAwake ? "opacity-100" : "pointer-events-none opacity-0"
             }`}
@@ -600,7 +637,7 @@ export function VideoPlayer({
               <button
                 onClick={fullscreen}
                 title="Fullscreen with the ARIB captions — the player's own button cannot show them"
-                className="cursor-pointer rounded-md border border-white/25 bg-black/40 px-2 py-1 text-[11px] text-white/80 transition-colors hover:bg-white/20"
+                className="cursor-pointer rounded-md border border-white/25 bg-black/40 px-2 py-1 text-[11px] text-white/80 transition-colors hover:bg-white/20 pointer-coarse:px-3 pointer-coarse:py-2"
               >
                 ⛶ Fullscreen
               </button>

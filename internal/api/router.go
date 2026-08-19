@@ -15,6 +15,9 @@
 //	GET  /api/recordings/{id}/mp4       the transcode, for a browser
 //	GET  /api/recordings/{id}/subs.ass  subtitles with ARIB's own placement
 //	GET  /api/recordings/{id}/subs.vtt  subtitles as words, for a <track>
+//	GET  /api/recordings/{id}/{q}/video.m3u8  the same recording at a live
+//	                                    quality tier, transcoded on demand
+//	GET  /api/recordings/{id}/{q}/{seg}.ts    a segment of that transcode
 //	POST /api/recordings/{id}/postprocess  (re)make all three
 //	DELETE /api/recordings/{id}         delete a recording and its file
 //	POST /api/record                    start recording now
@@ -76,6 +79,10 @@ type Deps struct {
 	Store    *store.Store
 	Tuners   *tuner.Pool
 	HLS      *hls.Manager
+	// VOD re-encodes a recording to one of the live tiers on demand, for
+	// watching it somewhere a 6 Mbit/s 1080p MP4 will not go. Nil disables
+	// the recording tier endpoints; the MP4 itself is served either way.
+	VOD *hls.VOD
 	// Recorder serves the "record now" endpoints. Nil disables them
 	// (scheduled recordings still run — those go through the scheduler).
 	Recorder *recorder.Manager
@@ -149,6 +156,13 @@ func NewRouter(d Deps) http.Handler {
 		getHead("/recordings/{id}/mp4", d.derivedFile(".mp4", "video/mp4"))
 		getHead("/recordings/{id}/subs.ass", d.derivedFile(".ass", "text/x-ssa; charset=utf-8"))
 		getHead("/recordings/{id}/subs.vtt", d.derivedFile(".vtt", "text/vtt; charset=utf-8"))
+		// The same picture at a lower bitrate, transcoded on demand — the
+		// live tiers, with the recording for a source. The tier is a path
+		// segment for the same reason it is one under /api/live: the
+		// playlist's segment URIs are relative, so they have to resolve
+		// inside the tier's own directory.
+		getHead("/recordings/{id}/{quality}/"+hls.VODPlaylist, d.handleRecordingPlaylist)
+		getHead("/recordings/{id}/{quality}/{segment}", d.handleRecordingSegment)
 		r.Post("/recordings/{id}/postprocess", d.handlePostprocessRecording)
 		r.Delete("/recordings/{id}", d.handleDeleteRecording)
 		r.Post("/record", d.handleRecordNow)

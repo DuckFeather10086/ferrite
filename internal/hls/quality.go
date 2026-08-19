@@ -110,35 +110,51 @@ type QualityInfo struct {
 
 // QualityList reports the tiers this daemon offers, in config order. The
 // first is the default.
-func (m *Manager) QualityList() []QualityInfo {
-	qs := m.qualities()
-	out := make([]QualityInfo, 0, len(qs))
-	for _, q := range qs {
-		out = append(out, QualityInfo{Name: q.Name, Label: q.label(), Bandwidth: q.bandwidth()})
-	}
-	return out
-}
+func (m *Manager) QualityList() []QualityInfo { return qualityInfos(m.Qualities) }
 
 // qualities is Qualities with the default filled in.
-func (m *Manager) qualities() []Quality {
-	if len(m.Qualities) == 0 {
-		return []Quality{DefaultQuality()}
-	}
-	return m.Qualities
-}
+func (m *Manager) qualities() []Quality { return qualitiesOr(m.Qualities) }
 
 // ResolveQuality maps a requested tier name to a configured one. An empty
 // or unknown name gets the default rather than an error: a stale
 // bookmark, or a client that has never heard of tiers, should get
 // television rather than a 404.
 func (m *Manager) ResolveQuality(name string) Quality {
-	qs := m.qualities()
+	return resolveQuality(m.Qualities, name)
+}
+
+// The three below take the tier table as an argument rather than a
+// receiver, because there are two things that run these encodes now: live,
+// and a recording being re-encoded on demand (see vod.go). One table, one
+// set of rules for reading it — a tier that resolves differently depending
+// on which of them asked is a tier the URL cannot name.
+
+// qualitiesOr fills in the built-in tier for a daemon whose config declares
+// none.
+func qualitiesOr(qs []Quality) []Quality {
+	if len(qs) == 0 {
+		return []Quality{DefaultQuality()}
+	}
+	return qs
+}
+
+func resolveQuality(qs []Quality, name string) Quality {
+	qs = qualitiesOr(qs)
 	for _, q := range qs {
 		if q.Name == name {
 			return q
 		}
 	}
 	return qs[0]
+}
+
+func qualityInfos(qs []Quality) []QualityInfo {
+	qs = qualitiesOr(qs)
+	out := make([]QualityInfo, 0, len(qs))
+	for _, q := range qs {
+		out = append(out, QualityInfo{Name: q.Name, Label: q.label(), Bandwidth: q.bandwidth()})
+	}
+	return out
 }
 
 // gopArgs is the keyframe interval every tier gets, appended after its

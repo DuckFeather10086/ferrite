@@ -129,11 +129,16 @@
    The handful of repeated shapes. Anything used once stays in its
    component. */
 
+/* Roomier where the pointer is a finger. The compact form is sized for a
+   mouse, which lands on a 24px-tall control every time; a thumb does not, and
+   these sit shoulder to shoulder in a row (Record · Book · Stop). The type
+   stays the same size — this is about the target, not legibility. */
 .btn {
   @apply inline-flex items-center gap-1.5 rounded-md px-2.5 py-1
          text-xs whitespace-nowrap cursor-pointer
          border border-line bg-panel text-fg
-         transition-colors;
+         transition-colors
+         pointer-coarse:px-3 pointer-coarse:py-2;
 }
 .btn:hover:not(:disabled) {
   @apply bg-raised;

@@ -462,6 +462,19 @@ export function recordingMp4Url(id: number) {
   return BASE + "/api/recordings/" + id + "/mp4";
 }
 
+// The tier a recording can be watched at instead of its own MP4: the daemon
+// transcodes it on demand and serves HLS, the same encode the live tiers are.
+// The tier is a path segment because the playlist's segment URIs are relative
+// and have to resolve inside its directory — see internal/hls/vod.go.
+export function recordingPlaylistUrl(id: number, quality: string) {
+  return BASE + "/api/recordings/" + id + "/" + encodeURIComponent(quality) + "/video.m3u8";
+}
+
+// What "watch the file itself" is called in the quality control. Not a tier
+// name the daemon knows: it means the MP4 the post-pass already made, played
+// straight off disk with no encode and seekable anywhere.
+export const SOURCE_QUALITY = "source";
+
 // "ass" keeps ARIB's own placement (the caption where the broadcast put it,
 // over the shot it belongs to); "vtt" is the same words as plain lines.
 export function recordingSubsUrl(id: number, kind: "ass" | "vtt") {

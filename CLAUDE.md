@@ -82,7 +82,10 @@ dvb-rs stdout → b25-rs stdin → b25-rs stdout → fanout.Broadcaster
     Output is normalized to square pixels (1440x1080 SAR 4:3 → 1920x1080
     SAR 1:1) because hls.js does not reliably honour the SAR in the H.264
     VUI. `quality.go` holds the tier list and the one place the GOP is
-    derived from the segment length.
+    derived from the segment length. `vod.go` is the same tiers with a
+    recording for a source — one ffmpeg per (recording, tier), an EVENT
+    playlist rather than a rolling window, and the output treated as a cache
+    that the janitor deletes.
   - `scan/` — building `channels.json` from the air: sweep UHF 13–62, one
     `Pool.Reserve(PrioBackground)` per transport, `dvb-rs scan --merge
     --add-new` folding each mux that locks into the document. Runs at first
@@ -175,7 +178,8 @@ Implemented and tested (race-clean):
 - `web/` — Bun + Next.js 16 (App Router, TypeScript, Tailwind CSS).
   Four pages: Live (hls.js player + `ARIB | Text | Off` captions + record now /
   stop), Guide (EPG, one click books a programme), Schedules (create/cancel),
-  Recordings (watch, stop a running one, convert, download, delete). Static
+  Recordings (watch at Source or a transcoded tier, stop a running one,
+  convert, download, delete). Static
   `output: 'export'`; all data fetching is client-side via SWR against the
   `/api/*` endpoints.
   Colour lives in one place — the `@theme` block in `app/globals.css`,
@@ -620,8 +624,9 @@ mid-recording finalizing as 'done'.
   the `.ts` already gets, and nothing can name a file the recording could not.
   It also means DELETE has to take them with it (`derivedExts`) — the `.mp4`
   is the biggest file of the set and orphaning it is expensive.
-- **What the browser plays is the post-pass's MP4, and its captions are a DOM
-  overlay.** The `.ts` is MPEG-2 video with ARIB audio and no browser will open
+- **What the browser plays is the post-pass's MP4 (or a tier transcoded from
+  the recording on demand — see the VOD invariants below), and its captions are
+  a DOM overlay.** The `.ts` is MPEG-2 video with ARIB audio and no browser will open
   it, so a recording is watchable only once `post_state` is `done` — which is
   why the Recordings page shows *Convert* (POST `…/postprocess`) on the rest
   rather than a play button that fails. The captions then come in two forms and
@@ -723,6 +728,47 @@ mid-recording finalizing as 'done'.
   their own zero. And `-g` is never a tier's to set: every HLS segment must
   begin with an IDR frame, so the GOP is `segmentSeconds × outputFPS`,
   appended after whatever the tier asked for.
+- **A recording gets the same tiers, from the same table, by the same
+  mechanism — the source is a file instead of a tune.** `internal/hls/vod.go`:
+  `GET /api/recordings/{id}/{q}/video.m3u8` starts one ffmpeg per (recording,
+  tier), and *Source* — the post-pass MP4 served straight off disk, seekable
+  anywhere, no encode — stays what the control opens on. Nothing is
+  pre-generated: a second copy of every recording is a permanent 18% of the
+  disk to serve a phone that may never ask, and this is the same on-demand
+  encode live already does. Four things follow from the source being a file.
+  The playlist is `EXT-X-PLAYLIST-TYPE:EVENT` rather than a rolling window,
+  because a recording is something a viewer seeks *back* into, and ffmpeg
+  writes the ENDLIST when it reaches the end of the file. The encode runs flat
+  out rather than at 1× — 8.2× realtime measured for 480p from a 1080i MPEG-2
+  `.ts`, 10.4× from the MP4 — so it overtakes the viewer within seconds and a
+  one-hour programme is fully seekable about seven minutes in. It is niced
+  (`vodNiceness`) because it shares the box with live HLS, which has no
+  headroom to give. And the whole output is a **cache**: `DefaultVODIdleTimeout`
+  (10 minutes, much longer than live's 60s because a paused player asks for
+  nothing at all) reaps the session and deletes its directory, `Close(id)` does
+  the same when the recording is deleted, and `Run` empties the root at
+  startup, since a session's ffmpeg never outlives the daemon.
+- **The tier is fed the `.ts`, and its timeline has to stay the recording's
+  own.** The `.ts` because that is what the tier filter chains are written for
+  — ISDB-T's interlaced MPEG-2, exactly what live feeds them — and because it
+  is there whether or not the post-pass has run; the MP4 stands in only when
+  `transcode.delete_source` removed it, and *that* one must not have the A/V
+  offset applied a second time, having had it baked in already. Timeline,
+  because the `.ass` and `.vtt` beside a recording are anchored to its own
+  clock and nothing re-times them for a tier: no `-copyts` here (unlike live,
+  where the caption PTS is the broadcast's), so the encode starts at zero
+  where the MP4 does. Checked rather than assumed — the frame at t=8s of the
+  480p rendition against the MP4's own: **41.5 dB** PSNR, against 26.8 and
+  27.1 dB for the frames one second either side.
+- **Switching tier partway through a programme has to wait, and say so.** A
+  fresh encode starts at zero, so the position the viewer was at does not
+  exist yet and a player cannot seek past what it has been given — left alone,
+  hls.js drops them back near the opening titles with no explanation. So
+  `RecordingPlayer` pauses, shows the position it is holding for, and seeks
+  there on the `LEVEL_UPDATED` that first covers it. Which is also why the
+  quality choice is remembered per browser (`ferrite.recordingQuality`): a
+  phone that watches at 480p opens *at* 480p and never pays this, and the wait
+  is only ever the price of changing your mind.
 - **The live encoder needs headroom, and running it at exactly realtime is what
   makes everything else look broken.** A single 720p live encode with
   `libx264 -preset superfast -tune zerolatency` measured **99.8% of one core**
