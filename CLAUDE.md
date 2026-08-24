@@ -356,6 +356,28 @@ mid-recording finalizing as 'done'.
   that first one rather than composing a manifest that silently means "this
   channel has no subtitles tonight". `{ch}/video.m3u8` only ever *serves* a
   session, it never opens one.
+- **A subtitle segment outlives the video segment of the same number.** The
+  rendition mirrors the video playlist, so `internal/caption` prunes what the
+  window has left behind — but it has to prune *later* than the window moves, and
+  for a while it did not. ffmpeg keeps one segment past its own playlist
+  (`hls_delete_threshold`, default 1) and this publishes a tick behind ffmpeg, so
+  `subs.m3u8` trails `stream.m3u8` by up to a segment and its oldest entry is
+  routinely one the next tick drops. Pruning exactly the window therefore made
+  the subtitle rendition the *narrower* of the two, and the oldest fragment of
+  the playlist a player was holding 404'd while the picture for it still served
+  200 — measured on a live 480p session, video segments outliving the playlist by
+  1.95s and subtitle segments by 0.00s. Which a player only reaches for when it
+  has fallen behind the live edge, so it read as "captions work, except at home
+  on the wifi": one 404 costs hls.js six retries over ~30s of no *Text* captions
+  (`fragLoadPolicy.errorRetry`), and costs the ARIB overlay that window's cues
+  outright, since it fetches a sidecar once per fragment and never revisits it.
+  `pruneGrace` is therefore 2 — one to match ffmpeg's threshold, one for the
+  publish tick — and the invariant to hold onto is the heading: a player can
+  reach the captions for any picture it can reach. What is left for the overlay's
+  own retries is only the *newest* segment, where the sidecar is a tick behind
+  the fragment rather than gone: `RETRIES` in `useAribCaptions` is 2, putting the
+  last attempt at 1.4s, because one attempt at 0.7s covered a 1s publish tick
+  only if the tick fell the right way.
 - **Live captions come in two forms and exactly one is mounted, same as a
   recording's.** `ARIB | Text | Off` under the picture. *Text* is the WebVTT
   rendition drawn by the browser as a native `TextTrack` — the words at the
@@ -372,8 +394,15 @@ mid-recording finalizing as 'done'.
   accessibility tree — pause, fullscreen, mute, and an overflow ⋮), so the only
   way in was ⋮ → "show closed captions menu" → 日本語, two levels down a menu
   nobody opens. On the Live page the control goes *inside* the player, and so
-  does every other setting the player has — captions, quality, fullscreen, in one
-  bar across the top that fades with the pointer like the browser's own. Under
+  does every other setting the player has — captions and quality behind a ⚙ that
+  opens them together, beside fullscreen, in a bar across the top that fades with
+  the pointer like the browser's own. A ⚙ rather than the row those two settings
+  started as: the row was the width of the frame and up whenever the pointer
+  moved, which is a lot of furniture over a programme for two settings a viewer
+  changes once. An open menu holds the bar up (`barAwake`) — the idle clock still
+  runs underneath, so dismissing the menu is what lets the bar go away — and a
+  press anywhere on the picture closes it, which needs no document listener
+  because the bar already stops `pointerdown` from reaching the box. Under
   the picture is where they started and it is the wrong place: everything below
   the player is unreachable for as long as the viewer is watching fullscreen,
   which is the state where a caption control matters most. The *bottom* of the

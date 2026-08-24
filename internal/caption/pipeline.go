@@ -388,11 +388,13 @@ func (p *Pipeline) publish(r *Rendition) error {
 		return err
 	}
 
-	// Prune every segment of either form the playlist no longer references,
-	// mirroring ffmpeg's delete_segments. Read the directory rather than
-	// trusting what this process wrote: a session reusing the channel's
-	// directory inherits the previous run's segments, whose sequence numbers
-	// are unrelated to this run's and would otherwise pile up.
+	// Prune every segment of either form the window has left behind, mirroring
+	// ffmpeg's delete_segments — including its delete *threshold*, which is the
+	// part that was missing. Read the directory rather than trusting what this
+	// process wrote: a session reusing the channel's directory inherits the
+	// previous run's segments, whose sequence numbers are unrelated to this
+	// run's and would otherwise pile up.
+	oldest, newest := segments[0].seq-pruneGrace, segments[len(segments)-1].seq
 	entries, err := os.ReadDir(r.dir)
 	if err == nil {
 		for _, entry := range entries {
@@ -403,12 +405,58 @@ func (p *Pipeline) publish(r *Rendition) error {
 			if !strings.HasSuffix(name, ".vtt") && !strings.HasSuffix(name, ".json") {
 				continue
 			}
-			if !live[name] {
-				_ = os.Remove(filepath.Join(r.dir, name))
+			if live[name] {
+				continue
 			}
+			// Behind the window but still inside the grace band: a player is
+			// about to ask for it. Anything numbered above the newest segment
+			// is a leftover from a previous run on this directory, and anything
+			// this cannot read a number out of was never ours.
+			if seq, ok := segmentSeq(name); ok && seq >= oldest && seq <= newest {
+				continue
+			}
+			_ = os.Remove(filepath.Join(r.dir, name))
 		}
 	}
 	return nil
+}
+
+// pruneGrace is how many segments behind the playlist window a subtitle segment
+// is kept for after it has rotated out.
+//
+// Without it the subtitle rendition was the *narrower* of the two windows, and
+// a player that fell behind the live edge — a stalled link, a backgrounded tab —
+// got 404s on subtitle fragments whose video segment still served 200. Measured
+// on a live 480p session: video segments outlived the playlist by 1.95s,
+// subtitle segments by 0.00s.
+//
+// Two segments, for two independent reasons, and neither is spare:
+//
+//   - ffmpeg keeps one segment past the window itself (-hls_flags
+//     delete_segments honours hls_delete_threshold, default 1), so one is the
+//     price of the subtitle window merely *matching* the video's.
+//   - This publishes a tick after ffmpeg writes the playlist, so subs.m3u8
+//     trails stream.m3u8 by up to a segment and its own oldest entry is
+//     routinely one the next tick will drop. Deleting on that tick is a 404 for
+//     the fragment a player just read out of the playlist it holds.
+//
+// So the invariant is: sub{N} outlives stream{N}. A player can reach any
+// subtitle fragment it can reach the picture for. The cost is two more of each
+// form per rendition — a .vtt is a few hundred bytes and a .json a few KB, on a
+// tmpfs.
+const pruneGrace = 2
+
+// segmentSeq reads the sequence number out of a sub{N}.vtt / sub{N}.json name.
+func segmentSeq(name string) (int64, bool) {
+	digits := strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(name, "sub"), ".vtt"), ".json")
+	if digits == "" {
+		return 0, false
+	}
+	seq, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return seq, true
 }
 
 // bottomLine is where a caption sits when the broadcast did not move it up.

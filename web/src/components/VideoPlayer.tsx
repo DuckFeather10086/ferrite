@@ -53,15 +53,37 @@ const CONTROLS_IDLE_MS = 2_500;
 // not enough to decide.
 const TOUCH_IDLE_MS = 5_000;
 
-// A labelled segmented control in the in-player bar. Everything the player
-// itself can be set to lives in one of these and looks the same — they are the
-// same kind of choice, and a viewer should not have to learn two shapes.
-function OverlayGroup({ label, children }: { label: string; children: React.ReactNode }) {
+// A run of choices, one of them on. Everything the player itself can be set to
+// lives in one of these and looks the same — they are the same kind of choice,
+// and a viewer should not have to learn two shapes.
+function OverlaySegmented({ children }: { children: React.ReactNode }) {
+  return <div className="flex overflow-hidden rounded-md border border-white/25">{children}</div>;
+}
+
+// A button that opens something rather than setting something: the settings
+// menu and fullscreen. Bordered on its own instead of butted against a
+// neighbour, which is how it reads as a verb and not as one of three positions.
+function OverlayChip({
+  on,
+  title,
+  onClick,
+  children,
+}: {
+  on?: boolean;
+  title: string;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
   return (
-    <div className="flex items-center gap-1.5">
-      <span className="eyebrow text-white/60">{label}</span>
-      <div className="flex overflow-hidden rounded-md border border-white/25">{children}</div>
-    </div>
+    <button
+      onClick={onClick}
+      title={title}
+      className={`cursor-pointer rounded-md border border-white/25 px-2 py-1 text-[11px] transition-colors pointer-coarse:px-3 pointer-coarse:py-2 ${
+        on ? "bg-white text-black" : "bg-black/40 text-white/80 hover:bg-white/20"
+      }`}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -492,6 +514,24 @@ export function VideoPlayer({
   }, [controlsAwake, sleep, wake]);
   useEffect(() => () => void (sleepRef.current && clearTimeout(sleepRef.current)), []);
 
+  // The settings menu, and the one thing it needs of the bar: an open menu
+  // holds the bar up. The idle clock is still running underneath — it is what
+  // makes the bar go away again once the menu is dismissed — but a panel that
+  // vanished 2.5s into reading it would make every setting a race.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const barAwake = controlsAwake || menuOpen;
+
+  // Escape closes it, wherever the focus is. The player's own key handler is
+  // on the <video>, which is not what has focus once the ⚙ has been clicked.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [menuOpen]);
+
   // Keyboard shortcuts, live only while the player has focus — arrow keys
   // change channel, and stealing those from the rest of the page would
   // make the channel list unusable.
@@ -540,7 +580,14 @@ export function VideoPlayer({
         ref={boxRef}
         onPointerMove={(e) => e.pointerType === "mouse" && wake()}
         onPointerLeave={(e) => e.pointerType === "mouse" && sleep()}
-        onPointerDown={(e) => e.pointerType !== "mouse" && touchToggle()}
+        // A press on the picture dismisses the menu, whatever the pointer is.
+        // The bar stops propagation on `pointerdown`, so this only ever sees
+        // presses *outside* it — which is what dismissal means here, and is
+        // why there is no document-level listener.
+        onPointerDown={(e) => {
+          setMenuOpen(false);
+          if (e.pointerType !== "mouse") touchToggle();
+        }}
         className="relative aspect-video max-h-[70vh] overflow-hidden rounded-lg bg-black
                    [&:fullscreen]:aspect-auto [&:fullscreen]:h-full [&:fullscreen]:max-h-none [&:fullscreen]:rounded-none"
       >
@@ -580,52 +627,85 @@ export function VideoPlayer({
               e.stopPropagation();
               wake(e.pointerType === "mouse" ? CONTROLS_IDLE_MS : TOUCH_IDLE_MS);
             }}
-            className={`absolute inset-x-0 top-0 z-20 flex flex-wrap items-center gap-x-4 gap-y-1.5 bg-gradient-to-b from-black/70 to-transparent px-2 py-1.5 transition-opacity duration-200 ${
-              controlsAwake ? "opacity-100" : "pointer-events-none opacity-0"
+            className={`absolute inset-x-0 top-0 z-20 flex items-start gap-2 bg-gradient-to-b from-black/70 to-transparent px-2 py-1.5 transition-opacity duration-200 ${
+              barAwake ? "opacity-100" : "pointer-events-none opacity-0"
             }`}
           >
-            {/* One control, three positions — the same one the Recordings
-                player carries, because it is the same choice. Not the browser's
-                own captions menu: in ARIB mode there is no showing TextTrack
-                for it to list, and in Chrome there is no captions button to
-                reach it with anyway. */}
-            <OverlayGroup label="captions">
-              {captionModes.map((choice) => (
-                <OverlayButton
-                  key={choice.key}
-                  on={mode === choice.key}
-                  disabled={
-                    choice.key !== "off" &&
-                    !(available && (choice.key !== "arib" || Hls.isSupported()))
-                  }
-                  title={choice.title}
-                  disabledTitle={choice.unavailable}
-                  onClick={() => setMode(choice.key)}
-                >
-                  {choice.label}
-                </OverlayButton>
-              ))}
-            </OverlayGroup>
+            {/* Every setting behind one button, and nothing over the picture
+                until it is asked for. The row these used to sit in was the
+                whole width of the frame and up whenever the pointer moved,
+                which is a lot of furniture across the top of a programme for
+                two settings a viewer changes once. */}
+            <div className="relative">
+              <OverlayChip
+                on={menuOpen}
+                title="Captions and picture quality"
+                onClick={() => setMenuOpen((open) => !open)}
+              >
+                ⚙
+              </OverlayChip>
 
-            {/* Quality, when there is more than one to pick from. Choosing one
-                starts an encode on the server and reloads the player at it —
-                this is not an ABR switch inside the manifest, and it is not
-                free, which is why it is a deliberate click and not something
-                the player does on its own. */}
-            {qualities && qualities.length > 1 && (
-              <OverlayGroup label="quality">
-                {qualities.map((q) => (
-                  <OverlayButton
-                    key={q.name}
-                    on={quality === q.name}
-                    title={`Re-encode this channel at ${q.label}`}
-                    onClick={() => onQuality?.(q.name)}
-                  >
-                    {q.label}
-                  </OverlayButton>
-                ))}
-              </OverlayGroup>
-            )}
+              {menuOpen && (
+                // Anchored under the button and inside the box, so it comes
+                // along into our own fullscreen. A grid rather than two rows,
+                // to line the labels up with each other.
+                <div className="absolute left-0 top-full mt-1.5 grid grid-cols-[auto_auto] items-center gap-x-3 gap-y-2 rounded-md border border-white/20 bg-black/85 px-2.5 py-2 shadow-lg backdrop-blur-sm">
+                  {/* One control, three positions — the same one the Recordings
+                      player carries, because it is the same choice. Not the
+                      browser's own captions menu: in ARIB mode there is no
+                      showing TextTrack for it to list, and in Chrome there is
+                      no captions button to reach it with anyway. */}
+                  <span className="eyebrow text-white/60">captions</span>
+                  <OverlaySegmented>
+                    {captionModes.map((choice) => (
+                      <OverlayButton
+                        key={choice.key}
+                        on={mode === choice.key}
+                        disabled={
+                          choice.key !== "off" &&
+                          !(available && (choice.key !== "arib" || Hls.isSupported()))
+                        }
+                        title={choice.title}
+                        disabledTitle={choice.unavailable}
+                        onClick={() => {
+                          setMode(choice.key);
+                          setMenuOpen(false);
+                        }}
+                      >
+                        {choice.label}
+                      </OverlayButton>
+                    ))}
+                  </OverlaySegmented>
+
+                  {/* Quality, when there is more than one to pick from.
+                      Choosing one starts an encode on the server and reloads
+                      the player at it — this is not an ABR switch inside the
+                      manifest, and it is not free, which is why it is a
+                      deliberate click and not something the player does on its
+                      own. */}
+                  {qualities && qualities.length > 1 && (
+                    <>
+                      <span className="eyebrow text-white/60">quality</span>
+                      <OverlaySegmented>
+                        {qualities.map((q) => (
+                          <OverlayButton
+                            key={q.name}
+                            on={quality === q.name}
+                            title={`Re-encode this channel at ${q.label}`}
+                            onClick={() => {
+                              onQuality?.(q.name);
+                              setMenuOpen(false);
+                            }}
+                          >
+                            {q.label}
+                          </OverlayButton>
+                        ))}
+                      </OverlaySegmented>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
 
             <div className="ml-auto">
               {/* Ours takes the whole box, so the ARIB overlay inside it comes
@@ -634,13 +714,12 @@ export function VideoPlayer({
                   `effective` falls back to the text track there, and why this
                   button is the only way to watch fullscreen with the captions
                   where the broadcast put them. */}
-              <button
-                onClick={fullscreen}
+              <OverlayChip
                 title="Fullscreen with the ARIB captions — the player's own button cannot show them"
-                className="cursor-pointer rounded-md border border-white/25 bg-black/40 px-2 py-1 text-[11px] text-white/80 transition-colors hover:bg-white/20 pointer-coarse:px-3 pointer-coarse:py-2"
+                onClick={fullscreen}
               >
                 ⛶ Fullscreen
-              </button>
+              </OverlayChip>
             </div>
           </div>
         )}
