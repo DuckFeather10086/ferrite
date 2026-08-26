@@ -1,0 +1,42 @@
+和田研中丸ゴシック2004ARIB (WadaLabChuMaruGo2004ARIB), version 4.43,
+by 和田研 (WadaLab) and 希土類元素レアアース (RareEarth, kidoruigenso@gmail.com).
+
+Bundled here as AribGaiji-Regular-v1.woff2 and AribGaiji-Regular-v1.ttf: a
+subset holding only the ARIB STD-B24 additional symbols (区85-86 and 区90-94,
+at both their Unicode and their ARIB Private Use Area codepoints), rescaled to
+M PLUS Rounded 1c's em and stamped with its vertical metrics, and renamed to
+the family "ARIB Gaiji" so it can sit beside that font rather than replace it.
+Built by libaribcaption-rs/scripts/build_gaiji_font.py; the source .ttf is at
+https://sourceforge.net/projects/jis2004/files/WadaLabChuMaruGo2004ARIB/
+(wlcmaru2004aribu4430.lzh).
+
+The source font's own terms, from wlcmaru2004aribu.txt as distributed:
+
+    このフォントはフリーフォントです。
+    いわゆるパブリックドメインと同じです。
+    無償で使用可能です。
+    商用・非商用いずれでもお使い頂けます。
+    このフォントは再配布が可能です。
+    このフォントは改変が可能です。
+    商用非商用に関わらずＯＳなどにインストールした状態での配布も可能です。
+    また、他のソフトに添付や組み込んだ形での配布も可能です。
+    このフォントを使用して作成したものに、このフォントを使用した旨の記載は
+    必要ありません。
+    このフォントを使用して作成したものに、このフォントの規定が継承されるこ
+    とはありません。
+    このフォントを使用や再配布をするにあたって当方への確認は必要ありません。
+
+    このフォントにより出力される文字や記号は画像、出版物、製品等の商用、非商
+    用に関わらず自由に利用できます。
+
+In English: this is a free font, equivalent to public domain. Free to use,
+commercially or not. Redistribution is permitted. Modification is permitted.
+Distribution installed into an OS is permitted, commercially or not, as is
+distribution bundled into or embedded in other software. Work produced with
+the font need not say so, and inherits none of these terms. No permission
+need be sought to use or redistribute it.
+
+Notice is given here anyway, and in the font's own name table, because a
+public-domain font that arrives with no provenance is a font nobody can
+check. The `fsType` bit is set to 0 (installable embedding) to match what
+those terms actually grant; the source ships it as 8 (editable embedding).

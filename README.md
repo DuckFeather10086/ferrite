@@ -80,7 +80,7 @@ internal/
   netaddr/           which addresses a viewer can reach this box at
   api/               chi router + handlers
   web/               embedded static SPA (//go:embed of the export)
-web/                 the SPA's source (Bun + Next.js), incl. the caption font
+web/                 the SPA's source (Bun + Next.js), incl. the caption fonts
 agent/               MCP server + tool-calling loop over the same REST API
 configs/             example daemon config
 scripts/             systemd units (ferrite.service = --user, isdbd.service = system)
@@ -176,15 +176,35 @@ whichever form the thing drawing them can honour:
 Both forms place a caption just above where a player draws its progress bar,
 rather than the lower third a player's own default reserves for its controls.
 
-## Bundled font
+## Bundled fonts
 
-`web/public/fonts/MPLUSRounded1c-Regular-v22.woff2` — M PLUS Rounded 1c,
-OFL 1.1, with the notice and licence beside it. It is the rounded gothic
-ARIB captions are drawn in, and it ships because an `.ass` sidecar's sizes
-are only right for the font it names: an ASS size is a line box rather than
-an em, so the wrong font draws the words at the wrong size for the boxes the
-same file draws. The only webfont here — everything else uses the system
-stack. Replacing it means renaming the file: `/fonts/` is served immutable.
+Two, both in `web/public/fonts/` with their notices beside them, and the only
+webfonts here — everything else uses the system stack. Replacing either means
+renaming the file: `/fonts/` is served immutable.
+
+`MPLUSRounded1c-Regular-v22.woff2` — M PLUS Rounded 1c, OFL 1.1. The rounded
+gothic ARIB captions are drawn in. It ships because an `.ass` sidecar's sizes
+are only right for the font it names: an ASS size is a line box rather than an
+em, so the wrong font draws the words at the wrong size for the boxes the same
+file draws.
+
+`AribGaiji-Regular-v1.woff2` and `.ttf` — the ARIB additional symbols (区85-86
+and 区90-94), public domain, subset from 和田研中丸ゴシック2004ARIB. The font
+above is a Japanese *text* font and does not have them: 414 of the 529 the
+decoder can emit are missing from it, and 37 — the honorifics and instrument
+abbreviations in 区92, and the 「No.」 at 92区94点 — have no Unicode codepoint
+in any version, so they travel as ARIB's own Private Use Area codepoints and
+nothing but this file can draw them. It carries the first font's em and
+vertical metrics, so a gaiji lands in its cell at the same size as the kanji
+beside it, and it sits *second* in the caption font stack: symbols only, so the
+text font still draws everything ordinary.
+
+The `.ttf` is the same font in the form you install. The browser needs neither
+— both travel in the binary — but an `.ass` sidecar is drawn by whatever player
+opens it, so `curl -O http://<host>:8010/fonts/AribGaiji-Regular-v1.ttf` into
+`~/.local/share/fonts` is what gets the symbols into mpv or VLC. Rebuilding it
+after a table change is `libaribcaption-rs/scripts/build_gaiji_font.py`, which
+takes the codepoints from `tables.rs` rather than a list of its own.
 
 ## Releases
 
