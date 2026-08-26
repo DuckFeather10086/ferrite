@@ -203,11 +203,16 @@ func NewRouter(d Deps) http.Handler {
 const fontDir = "fonts"
 
 func init() {
-	// Go's built-in table has no entry for .woff2 and a release image need not
-	// carry /etc/mime.types, which would leave the caption font sniffed as
-	// application/octet-stream. Browsers accept a font regardless, but saying
-	// what it is costs one line.
+	// Go's built-in table has no entry for .woff2 or .ttf and a release image
+	// need not carry /etc/mime.types, which would leave the caption fonts
+	// sniffed as application/octet-stream. Browsers accept a font regardless,
+	// but saying what it is costs one line.
+	//
+	// The .ttf is the gaiji font in the form you install: an .ass sidecar is
+	// drawn by whatever player opens it, so the ARIB symbols reach mpv or VLC
+	// only once fontconfig can see this file.
 	_ = mime.AddExtensionType(".woff2", "font/woff2")
+	_ = mime.AddExtensionType(".ttf", "font/ttf")
 }
 
 // staticHandler serves the embedded UI bundle. Real files are served

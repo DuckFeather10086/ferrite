@@ -104,8 +104,8 @@ dvb-rs stdout → b25-rs stdin → b25-rs stdout → fanout.Broadcaster
     **List endpoints must answer `[]`, not `null`** — wrap them in `orEmpty`.
     A nil slice is invisible in Go and crashes every other client.
   - `web/` — `//go:embed dist` of Next.js `output: 'export'` build. Which
-    includes `web/public/fonts/` — the ARIB caption font travels in the binary,
-    see the invariant on ASS font sizes.
+    includes `web/public/fonts/` — the two ARIB caption fonts travel in the
+    binary, see the invariants on ASS font sizes and on the gaiji.
 
 ## Current implementation status
 
@@ -712,6 +712,66 @@ mid-recording finalizing as 'done'.
   `/fonts/` `immutable` rather than `no-store` like the rest of the bundle — a
   megabyte, asked for every time a recording is opened, versioned by its own
   filename. Which is the rule for replacing it: rename the file.
+- **That font is a Japanese *text* font, so the gaiji need a second one, and it
+  is not optional.** M PLUS Rounded 1c is missing **414 of the 529** codepoints
+  the additional-symbol tables can emit — 🈑, 🅊, ⛌, the 137 additional kanji of
+  区85-86, all of 区90-94. Left to fall back, each is drawn by a different font:
+  on this box GNU FreeFont for 🅊, Noto Sans CJK **HK** for 🈑, and AR PL UKai —
+  a Chinese brush face — for the additional kanji, which is three designs on one
+  caption line and the wrong script for the kanji. On a release image, which
+  carries none of them, it is nothing at all: measured through libass with only
+  the primary font visible to fontconfig, a line of ten alternating 国 and gaiji
+  came out **259 ink pixels wide against the 391 of ten kanji** — the symbols
+  simply absent. And 37 of them cannot be reached that way even in principle:
+  the six honorifics at 92区26-31点, the thirty instrument abbreviations at
+  92区56-85点 and the 「No.」 at 92区94点 have no Unicode codepoint in any version
+  through 17.0, so the decoder emits ARIB STD-B24's own PUA codepoints for them
+  (U+E290..E295, U+E2A5..E2C2, U+E2C9) and only a font covering *those* can draw
+  them. `AribGaiji-Regular-v1` covers exactly the codepoints `tables.rs` can
+  produce, built from 和田研中丸ゴシック2004ARIB (public domain) by
+  `libaribcaption-rs/scripts/build_gaiji_font.py`.
+- **And it carries the primary font's em, which is the whole of why it can sit
+  in the same line.** libass renders a face at `Fontsize × upem / (usWinAscent +
+  usWinDescent)`, and the `.ass` asks for `36 × 1.395` because that is the
+  *primary* font's ratio — so a fallback face with a ratio of its own draws its
+  glyphs at a different em inside the same cell. The source font's is 1.0, which
+  is 39.5% too big: rendered through libass unmodified, the same ten-cell line
+  came out 463 ink pixels wide against 391 and spilled past the background box
+  the same file drew. So the build rescales it to the primary's em and copies
+  the primary's vertical metrics wholesale, and the number in
+  `ass::DEFAULT_FONT_SIZE_RATIO` stays true for both faces. Canvas does not need
+  this — `36px` *is* the em — but two fonts that have to agree are better made
+  identical than kept in step.
+- **Symbols second in the stack, and never first.** `CAPTION_FONT` is
+  `"Rounded Mplus 1c", "ARIB Gaiji"`: the gaiji font holds symbols and nothing
+  else, so the text font still draws every ordinary character and this one
+  answers only where that comes up empty. Reversing them would put a 539-glyph
+  font in front of a 8201-glyph one. The `.ttf` beside the `.woff2` is the same
+  font in the form you install — the browser needs neither, but an `.ass`
+  sidecar is drawn by whatever player opens it, so mpv and VLC get the symbols
+  only once fontconfig can see that file.
+- **EPG text has the same gaiji and needs the same font, and it is not only a
+  font problem.** A programme title is *broadcast* Japanese: 27,435 gaiji over
+  41 distinct characters in this box's EPG, 13,607 of them 🈑 alone. So
+  `--font-sans` carries `"ARIB Gaiji"` too — behind every real family, because
+  the font does hold a few ordinary characters (年 月 日 円 氏 前 新 are ARIB
+  cells) and drawing those in a second design would show, and ahead of
+  `sans-serif`, because nothing after a generic family is ever consulted.
+  Underneath that, `arib-b24` was mis-decoding them: an additional symbol
+  arrives under either the additional symbol set (F=0x3B) or the kanji plane
+  (F=0x42), and the kanji plane went to EUC-JP, whose WHATWG index fills
+  区89-92 with the NEC-selected IBM extended kanji. So 🈑 came back as 橳, ㊙
+  as 瀨 — 490 rows silently wrong — and 区85-88/93/94 came back as 〓, 520 more,
+  every 髙 and 﨑 in a name among them. Fixed in the submodule; the rows already
+  in the store keep their old text until the refresher passes over them again.
+- **Eighteen of them are emoji by default, and a caption is not emoji.**
+  `❗⛔⭕⬛🈚⛪⚓⛲⛳⛵⛺⛽⚾🈯⛄⛅☔⚡` carry `Emoji_Presentation=Yes`, so a browser
+  substitutes its colour emoji font for them whatever the CSS stack says — the
+  wrong design, and in colours the broadcast did not send, when ARIB draws them
+  in the cell's own foreground. `aribCaption.ts` appends U+FE0E to exactly those
+  eighteen before drawing; it is zero-advance and default-ignorable, so the
+  width measured for the MSZ squeeze does not move. The other 33 emoji-adjacent
+  gaiji (☎ ♨ ✈ ➡ ♠ …) default to text already and are left alone.
 - **Canvas is the mirror of that, and the ratio comes back as the baseline.**
   `ctx.font = "36px …"` **is** the em, so an ARIB cell's height goes in
   unmultiplied — writing `36 × 1.395` there, the number the `.ass` needs, would

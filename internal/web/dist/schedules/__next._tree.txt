@@ -1,2 +1,2 @@
-:HL["/_next/static/chunks/43yb0rn2nnqq-.css","style"]
+:HL["/_next/static/chunks/42f3zm_ahl6n-.css","style"]
 0:{"tree":{"name":"","param":null,"prefetchHints":16,"slots":{"children":{"name":"schedules","param":null,"prefetchHints":0,"slots":{"children":{"name":"__PAGE__","param":null,"prefetchHints":0,"slots":null}}}}},"staleTime":300,"buildId":"ferrite"}

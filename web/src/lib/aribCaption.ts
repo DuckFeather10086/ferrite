@@ -23,11 +23,20 @@
 // measurement (`fontBoundingBoxAscent`/`Descent`), which is why they are taken
 // from the font rather than assumed.
 
-/// The family the daemon ships, declared by globals.css and named by every
-/// `.ass` this stack writes (`ass::DEFAULT_FONT`). A rounded gothic, because
-/// that is what ARIB specifies and what a television draws. Nothing is fetched
-/// from the internet: the `.woff2` travels in the binary.
-export const CAPTION_FONT = '"Rounded Mplus 1c"';
+/// The families the daemon ships, declared by globals.css. The first is the
+/// rounded gothic every `.ass` this stack writes names (`ass::DEFAULT_FONT`),
+/// because that is what ARIB specifies and what a television draws. The second
+/// is the ARIB additional symbols, which a Japanese *text* font does not have —
+/// 414 of the 529 the decoder can emit are missing from the first, and 37 of
+/// them have no Unicode codepoint at all, so nothing but this file can draw
+/// them. Order matters and only this order is right: symbols second, so the
+/// text font still draws every ordinary character.
+///
+/// Both are measured through the same string, so the `36px` here is the em for
+/// either — the gaiji font is built carrying the first one's vertical metrics,
+/// which is what makes that true. Nothing is fetched from the internet: both
+/// travel in the binary.
+export const CAPTION_FONT = '"Rounded Mplus 1c", "ARIB Gaiji"';
 
 /// How far behind the playhead a cue is kept before it is dropped. The store is
 /// fed by fragments as they load and read by the frame callback, so it only has
@@ -318,8 +327,33 @@ function drawText(
   }
 }
 
-function drawGlyph(ctx: CanvasRenderingContext2D, ch: AribChar, text: string) {
-  if (!text.trim()) return;
+// The eighteen ARIB symbols Unicode gives a *colour* presentation by default
+// (`Emoji_Presentation=Yes`). They are ordinary caption characters — ⚡ is a
+// weather symbol, ⛳ a map symbol — and the broadcast sends them with a
+// foreground colour like every other cell, so a browser substituting its emoji
+// font for them draws the wrong thing twice over: the wrong design, and in
+// colours the caption did not ask for. U+FE0E is the standard way to say
+// otherwise, and is what ja.wikipedia's own ARIB tables use.
+//
+// The other 33 emoji-adjacent gaiji (☎ ♨ ✈ ➡ ♠ …) default to text already and
+// are left alone. From emoji-data.txt; a legacy symbol's default presentation
+// does not change between Unicode versions.
+const EMOJI_PRESENTATION = new Set(
+  [..."❗⛔⭕⬛🈚⛪⚓⛲⛳⛵⛺⛽⚾🈯⛄⛅☔⚡"].map((c) => c.codePointAt(0)!),
+);
+
+/** U+FE0E VARIATION SELECTOR-15: draw the text form, not the emoji one. */
+const TEXT_PRESENTATION = "\uFE0E";
+
+function drawGlyph(ctx: CanvasRenderingContext2D, ch: AribChar, glyph: string) {
+  if (!glyph.trim()) return;
+  const first = glyph.codePointAt(0);
+  // Zero-advance and default-ignorable, so nothing downstream — the width
+  // measured for the squeeze below, the outline, the underline — changes.
+  const text =
+    first !== undefined && EMOJI_PRESENTATION.has(first)
+      ? glyph + TEXT_PRESENTATION
+      : glyph;
   const { em, font } = fontOf(ch);
   if (em <= 0) return;
   const { ascent, descent } = lineBox(ctx, font);

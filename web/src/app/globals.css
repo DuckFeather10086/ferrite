@@ -31,12 +31,24 @@
   --color-ok: #6faa6f;
   --color-warn: #c2a02f;
 
-  /* No webfont is bundled — this UI has to work on a LAN with no
-     internet — so the stack must resolve to something real on the
-     device. The CJK families matter: programme titles and channel
-     names arrive from the broadcast in Japanese. */
+  /* The chrome is drawn in whatever the device has — no webfont is fetched
+     for it, this UI has to work on a LAN with no internet — so the stack
+     must resolve to something real. The CJK families matter: programme
+     titles and channel names arrive from the broadcast in Japanese.
+
+     "ARIB Gaiji" is the exception and the one bundled family here, because
+     a programme title is not only Japanese, it is *broadcast* Japanese:
+     this box's EPG carries 27,435 gaiji over 41 distinct characters, 13,607
+     of them 🈑 alone, and the platform gothics above have none of them. It
+     goes behind every real family and ahead of `sans-serif` — behind,
+     because it does hold a few ordinary characters (年 月 日 円 氏 前 新 are
+     ARIB cells too) and drawing those in a second design would show; ahead
+     of the generic, because nothing after a generic family is ever
+     consulted. So it answers for the symbols and nothing else, on any
+     device that can draw Japanese at all. The file is fetched only when a
+     glyph needs it: on the Guide immediately, elsewhere never. */
   --font-sans: system-ui, -apple-system, "Hiragino Kaku Gothic ProN",
-    "Noto Sans JP", "Yu Gothic UI", sans-serif;
+    "Noto Sans JP", "Yu Gothic UI", "ARIB Gaiji", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "DejaVu Sans Mono",
     monospace;
 }
@@ -77,6 +89,38 @@
     local("MS Gothic"), local("Droid Sans Fallback");
   /* The player waits on document.fonts.load before it measures anything,
      so there is nothing to swap in late. */
+  font-display: block;
+}
+
+/* ── and the gaiji beside it ──────────────────────────────────────────
+   The family above is a Japanese *text* font, so it does not have the
+   ARIB additional symbols: 414 of the 529 the decoder can emit are
+   missing from it — 🈑, 🅊, ⛌, the 137 additional kanji, all of 区90-94.
+   Left to fall back, each one is drawn by whatever the browser reaches
+   for next, which is a different design per symbol and on a clean device
+   is nothing at all.
+
+   Thirty-seven of them cannot be reached that way even in principle. The
+   six honorifics at 92区26-31点, the thirty instrument abbreviations at
+   92区56-85点 (「(vn)」「(ob)」…) and the 「No.」 at 92区94点 have no
+   Unicode codepoint — not in 5.2, where every other ARIB symbol landed,
+   and not in 17.0 either — so the decoder emits ARIB's own Private Use
+   Area codepoints and this file is the only thing that can draw them.
+
+   Second in the stack, never first: it holds symbols and nothing else,
+   so the family above still draws every ordinary character and this one
+   answers only where that comes up empty. It carries that font's em and
+   vertical metrics (built that way — see build_gaiji_font.py), so the
+   1.395 above is true of both faces and a gaiji lands in its cell at the
+   same size as the kanji beside it.
+
+   Public domain, notice and provenance in public/fonts/. Same rule as
+   above for replacing it: rename the file. */
+@font-face {
+  font-family: "ARIB Gaiji";
+  src:
+    local("ARIB Gaiji"), url("/fonts/AribGaiji-Regular-v1.woff2")
+      format("woff2");
   font-display: block;
 }
 
