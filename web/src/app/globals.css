@@ -31,12 +31,24 @@
   --color-ok: #6faa6f;
   --color-warn: #c2a02f;
 
-  /* No webfont is bundled — this UI has to work on a LAN with no
-     internet — so the stack must resolve to something real on the
-     device. The CJK families matter: programme titles and channel
-     names arrive from the broadcast in Japanese. */
+  /* The chrome is drawn in whatever the device has — no webfont is fetched
+     for it, this UI has to work on a LAN with no internet — so the stack
+     must resolve to something real. The CJK families matter: programme
+     titles and channel names arrive from the broadcast in Japanese.
+
+     "ARIB Gaiji" is the exception and the one bundled family here, because
+     a programme title is not only Japanese, it is *broadcast* Japanese:
+     this box's EPG carries 27,435 gaiji over 41 distinct characters, 13,607
+     of them 🈑 alone, and the platform gothics above have none of them. It
+     goes behind every real family and ahead of `sans-serif` — behind,
+     because it does hold a few ordinary characters (年 月 日 円 氏 前 新 are
+     ARIB cells too) and drawing those in a second design would show; ahead
+     of the generic, because nothing after a generic family is ever
+     consulted. So it answers for the symbols and nothing else, on any
+     device that can draw Japanese at all. The file is fetched only when a
+     glyph needs it: on the Guide immediately, elsewhere never. */
   --font-sans: system-ui, -apple-system, "Hiragino Kaku Gothic ProN",
-    "Noto Sans JP", "Yu Gothic UI", sans-serif;
+    "Noto Sans JP", "Yu Gothic UI", "ARIB Gaiji", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "DejaVu Sans Mono",
     monospace;
 }

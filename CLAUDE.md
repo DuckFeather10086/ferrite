@@ -750,6 +750,20 @@ mid-recording finalizing as 'done'.
   font in the form you install — the browser needs neither, but an `.ass`
   sidecar is drawn by whatever player opens it, so mpv and VLC get the symbols
   only once fontconfig can see that file.
+- **EPG text has the same gaiji and needs the same font, and it is not only a
+  font problem.** A programme title is *broadcast* Japanese: 27,435 gaiji over
+  41 distinct characters in this box's EPG, 13,607 of them 🈑 alone. So
+  `--font-sans` carries `"ARIB Gaiji"` too — behind every real family, because
+  the font does hold a few ordinary characters (年 月 日 円 氏 前 新 are ARIB
+  cells) and drawing those in a second design would show, and ahead of
+  `sans-serif`, because nothing after a generic family is ever consulted.
+  Underneath that, `arib-b24` was mis-decoding them: an additional symbol
+  arrives under either the additional symbol set (F=0x3B) or the kanji plane
+  (F=0x42), and the kanji plane went to EUC-JP, whose WHATWG index fills
+  区89-92 with the NEC-selected IBM extended kanji. So 🈑 came back as 橳, ㊙
+  as 瀨 — 490 rows silently wrong — and 区85-88/93/94 came back as 〓, 520 more,
+  every 髙 and 﨑 in a name among them. Fixed in the submodule; the rows already
+  in the store keep their old text until the refresher passes over them again.
 - **Eighteen of them are emoji by default, and a caption is not emoji.**
   `❗⛔⭕⬛🈚⛪⚓⛲⛳⛵⛺⛽⚾🈯⛄⛅☔⚡` carry `Emoji_Presentation=Yes`, so a browser
   substitutes its colour emoji font for them whatever the CSS stack says — the
