@@ -34,9 +34,17 @@ import {
 // that same number back as `frag.sn`. So the browser already knows which file it
 // wants, and asks for it beside the fragment it just loaded.
 
-/** How long to wait before asking a second time for a sidecar that was not
- *  there. Comfortably past the publisher's tick, which is half a segment. */
+/** How long to wait before asking again for a sidecar that was not there. */
 const RETRY_MS = 700;
+
+/** How many times to ask again. The publisher writes a segment's sidecar on the
+ *  first tick after ffmpeg lists the segment, and its tick is half a segment —
+ *  so a fragment hls.js loads the instant it appears can be up to a whole tick
+ *  ahead of its own captions. Two retries put the last attempt at 1.4s, which
+ *  covers that; one put it at 0.7s, which covered it only if the tick fell the
+ *  right way. The cost of being wrong is not a late caption but a missing one:
+ *  the sidecar is fetched once per fragment and never revisited. */
+const RETRIES = 2;
 
 /** What this needs of an hls.js fragment. Typed structurally so the hook does
  *  not drag hls.js's types into a module that is otherwise about canvas. */
@@ -118,13 +126,15 @@ export function useAribCaptions(
       return;
     }
     const start = frag.start;
-    // Once, then once more. A 404 is ordinary — a channel sending no captions,
-    // or a session whose first rendition has not been published — but it is
-    // also what the newest segment answers for the moment between hls.js seeing
-    // it in the playlist and the caption publisher's next tick writing the
-    // sidecar. Missing that one segment is no longer harmless: an open cue's
-    // end only advances when a window says it is still up, so a hole leaves the
-    // caption disappearing for the length of it.
+    // Once, then RETRIES times more. A 404 is ordinary — a channel sending no
+    // captions, or a session whose first rendition has not been published — but
+    // it is also what the *newest* segment answers for the moment between
+    // hls.js seeing it in the playlist and the caption publisher's next tick
+    // writing the sidecar. (It is no longer what an *old* segment answers:
+    // internal/caption keeps a segment past the window for exactly that
+    // reason — see pruneGrace.) Missing a segment is not harmless: an open
+    // cue's end only advances when a window says it is still up, so a hole
+    // leaves the caption disappearing for the length of it.
     const load = (): Promise<boolean> =>
       fetch(url)
         .then((r) => (r.ok ? r.json() : null))
@@ -136,10 +146,11 @@ export function useAribCaptions(
         })
         .catch(() => false);
 
-    void load().then((ok) => {
-      if (ok) return;
-      setTimeout(() => void load(), RETRY_MS);
-    });
+    const retry = (left: number) => {
+      if (left <= 0) return;
+      setTimeout(() => void load().then((ok) => !ok && retry(left - 1)), RETRY_MS);
+    };
+    void load().then((ok) => !ok && retry(RETRIES));
   }, []);
 
   // Drawing. Driven off the video's own frames where the browser offers them —

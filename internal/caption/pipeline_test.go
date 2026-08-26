@@ -2,8 +2,10 @@ package caption
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -231,4 +233,127 @@ func read(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+// ptsBytes encodes a 90 kHz timestamp the way a PES header carries it — the
+// inverse of what pts.go parses, checked against the real fixture in
+// TestPTSBytesRoundTrip.
+func ptsBytes(ticks int64) []byte {
+	return []byte{
+		0x20 | byte((ticks>>29)&0x0e) | 0x01,
+		byte(ticks >> 22),
+		byte((ticks>>14)&0xfe) | 0x01,
+		byte(ticks >> 7),
+		byte((ticks<<1)&0xfe) | 0x01,
+	}
+}
+
+func TestPTSBytesRoundTrip(t *testing.T) {
+	got := ptsBytes(realVideoPTSMs * 90)
+	if ticks, ok := parseFirstVideoPTS(tsPacket(0x0100, true, 0, pesPacket(0xe0, got))); !ok || ticks/90 != realVideoPTSMs {
+		t.Fatalf("ptsBytes round trip: %d ok=%v, want %d", ticks/90, ok, realVideoPTSMs)
+	}
+}
+
+// videoSegment writes a segment whose first video PES carries startMs, which is
+// what windowStarts measures out of it.
+func videoSegment(t *testing.T, dir string, seq int64, startMs int64) {
+	t.Helper()
+	data := append(
+		tsPacket(0x0000, true, 0, []byte{0x00, 0x00, 0xb0, 0x0d}),
+		tsPacket(0x0100, true, 0, pesPacket(0xe0, ptsBytes(startMs*90)))...,
+	)
+	name := filepath.Join(dir, "stream"+strconv.FormatInt(seq, 10)+".ts")
+	if err := os.WriteFile(name, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// videoWindow writes the segments of a rolling playlist and the playlist that
+// lists them, as ffmpeg would.
+func videoWindow(t *testing.T, dir string, first int64, count int) string {
+	t.Helper()
+	var b strings.Builder
+	fmt.Fprintf(&b, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:%d\n", first)
+	for i := 0; i < count; i++ {
+		seq := first + int64(i)
+		videoSegment(t, dir, seq, 100_000+seq*2_000)
+		fmt.Fprintf(&b, "#EXTINF:2.000,\nchannel/1080p/stream%d.ts\n", seq)
+	}
+	path := filepath.Join(dir, "stream.m3u8")
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A subtitle segment has to outlive the video segment of the same number, or a
+// player that has fallen behind the live edge gets a 404 on the captions for a
+// picture it can still fetch.
+//
+// ffmpeg keeps one segment past the window (hls_delete_threshold), and this
+// publishes a tick behind it — so pruning exactly the window, which is what this
+// used to do, left the subtitle rendition the narrower of the two and 404'd the
+// oldest entry of the playlist a player was holding. Measured on a live session
+// before the fix: video segments outlived the playlist by 1.95s, subtitle
+// segments by 0.00s.
+func TestPublishKeepsASubtitleSegmentPastTheWindow(t *testing.T) {
+	dir := t.TempDir()
+	p := &Pipeline{}
+	r := p.Attach(dir, filepath.Join(dir, "stream.m3u8"))
+
+	// A leftover from an earlier run on this directory, numbered where this
+	// run will never reach. Nothing keeps it.
+	if err := os.WriteFile(filepath.Join(dir, "sub9999.vtt"), []byte("WEBVTT\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	exists := func(name string) bool {
+		_, err := os.Stat(filepath.Join(dir, name))
+		return err == nil
+	}
+	publish := func(first int64) {
+		t.Helper()
+		videoWindow(t, dir, first, 6)
+		if err := p.publish(r); err != nil {
+			t.Fatalf("publish at %d: %v", first, err)
+		}
+	}
+
+	publish(10)
+	for _, name := range []string{"sub10.vtt", "sub10.json", "sub15.vtt", "sub15.json"} {
+		if !exists(name) {
+			t.Errorf("%s: want the window's own segments written", name)
+		}
+	}
+	if exists("sub9999.vtt") {
+		t.Error("sub9999.vtt: a previous run's leftover must not survive a publish")
+	}
+
+	// 10 has just rotated out of the window. A player's copy of subs.m3u8 still
+	// lists it, so it has to still be there.
+	publish(11)
+	if !exists("sub10.vtt") || !exists("sub10.json") {
+		t.Error("sub10: dropped on the tick it left the window — this is the 404")
+	}
+
+	// Two segments back is the grace band's edge; past it there is no player
+	// left that could ask.
+	publish(13)
+	if exists("sub10.vtt") || exists("sub10.json") {
+		t.Error("sub10: kept beyond the grace band, so the directory would grow")
+	}
+	if !exists("sub11.vtt") || !exists("sub12.vtt") {
+		t.Error("sub11/sub12: inside the grace band and still needed")
+	}
+
+	// The invariant, stated the way it matters: every video segment ffmpeg has
+	// left on disk (the window plus its own one-segment threshold) has captions
+	// beside it.
+	for seq := int64(12); seq <= 18; seq++ {
+		name := fmt.Sprintf("sub%d.vtt", seq)
+		if !exists(name) {
+			t.Errorf("%s: a video segment on disk with no captions beside it", name)
+		}
+	}
 }
