@@ -100,6 +100,12 @@ make build                # Rust engines, then the web UI, then the daemon
 make run                  # ./isdbd --config configs/isdbd.toml
 ```
 
+The first start has no channel list, so it sweeps UHF 13–62 before anything
+else comes up and writes `channels.json` from what locks — a few minutes, once.
+That file is yours and is not tracked: the frequencies are a property of where
+the aerial is. `POST /api/scan` re-runs the sweep later, and `dvb-rs scan
+--merge` folds a rescanned mux into it without disturbing curated names.
+
 Open the web UI in a browser (Live / Guide / Schedules / Recordings).
 
 Live TV is one URL — `http://<host>:8010/stream.m3u8` — and it plays

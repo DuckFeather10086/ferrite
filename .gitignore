@@ -14,6 +14,11 @@ web/out/
 web/tsconfig.tsbuildinfo
 .env
 *.log
+# A channel list is a property of where the aerial is, not of the source: the
+# frequencies here are one flat in Tokyo. A fresh start with no list sweeps the
+# band and writes its own (cmd/isdbd/main.go), so tracking one only meant every
+# install began by inheriting someone else's muxes.
+/channels.json
 /isdbd
 /ferrite-tui
 /target/

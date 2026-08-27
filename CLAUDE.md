@@ -329,7 +329,9 @@ mid-recording finalizing as 'done'.
   `--output` defaults to `channels.json`, so a bare `scan` used to replace a
   whole curated list. It now refuses when the target is an existing channel
   list (`--force` overrides). Auditing means scanning to a scratch path and
-  diffing, or `--merge`.
+  diffing, or `--merge`. That refusal is the whole safety net now — the file is
+  **untracked**, so `git checkout channels.json` is no longer the undo it is
+  described as in HANDOFF.md.
 - **`--merge` folds *names* in; `--merge --add-new` also creates records.**
   Merging matches on SERVICE_ID + FREQUENCY, keeps whatever name a human
   curated and adds the broadcast name as an alias — which is all a rescan of
