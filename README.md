@@ -136,6 +136,26 @@ Then, from anywhere:
 ferrite-tui               # terminal remote (defaults to localhost:8010)
 ```
 
+### Or ask it
+
+`agent/` is an MCP server and a tool-calling loop over the same REST API, so
+the tuner can be driven in plain language — from Claude Code, an editor, or
+the shell:
+
+```bash
+cd agent && bun install
+export ORCAROUTER_API_KEY=sk-orca-...
+bun run agent "今晩の報道ステーション録って"
+```
+
+Any OpenAI-compatible endpoint drives it; `agent/README.md` has the two set up
+here. One is [OrcaRouter][or] — a single key reaching OpenAI, Anthropic, Gemini
+and DeepSeek — and ferrite defaults to its `orcarouter/free`, so the agent
+costs nothing to run. That is a referral link: signing up through it sends 5%
+of what you spend to this project, at no extra cost to you.
+
+[or]: https://www.orcarouter.ai/ref/ref_1da4a03d0a83d6848e80
+
 ## Build
 
 `make build` runs all of it in order — `make rust`, `make web`, `make go` —

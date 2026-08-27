@@ -30,12 +30,18 @@ speaks it can drive the TV. `src/providers.ts` lists the two set up here:
 | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-chat` |
 | `orcarouter` | `ORCAROUTER_API_KEY` | `orcarouter/free` |
 
-[OrcaRouter](https://www.orcarouter.ai) is a gateway: one key reaches OpenAI,
-Anthropic, Gemini, DeepSeek and others behind the same protocol, with ids
-namespaced by provider (`anthropic/claude-sonnet-4.6`, `deepseek/deepseek-chat`).
-Its default here is `orcarouter/free`, a router over the free tier that sizes
-each request and picks a free model for it — so the TV agent costs nothing to
-run.
+[OrcaRouter][or] is a gateway: one key reaches OpenAI, Anthropic, Gemini,
+DeepSeek and others behind the same protocol, with ids namespaced by provider
+(`anthropic/claude-sonnet-4.6`, `deepseek/deepseek-chat`). Its default here is
+`orcarouter/free`, a router over the free tier that sizes each request and
+picks a free model for it — so the TV agent costs nothing to run.
+
+The OrcaRouter link above is a referral link: a workspace that signs up through
+it sends 5% of its spend to ferrite, and costs you nothing extra. The plain
+address is <https://www.orcarouter.ai>, and nothing here prefers one provider —
+the table is the whole of it, and adding a third is four fields.
+
+[or]: https://www.orcarouter.ai/ref/ref_1da4a03d0a83d6848e80
 
 Set one key and it is used. Set both and `FERRITE_AGENT_PROVIDER` picks;
 without it the first row wins, so an existing DeepSeek setup never moves on
