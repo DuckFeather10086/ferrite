@@ -15,7 +15,11 @@ export interface Provider {
   /** Environment variable holding the API key. Its presence also auto-selects. */
   keyEnv: string;
   defaultModel: string;
-  /** Where to go when the key is missing. */
+  /**
+   * Where to go when the key is missing. May be a referral link — it is shown
+   * to someone who has *no* key yet, which is exactly who it is for, and the
+   * plain address is in the READMEs beside it.
+   */
   keysUrl: string;
 }
 
@@ -41,7 +45,7 @@ export const PROVIDERS: Provider[] = [
     // a free model for it, so running the TV agent costs nothing. Override with
     // FERRITE_AGENT_MODEL for a paid id.
     defaultModel: "orcarouter/free",
-    keysUrl: "https://www.orcarouter.ai/console",
+    keysUrl: "https://www.orcarouter.ai/ref/ref_1da4a03d0a83d6848e80",
   },
 ];
 
