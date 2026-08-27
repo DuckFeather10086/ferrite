@@ -1,22 +1,36 @@
-// A DeepSeek-driven agent loop over the same tools the MCP server exposes.
+// A tool-calling agent loop over the same tools the MCP server exposes.
 //
-// DeepSeek's API is OpenAI-compatible, so the official `openai` client works
-// against api.deepseek.com — no provider-specific SDK.
+// The model is reached over the OpenAI chat-completions protocol, which every
+// provider in providers.ts speaks — DeepSeek directly, or an OrcaRouter key
+// that reaches many providers behind the same shape. Nothing below this line
+// knows which one answered.
 
 import OpenAI from "openai";
 import type {
+  ChatCompletion,
+  ChatCompletionCreateParamsNonStreaming,
   ChatCompletionMessageParam,
   ChatCompletionTool,
 } from "openai/resources/chat/completions";
 
 import { FerriteClient } from "./client.ts";
 import { callTool, tools } from "./tools.ts";
-
-export const DEFAULT_MODEL = "deepseek-chat";
-export const DEFAULT_BASE_URL = "https://api.deepseek.com";
+import {
+  explainRateLimit,
+  freeTierWaitMs,
+  isFreeModel,
+  PROVIDERS,
+  type Provider,
+  resolveBaseURL,
+  resolveModel,
+  resolveProvider,
+} from "./providers.ts";
 
 /** Bounds one request, so a confused model can't loop on tool calls forever. */
 export const MAX_STEPS = 8;
+
+/** Longest we will sit inside one request waiting out a free-tier window. */
+export const MAX_FREE_WAIT_MS = 60_000;
 
 export const SYSTEM_PROMPT = [
   "You operate a Japanese terrestrial (ISDB-T) television tuner through tools.",
@@ -61,18 +75,54 @@ export interface AgentOptions {
   onToolCall?: (name: string, args: Record<string, unknown>) => void;
 }
 
-export function createOpenAI(): OpenAI {
-  const apiKey = process.env.DEEPSEEK_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "DEEPSEEK_API_KEY is not set. Export it, or put it in agent/.env " +
-        "(which is git-ignored).",
-    );
+/** A configured endpoint: who answers, as what model, over which client. */
+export interface AgentSetup {
+  provider: Provider;
+  model: string;
+  openai: OpenAI;
+}
+
+export function createSetup(
+  env: Record<string, string | undefined> = process.env,
+): AgentSetup {
+  const provider = resolveProvider(env);
+  const model = resolveModel(provider, env);
+  return {
+    provider,
+    model,
+    openai: new OpenAI({
+      apiKey: env[provider.keyEnv]!,
+      baseURL: resolveBaseURL(provider, env),
+      // Free ids invert the usual advice about 429s, and the SDK honours
+      // Retry-After without a ceiling — a day-bucket window would park a
+      // channel change for hours. complete() owns the policy for those.
+      ...(isFreeModel(model) ? { maxRetries: 0 } : {}),
+    }),
+  };
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * One completion, with the free tier's two different 429s told apart: a full
+ * rate window is waited out exactly once, an oversized prompt is not retried
+ * at all. Anything else is rethrown as it came.
+ */
+async function complete(
+  openai: OpenAI,
+  req: ChatCompletionCreateParamsNonStreaming,
+): Promise<ChatCompletion> {
+  try {
+    return await openai.chat.completions.create(req);
+  } catch (err) {
+    const waitMs = freeTierWaitMs(err, MAX_FREE_WAIT_MS);
+    if (waitMs !== null) {
+      await sleep(waitMs);
+      return await openai.chat.completions.create(req);
+    }
+    const explained = explainRateLimit(err, req.model);
+    throw explained ? new Error(explained, { cause: err }) : err;
   }
-  return new OpenAI({
-    apiKey,
-    baseURL: process.env.DEEPSEEK_BASE_URL ?? DEFAULT_BASE_URL,
-  });
 }
 
 /**
@@ -81,8 +131,11 @@ export function createOpenAI(): OpenAI {
  */
 export async function runAgent(prompt: string, opts: AgentOptions = {}): Promise<string> {
   const client = opts.client ?? new FerriteClient();
-  const openai = opts.openai ?? createOpenAI();
-  const model = opts.model ?? process.env.DEEPSEEK_MODEL ?? DEFAULT_MODEL;
+  // Only reach for a real endpoint when the caller didn't bring one: the tests
+  // pass a stub, and must not need an API key to run.
+  const setup = opts.openai ? undefined : createSetup();
+  const openai = opts.openai ?? setup!.openai;
+  const model = opts.model ?? setup?.model ?? PROVIDERS[0]!.defaultModel;
   const maxSteps = opts.maxSteps ?? MAX_STEPS;
 
   const messages: ChatCompletionMessageParam[] = [
@@ -91,7 +144,7 @@ export async function runAgent(prompt: string, opts: AgentOptions = {}): Promise
   ];
 
   for (let step = 0; step < maxSteps; step++) {
-    const completion = await openai.chat.completions.create({
+    const completion = await complete(openai, {
       model,
       messages,
       tools: toolSpecs(),

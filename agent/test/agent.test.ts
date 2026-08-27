@@ -150,6 +150,50 @@ test("the loop is bounded", async () => {
   expect(MAX_STEPS).toBeGreaterThan(1);
 });
 
+/** A model that rejects the first n calls with a rate limit, then answers. */
+function stubRateLimited(failures: number, retryAfter?: string) {
+  let calls = 0;
+  const openai = {
+    chat: {
+      completions: {
+        create: async () => {
+          calls++;
+          if (calls <= failures) {
+            const headers = new Headers();
+            if (retryAfter !== undefined) headers.set("retry-after", retryAfter);
+            throw Object.assign(new Error("429 free_rate_limited"), {
+              status: 429,
+              headers,
+            });
+          }
+          return { choices: [{ message: { role: "assistant", content: "ok" } }] };
+        },
+      },
+    },
+  };
+  return { openai: openai as any, calls: () => calls };
+}
+
+// A free window refills at its boundary: wait exactly as told, once.
+test("a rate-limit window is waited out and the request retried once", async () => {
+  const { openai, calls } = stubRateLimited(1, "0");
+  const reply = await runAgent("hi", { client, openai, model: "orcarouter/free" });
+
+  expect(reply).toBe("ok");
+  expect(calls()).toBe(2);
+});
+
+// An oversized prompt comes back as a 429 with no Retry-After, and retrying it
+// unchanged fails identically — so the loop must give up and say why.
+test("a rejection with no Retry-After fails with the reason", async () => {
+  const { openai, calls } = stubRateLimited(1);
+
+  await expect(
+    runAgent("hi", { client, openai, model: "orcarouter/free" }),
+  ).rejects.toThrow(/prompt cap/);
+  expect(calls()).toBe(1);
+});
+
 test("tool specs match the MCP tool list", () => {
   // openai types tools as a union; narrow to the function variant.
   const specs = toolSpecs().filter(

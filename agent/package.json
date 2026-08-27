@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "MCP tools + a DeepSeek agent for driving a ferrite ISDB-T TV daemon",
+  "description": "MCP tools + a tool-calling agent for driving a ferrite ISDB-T TV daemon",
   "scripts": {
     "mcp": "bun run src/mcp.ts",
     "agent": "bun run src/cli.ts",

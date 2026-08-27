@@ -1,12 +1,13 @@
 # ferrite-agent
 
-MCP tools and a DeepSeek agent for driving a [ferrite](../) ISDB-T TV daemon.
+MCP tools and a tool-calling agent for driving a [ferrite](../) ISDB-T TV
+daemon.
 
 The tool list in `src/tools.ts` is the single definition of "how to operate
 the TV". Two things consume it:
 
 - `src/mcp.ts` — an MCP server over stdio, for any MCP-capable agent.
-- `src/agent.ts` — a DeepSeek tool-calling loop, for plain-language requests.
+- `src/agent.ts` — a tool-calling loop, for plain-language requests.
 
 Neither keeps TV state. The daemon is the source of truth, so this stays
 consistent with the web UI and the TUI.
@@ -16,8 +17,44 @@ consistent with the web UI and the TUI.
 ```sh
 bun install
 export FERRITE_HOST=http://tuner.lan:8010   # default http://localhost:8010
-export DEEPSEEK_API_KEY=...                 # or put it in agent/.env (git-ignored)
+export ORCAROUTER_API_KEY=sk-orca-...       # or put it in agent/.env (git-ignored)
 ```
+
+## Model provider
+
+The loop speaks the OpenAI chat-completions protocol, so anything that also
+speaks it can drive the TV. `src/providers.ts` lists the two set up here:
+
+| provider | key | default model |
+|---|---|---|
+| `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-chat` |
+| `orcarouter` | `ORCAROUTER_API_KEY` | `orcarouter/free` |
+
+[OrcaRouter](https://www.orcarouter.ai) is a gateway: one key reaches OpenAI,
+Anthropic, Gemini, DeepSeek and others behind the same protocol, with ids
+namespaced by provider (`anthropic/claude-sonnet-4.6`, `deepseek/deepseek-chat`).
+Its default here is `orcarouter/free`, a router over the free tier that sizes
+each request and picks a free model for it — so the TV agent costs nothing to
+run.
+
+Set one key and it is used. Set both and `FERRITE_AGENT_PROVIDER` picks;
+without it the first row wins, so an existing DeepSeek setup never moves on
+its own. `FERRITE_AGENT_MODEL` overrides the model and
+`FERRITE_AGENT_BASE_URL` the endpoint, for either provider.
+
+### The free tier answers 429 two ways
+
+They want opposite responses, so `complete()` in `agent.ts` handles them
+rather than leaving it to the SDK's retries:
+
+- **with `Retry-After`** — a rate window is full, and a free window refills
+  whole at its boundary rather than easing back. Wait exactly as long as the
+  header says, retry once, never back off further. Windows longer than
+  `MAX_FREE_WAIT_MS` (60s) fail instead: the day bucket rolls at 00:00 UTC,
+  and sitting on that inside "テレビ朝日に変えて" is worse than saying so.
+- **without `Retry-After`** — the request was over the free tier's
+  per-request prompt cap. Not retried at all; the same request fails
+  identically however long you wait.
 
 ## Plain-language requests
 
@@ -33,8 +70,7 @@ With no argument it reads one request per line from stdin, which is how a
 chat channel (a Telegram bot, a webhook) can sit in front of it without
 touching the loop.
 
-`DEEPSEEK_MODEL` overrides the model (default `deepseek-chat`);
-`DEEPSEEK_BASE_URL` overrides the endpoint.
+The first stderr line names the provider and model that answered.
 
 ## As an MCP server
 
