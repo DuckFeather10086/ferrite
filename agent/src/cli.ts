@@ -10,12 +10,24 @@
 // file: the loop in agent.ts and the tools it drives are the reusable part.
 
 import { FerriteClient } from "./client.ts";
-import { createOpenAI, runAgent } from "./agent.ts";
-
-const client = new FerriteClient();
-const openai = createOpenAI();
+import { type AgentSetup, createSetup, runAgent } from "./agent.ts";
 
 const verbose = process.env.FERRITE_AGENT_QUIET !== "1";
+
+const client = new FerriteClient();
+
+// Which provider answers is a matter of which key is in the environment, so
+// say it out loud rather than leaving it to be guessed from the bill.
+let setup: AgentSetup;
+try {
+  setup = createSetup();
+} catch (err) {
+  console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(2);
+}
+const { openai, model, provider } = setup;
+if (verbose) process.stderr.write(`  · ${provider.label} · ${model}\n`);
+
 const onToolCall = verbose
   ? (name: string, args: Record<string, unknown>) => {
       const shown = Object.keys(args).length ? ` ${JSON.stringify(args)}` : "";
@@ -25,7 +37,7 @@ const onToolCall = verbose
 
 async function answer(prompt: string): Promise<void> {
   try {
-    const reply = await runAgent(prompt, { client, openai, onToolCall });
+    const reply = await runAgent(prompt, { client, openai, model, onToolCall });
     console.log(reply);
   } catch (err) {
     console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
