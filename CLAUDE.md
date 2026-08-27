@@ -171,10 +171,15 @@ Implemented and tested (race-clean):
   bundled via npm (no CDN needed — works fully offline on LAN).
 - `agent/` — Bun + TypeScript. `src/tools.ts` is the single tool list ("how to
   operate the TV"), consumed both by an MCP server (`src/mcp.ts`, stdio) and a
-  DeepSeek tool-calling loop (`src/agent.ts`). Channel resolution there mirrors
+  tool-calling loop (`src/agent.ts`). Channel resolution there mirrors
   `config.Channels.Find` exactly — first record whose name *or* aliases match,
   in file order. Diverging means one tool reads a channel while another acts on
   a different one. `bun test` needs no network and no API key.
+  The endpoint is a table in `src/providers.ts` — DeepSeek or OrcaRouter, base
+  URL + key env + default model — picked by which key is set, so the loop never
+  learns who answered. OrcaRouter defaults to `orcarouter/free`; its free tier
+  answers both its limits with `429` and they want opposite handling, which is
+  why `complete()` owns the retry instead of the SDK (see `agent/README.md`).
 - `web/` — Bun + Next.js 16 (App Router, TypeScript, Tailwind CSS).
   Four pages: Live (hls.js player + `ARIB | Text | Off` captions + record now /
   stop), Guide (EPG, one click books a programme), Schedules (create/cancel),
