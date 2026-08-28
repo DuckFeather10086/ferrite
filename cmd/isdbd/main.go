@@ -67,6 +67,14 @@ func run(cfgPath, logLevel string) error {
 		return err
 	}
 
+	// The adapter inventory in one shape (either `adapters` or
+	// `[[adapter]]`), and the per-adapter dvb-rs backend ("dvb" | "px4")
+	// derived from it. Everything that spawns dvb-rs — the tune pipeline
+	// via DvbrCLI, the sweep, the EPG refresher — resolves `--backend`
+	// through this map, so a px4 box needs nothing but the config line.
+	adapters := cfg.AdapterList()
+	backends := config.BackendMap(adapters)
+
 	// Nothing to watch yet: sweep the band before anything else starts, so
 	// a fresh install comes up with a usable channel list instead of
 	// failing to load a file that only exists in the author's flat. This
@@ -80,6 +88,7 @@ func run(cfgPath, logLevel string) error {
 			DvbrBin:      cfg.DvbrBin,
 			ChannelsFile: cfg.ChannelsFile,
 			Adapter:      cfg.AdapterList()[0].N,
+			Backends:     backends,
 		}
 		if _, err := boot.Run(context.Background(), nil); err != nil {
 			// Not fatal on its own: the empty list it leaves behind still
@@ -110,8 +119,9 @@ func run(cfgPath, logLevel string) error {
 		BinPath:      cfg.DvbrBin,
 		B25Bin:       cfg.B25Bin,
 		ChannelsFile: cfg.ChannelsFile,
+		Backends:     backends,
 	}
-	adapters := cfg.AdapterList()
+	// Reuse the adapter inventory computed up top.
 	tunerPool := tuner.NewPool(dvbrCLI, channels, adapters, 8)
 	slog.Info("tuner pool initialized", "adapters", adapters)
 
@@ -206,6 +216,7 @@ func run(cfgPath, logLevel string) error {
 		DvbrBin:      cfg.DvbrBin,
 		ChannelsFile: cfg.ChannelsFile,
 		Tuners:       tunerPool,
+		Backends:     backends,
 	}
 
 	handler := api.NewRouter(api.Deps{
@@ -273,7 +284,8 @@ func run(cfgPath, logLevel string) error {
 			// Route EPG through the pool at background priority: live
 			// viewing and recordings evict it instead of dying on dvbr's
 			// flock (which is what starved live HLS before).
-			Tuners: tunerPool,
+			Tuners:   tunerPool,
+			Backends: backends,
 		}
 		go func() {
 			if err := refresher.Run(ctx); err != nil && ctx.Err() == nil {

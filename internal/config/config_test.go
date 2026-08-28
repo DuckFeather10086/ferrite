@@ -180,6 +180,34 @@ func TestAdapterList(t *testing.T) {
 			t.Fatalf("expected an either/or error, got %v", err)
 		}
 	})
+
+	t.Run("backend defaults to dvb and round-trips through the map", func(t *testing.T) {
+		d, err := load(t, "[[adapter]]\nn = 0\nsystems = [\"ISDBT\"]\n\n[[adapter]]\nn = 1\nsystems = [\"ISDBT\"]\nbackend = \"px4\"\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		list := d.AdapterList()
+		if got, want := list[0].BackendName(), "dvb"; got != want {
+			t.Fatalf("adapter 0 backend: got %q, want %q", got, want)
+		}
+		if got, want := list[1].BackendName(), "px4"; got != want {
+			t.Fatalf("adapter 1 backend: got %q, want %q", got, want)
+		}
+		m := BackendMap(list)
+		if got, want := BackendFor(m, 0), "dvb"; got != want {
+			t.Fatalf("BackendFor(0): got %q, want %q", got, want)
+		}
+		if got, want := BackendFor(m, 1), "px4"; got != want {
+			t.Fatalf("BackendFor(1): got %q, want %q", got, want)
+		}
+		// An adapter nobody mentioned is dvb, and a nil map too.
+		if got, want := BackendFor(m, 5), "dvb"; got != want {
+			t.Fatalf("BackendFor(5): got %q, want %q", got, want)
+		}
+		if got, want := BackendFor(nil, 1), "dvb"; got != want {
+			t.Fatalf("BackendFor(nil): got %q, want %q", got, want)
+		}
+	})
 }
 
 // The three ways hls_root resolves. The unset-variable case is the one that

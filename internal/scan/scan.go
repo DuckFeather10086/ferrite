@@ -113,6 +113,11 @@ type Runner struct {
 	Tuners  Reserver
 	Adapter int
 
+	// Backends maps adapter number → dvb-rs backend name ("dvb" |
+	// "px4"), for the `--backend` flag on every dvb-rs scan. Absent
+	// adapters are dvb. Set from config.BackendMap.
+	Backends map[int]string
+
 	First, Last int
 
 	running sync.Mutex
@@ -273,6 +278,7 @@ func (r *Runner) scanOne(ctx context.Context, freq int) (bool, error) {
 
 	args := []string{
 		"scan",
+		"--backend", config.BackendFor(r.Backends, adapter),
 		"--adapter", strconv.Itoa(adapter),
 		"--frequency", strconv.Itoa(freq),
 		"--bandwidth-hz", strconv.Itoa(channelWidth),

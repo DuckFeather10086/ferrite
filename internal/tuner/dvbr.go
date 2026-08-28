@@ -22,6 +22,7 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/DuckFeather10086/ferrite/internal/config"
 	"github.com/DuckFeather10086/ferrite/internal/proc"
 )
 
@@ -38,6 +39,10 @@ type DvbrCLI struct {
 	B25Bin string
 	// ChannelsFile is passed as --channels to every subcommand.
 	ChannelsFile string
+	// Backends maps adapter number → dvb-rs backend name ("dvb" |
+	// "px4"). Adapters absent from the map are dvb. Set from
+	// config.AdapterList via config.BackendMap.
+	Backends map[int]string
 	// LockTimeoutMs bounds how long dvbr waits for the frontend to
 	// lock before giving up. Zero falls back to dvbr's default (15000).
 	LockTimeoutMs int
@@ -69,6 +74,7 @@ func (d *DvbrCLI) Tune(ctx context.Context, adapter int, channel string) (TsStre
 
 	args := []string{
 		"tune",
+		"--backend", config.BackendFor(d.Backends, adapter),
 		"--adapter", strconv.Itoa(adapter),
 		"--frontend", "0",
 		"--demux", "0",

@@ -82,6 +82,11 @@ type Refresher struct {
 	// tests and headless one-shot use.
 	Tuners Reserver
 
+	// Backends maps adapter number → dvb-rs backend name ("dvb" |
+	// "px4"), for the `--backend` flag on `dvbr epg`. Absent adapters
+	// are dvb. Set from config.BackendMap.
+	Backends map[int]string
+
 	// StartupDelay defers the first pass after Run starts (0 = default,
 	// negative = no delay). RetryAfterPreempt overrides the post-eviction
 	// retry delay.
@@ -185,6 +190,7 @@ func (r *Refresher) refreshOne(ctx context.Context, channelName string) (int, er
 
 	args := []string{
 		"epg",
+		"--backend", config.BackendFor(r.Backends, adapter),
 		"--adapter", strconv.Itoa(adapter),
 		"--channels", r.ChannelsFile,
 		"--schedule",

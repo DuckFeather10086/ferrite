@@ -160,6 +160,11 @@ func (q LiveQuality) Name() string { return q.name }
 // channel to a terrestrial frontend, wait out the lock timeout, and report
 // a weak signal — a failure that looks like an aerial problem and is not.
 // Naming the systems turns that into an immediate, accurate refusal.
+//
+// Backend names which driver drives this adapter: "dvb" (the default, a
+// DVB API adapter such as the Siano/smsusb dongles) or "px4" (a PLEX
+// PX4/PX5/PX-MLT or e-Better DTV device under px4_drv, exposed as
+// /dev/px4video{N}). dvb-rs gets it as `--backend` on every subcommand.
 type Adapter struct {
 	N int `toml:"n"`
 	// Systems are DVB delivery-system names as they appear in
@@ -167,6 +172,40 @@ type Adapter struct {
 	// terrestrial, which is what the bare `adapters = [n]` form has always
 	// implied.
 	Systems []string `toml:"systems"`
+	// Backend is "dvb" or "px4"; empty means dvb.
+	Backend string `toml:"backend"`
+}
+
+// BackendName is the dvb-rs `--backend` value for this adapter.
+func (a Adapter) BackendName() string {
+	switch strings.ToLower(strings.TrimSpace(a.Backend)) {
+	case "px4", "px4_drv":
+		return "px4"
+	default:
+		return "dvb"
+	}
+}
+
+// BackendMap returns adapter number → dvb-rs backend name for every
+// adapter. Callers that spawn dvb-rs directly (scan, epg — everything
+// that is not tuner.DvbrCLI) resolve `--backend` through this.
+func BackendMap(adapters []Adapter) map[int]string {
+	m := make(map[int]string, len(adapters))
+	for _, a := range adapters {
+		m[a.N] = a.BackendName()
+	}
+	return m
+}
+
+// BackendFor is BackendMap's single-adapter lookup: the backend that
+// drives adapter n, "dvb" when the map does not say.
+func BackendFor(backends map[int]string, adapter int) string {
+	if backends != nil {
+		if b, ok := backends[adapter]; ok && b != "" {
+			return b
+		}
+	}
+	return "dvb"
 }
 
 // DefaultDeliverySystem is what an adapter (or a channel) is taken to mean
@@ -193,7 +232,7 @@ func (d *Daemon) AdapterList() []Adapter {
 			if len(systems) == 0 {
 				systems = []string{DefaultDeliverySystem}
 			}
-			out = append(out, Adapter{N: a.N, Systems: systems})
+			out = append(out, Adapter{N: a.N, Systems: systems, Backend: a.Backend})
 		}
 		return out
 	}

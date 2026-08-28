@@ -12,7 +12,16 @@ It is **the orchestrator** — the heavy lifting is done by external
 binaries spawned as subprocesses:
 
 - `dvb-rs` (Rust, sibling repo) — tune frontend, parse PAT/PMT, tap PIDs,
-  emit TS on stdout; also `dvb-rs epg` for EIT ingestion.
+  emit TS on stdout; also `dvb-rs epg` for EIT ingestion. One binary,
+  two backends: `--backend dvb` (default, DVB API v5 adapters — the
+  Siano/smsusb dongles, PT3-style cards) and `--backend px4` — PLEX
+  PX4/PX5/PX-MLT and e-Better DTV devices under the out-of-tree `px4_drv`
+  kernel module, which expose `/dev/px4video{N}` chardevs instead of DVB
+  adapters. On px4 there is no kernel demux: tuning is one ioctl
+  (`PTX_SET_CHANNEL` with the physical channel), PAT/PMT come off the full
+  mux reassembled in userspace, and the service-PID tap is a userspace
+  packet filter — the TS that reaches stdout has the same shape either
+  way.
 - `b25-rs` (Rust, sibling repo `libaribb25-rs`) — ARIB B25 descrambler;
   reads encrypted TS on stdin, writes plain TS on stdout.
 - `arib-caption` (Rust, sibling repo `libaribcaption-rs`) — ARIB STD-B24
@@ -113,6 +122,12 @@ Implemented and tested (race-clean):
 - `proc.Spawn` / `proc.SpawnOpt(Stdin:true)` — subprocess + pgrp
   lifecycle, stderr→slog, stdin pipe for ffmpeg.
 - `tuner.DvbrCLI.Tune` — wraps `dvb-rs tune` into a TsStream.
+- `tuner.DvbrCLI` — spawns `dvb-rs` (or the configured binary) with
+  `--backend` resolved per adapter from `config.BackendMap`, so a px4
+  box needs nothing but `backend = "px4"` on its `[[adapter]]` lines;
+  scan and the EPG refresher resolve the same map. `dvbr scan` on px4
+  sweeps by frequency exactly as on DVB — the conversion to a physical
+  channel is dvb-rs's.
 - `tuner.Pool` — refcounted leases, same-channel sharing, source-EOF
   recovery. Now chains `dvb-rs | b25-rs` so leases emit descrambled TS
   (see `DvbrCLI.B25Bin`; empty disables descrambling for FTA/no-card).
@@ -301,7 +316,10 @@ mid-recording finalizing as 'done'.
 ## Architecture invariants
 
 - **One process per adapter at a time.** Cross-process serialization
-  is `dvb-rs`'s flock on `/tmp/dvbr-adapter{N}.lock`.
+  is `dvb-rs`'s flock on `/tmp/dvbr-adapter{N}.lock` — the same
+  `adapter N` names `/dev/dvb/adapter{N}` on the DVB backend and
+  `/dev/px4video{N}` on the px4 one, so the lock contract is identical
+  and needs no per-backend path.
 - **`tuner.Pool` is the *only* in-process arbiter of an adapter.**
   Everything that touches the hardware goes through it — including work
   that drives dvb-rs out-of-process. `epg.Refresher` used to spawn
@@ -1002,6 +1020,12 @@ real deployment with binaries in `/usr/local/bin` and config in `/etc`.
 - `pcscd` running + polkit rule for the invoking user (B-CAS reader).
 - `ffmpeg` / `ffprobe` on `$PATH`.
 - USB tuner at `/dev/dvb/adapter*/`.
+- **px4 hardware only:** the `px4_drv` kernel module (DKMS; nns779's
+  original is unmaintained, the tsukumijima fork is the live one) plus
+  its udev rules, so `/dev/px4video{N}` exists and is readable by the
+  daemon's user. The module and firmware are a system-setup step — the
+  daemon never loads kernel modules — and the config then names
+  `backend = "px4"` on the adapters.
 
 ## Things not to do
 

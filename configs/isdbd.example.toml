@@ -19,6 +19,20 @@ adapters = [0]
 #   [[adapter]]
 #   n       = 1
 #   systems = ["ISDBS"]
+#
+# `backend` names the dvb-rs driver that drives the adapter: "dvb"
+# (default — a DVB API adapter such as the Siano/smsusb dongles) or
+# "px4" — a PLEX PX4/PX5/PX-MLT or e-Better DTV device under the
+# px4_drv kernel module, exposed as /dev/px4video{N}. A PX-Q3U4's four
+# tuners are /dev/px4video0..3, i.e. adapters 0..3, each with
+# backend = "px4".
+#   [[adapter]]
+#   n       = 0
+#   systems = ["ISDBT"]
+#   backend = "px4"
+#
+# (The kernel module and its udev rules are a system setup step, not
+# something the daemon can do for you; see px4_drv's README.)
 
 # dvbr is built into the parent virtual workspace's target/, not dvbr/target/.
 dvbr_bin     = "/home/duckfeather/code/isdb-workspace/target/release/dvb-rs"

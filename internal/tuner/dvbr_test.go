@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -66,6 +67,44 @@ func TestTune_RawWhenNoB25(t *testing.T) {
 	}
 	if string(got) != "raw-ts-bytes" {
 		t.Fatalf("want raw %q, got %q", "raw-ts-bytes", got)
+	}
+}
+
+// TestTune_PassesBackendThrough verifies the `--backend` flag reaches
+// dvb-rs: a px4 adapter (per Backends) must be handed `--backend px4`,
+// and an adapter the map does not mention must stay dvb.
+func TestTune_PassesBackendThrough(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "args.log")
+	dvbr := writeScript(t, dir, "dvb-rs",
+		`printf '%s\n' "$@" > "`+log+`"`)
+
+	cli := &DvbrCLI{BinPath: dvbr, ChannelsFile: "channels.json",
+		Backends: map[int]string{0: "px4"}}
+	stream, err := cli.Tune(context.Background(), 0, "mx")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The fake dvb-rs writes its args then exits; give it a moment rather
+	// than racing Close against the printf.
+	var args []byte
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(log); err == nil {
+			args = b
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_ = stream.Close()
+
+	if args == nil {
+		t.Fatal("dvb-rs never wrote its args")
+	}
+	got := string(args)
+	if !strings.Contains(got, "--backend\npx4\n") {
+		t.Fatalf("expected --backend px4 in args, got %q", got)
 	}
 }
 
