@@ -71,8 +71,9 @@ func TestTune_RawWhenNoB25(t *testing.T) {
 }
 
 // TestTune_PassesBackendThrough verifies the `--backend` flag reaches
-// dvb-rs: a px4 adapter (per Backends) must be handed `--backend px4`,
-// and an adapter the map does not mention must stay dvb.
+// dvb-rs: a px4 adapter (per Backends) must be handed `--backend px4`.
+// The default backend is the other half and has its own test below,
+// because there the right argument list is the one with no flag on it.
 func TestTune_PassesBackendThrough(t *testing.T) {
 	dir := t.TempDir()
 	log := filepath.Join(dir, "args.log")
@@ -105,6 +106,46 @@ func TestTune_PassesBackendThrough(t *testing.T) {
 	got := string(args)
 	if !strings.Contains(got, "--backend\npx4\n") {
 		t.Fatalf("expected --backend px4 in args, got %q", got)
+	}
+}
+
+// TestTune_DefaultBackendPassesNoFlag is the compatibility half: on a DVB
+// adapter dvb-rs must be spawned with no `--backend` at all. The flag is
+// newer than the rest of that CLI, so a daemon that always passed it could
+// not drive a dvb-rs built before it existed — and the failure is not a
+// version error but "Usage: dvb-rs tune [OPTIONS] …" on stderr and a
+// channel that will not tune, on hardware that never needed the flag.
+func TestTune_DefaultBackendPassesNoFlag(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "args.log")
+	dvbr := writeScript(t, dir, "dvb-rs",
+		`printf '%s\n' "$@" > "`+log+`"`)
+
+	// Adapter 1 is a DVB adapter; adapter 0 being px4 is what makes this a
+	// per-adapter question rather than a global one.
+	cli := &DvbrCLI{BinPath: dvbr, ChannelsFile: "channels.json",
+		Backends: map[int]string{0: "px4", 1: "dvb"}}
+	stream, err := cli.Tune(context.Background(), 1, "mx")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var args []byte
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(log); err == nil {
+			args = b
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_ = stream.Close()
+
+	if args == nil {
+		t.Fatal("dvb-rs never wrote its args")
+	}
+	if got := string(args); strings.Contains(got, "--backend") {
+		t.Fatalf("default backend must pass no --backend flag, got %q", got)
 	}
 }
 

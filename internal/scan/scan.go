@@ -276,9 +276,9 @@ func (r *Runner) scanOne(ctx context.Context, freq int) (bool, error) {
 		}()
 	}
 
-	args := []string{
-		"scan",
-		"--backend", config.BackendFor(r.Backends, adapter),
+	args := []string{"scan"}
+	args = append(args, config.BackendArgs(r.Backends, adapter)...)
+	args = append(args,
 		"--adapter", strconv.Itoa(adapter),
 		"--frequency", strconv.Itoa(freq),
 		"--bandwidth-hz", strconv.Itoa(channelWidth),
@@ -290,7 +290,7 @@ func (r *Runner) scanOne(ctx context.Context, freq int) (bool, error) {
 		// --add-new a sweep over an empty document finds everything and
 		// writes nothing.
 		"--merge", "--add-new",
-	}
+	)
 	cmd := exec.CommandContext(cmdCtx, r.DvbrBin, args...)
 	// Without this a grandchild holding the inherited stdout pipe keeps
 	// Wait blocked and wedges the adapter for the next transport.

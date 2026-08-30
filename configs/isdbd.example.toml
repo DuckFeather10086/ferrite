@@ -33,6 +33,12 @@ adapters = [0]
 #
 # (The kernel module and its udev rules are a system setup step, not
 # something the daemon can do for you; see px4_drv's README.)
+#
+# The px4 backend is terrestrial only today: it tunes by ISDB-T physical
+# channel (UHF 13-62), so the satellite half of a mixed card — a Q3U4's
+# other two tuners — has nothing to drive it yet. Label those adapters
+# only once that exists, or a BS channel dispatches to a tuner that will
+# refuse it.
 
 # dvbr is built into the parent virtual workspace's target/, not dvbr/target/.
 dvbr_bin     = "/home/duckfeather/code/isdb-workspace/target/release/dvb-rs"

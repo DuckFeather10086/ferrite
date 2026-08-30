@@ -413,3 +413,22 @@ func joinLines(ss []string) string {
 	}
 	return out
 }
+
+// BackendArgs is what to put on a dvb-rs command line for this adapter:
+// `--backend px4` when it is a px4_drv device, and **nothing at all** for
+// the default DVB backend.
+//
+// Saying nothing is the point. `--backend` is newer than the rest of the
+// dvb-rs CLI, so a daemon that always passed it could not drive a dvb-rs
+// built before the flag existed — and what that looks like is not a
+// version error but "Usage: dvb-rs tune [OPTIONS] …" on stderr and a
+// channel that will not tune, on a box whose hardware never needed the
+// flag in the first place. A px4 box has to have the newer binary anyway,
+// since that is where the backend lives; a DVB box now does not.
+func BackendArgs(backends map[int]string, adapter int) []string {
+	b := BackendFor(backends, adapter)
+	if b == "" || b == "dvb" {
+		return nil
+	}
+	return []string{"--backend", b}
+}

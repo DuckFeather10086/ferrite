@@ -127,7 +127,13 @@ Implemented and tested (race-clean):
   box needs nothing but `backend = "px4"` on its `[[adapter]]` lines;
   scan and the EPG refresher resolve the same map. `dvbr scan` on px4
   sweeps by frequency exactly as on DVB — the conversion to a physical
-  channel is dvb-rs's.
+  channel is dvb-rs's. The flag goes on the command line only when it is
+  *not* the default (`config.BackendArgs`): `--backend` is newer than the
+  rest of the dvb-rs CLI, and a daemon that always passed it could not
+  drive a dvb-rs built before the flag — which presents as
+  `Usage: dvb-rs tune [OPTIONS] …` on stderr and a channel that will not
+  tune, on a box whose hardware never needed the flag. A px4 box has to
+  have the newer binary anyway; a DVB box now does not.
 - `tuner.Pool` — refcounted leases, same-channel sharing, source-EOF
   recovery. Now chains `dvb-rs | b25-rs` so leases emit descrambled TS
   (see `DvbrCLI.B25Bin`; empty disables descrambling for FTA/no-card).

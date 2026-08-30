@@ -72,9 +72,9 @@ func (d *DvbrCLI) Tune(ctx context.Context, adapter int, channel string) (TsStre
 		lockMs = 25000
 	}
 
-	args := []string{
-		"tune",
-		"--backend", config.BackendFor(d.Backends, adapter),
+	args := []string{"tune"}
+	args = append(args, config.BackendArgs(d.Backends, adapter)...)
+	args = append(args,
 		"--adapter", strconv.Itoa(adapter),
 		"--frontend", "0",
 		"--demux", "0",
@@ -82,7 +82,7 @@ func (d *DvbrCLI) Tune(ctx context.Context, adapter int, channel string) (TsStre
 		"--lock-timeout-ms", strconv.Itoa(lockMs),
 		"--output", "-",
 		channel,
-	}
+	)
 
 	dvbrProc, err := proc.Spawn(ctx, d.BinPath, args...)
 	if err != nil {

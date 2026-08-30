@@ -188,15 +188,15 @@ func (r *Refresher) refreshOne(ctx context.Context, channelName string) (int, er
 		adapter = res.Adapter
 	}
 
-	args := []string{
-		"epg",
-		"--backend", config.BackendFor(r.Backends, adapter),
+	args := []string{"epg"}
+	args = append(args, config.BackendArgs(r.Backends, adapter)...)
+	args = append(args,
 		"--adapter", strconv.Itoa(adapter),
 		"--channels", r.ChannelsFile,
 		"--schedule",
 		"--json",
 		channelName,
-	}
+	)
 	cmdCtx, cancel := context.WithTimeout(ctx, collectTimeout)
 	defer cancel()
 
