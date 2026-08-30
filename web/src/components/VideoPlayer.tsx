@@ -649,7 +649,19 @@ export function VideoPlayer({
                 // Anchored under the button and inside the box, so it comes
                 // along into our own fullscreen. A grid rather than two rows,
                 // to line the labels up with each other.
-                <div className="absolute left-0 top-full mt-1.5 grid grid-cols-[auto_auto] items-center gap-x-3 gap-y-2 rounded-md border border-white/20 bg-black/85 px-2.5 py-2 shadow-lg backdrop-blur-sm">
+                //
+                // `w-max` is load-bearing, and without it the menu is empty.
+                // This is absolutely positioned, so its shrink-to-fit width is
+                // resolved against its containing block — which is the ⚙ chip's
+                // own wrapper, 27px wide — and collapses to min-content. Each
+                // row of choices is `overflow-hidden`, which makes it a scroll
+                // container, whose min-content contribution is *zero*: the two
+                // segmented controls came out 2px wide (their borders, nothing
+                // else) and clipped every button away, so the menu opened
+                // showing two labels and no choices, with `elementFromPoint`
+                // over the buttons answering the <video> underneath. Sizing to
+                // max-content takes the containing block out of it.
+                <div className="absolute left-0 top-full mt-1.5 grid w-max grid-cols-[auto_auto] items-center gap-x-3 gap-y-2 rounded-md border border-white/20 bg-black/85 px-2.5 py-2 shadow-lg backdrop-blur-sm">
                   {/* One control, three positions — the same one the Recordings
                       player carries, because it is the same choice. Not the
                       browser's own captions menu: in ARIB mode there is no

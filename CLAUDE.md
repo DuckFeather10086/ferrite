@@ -445,6 +445,23 @@ mid-recording finalizing as 'done'.
   `TextTrack` cannot be removed once added, so the last channel's track outlives
   a channel change and going by that would offer captions on a channel sending
   none.
+- **That menu has to be sized `w-max`, and the day it was not it had no
+  contents.** The panel is absolutely positioned under the ⚙, so its
+  shrink-to-fit width is resolved against its containing block — the chip's own
+  27px-wide wrapper — and collapses to min-content; and each row of choices is
+  `overflow-hidden` (that is what rounds the ends of a segmented control), which
+  makes it a scroll container, whose min-content contribution is **zero**. So
+  both rows came out 2px wide — their two 1px borders, nothing between — and
+  clipped every button away. The menu opened, drew the words `captions` and
+  `quality`, and offered nothing: `elementFromPoint` over where a button should
+  have been answered the `<video>` underneath, and the only caption control left
+  in the product was the browser's own two-menus-deep one this exists to
+  replace. Measured in Firefox: panel 91.7px = `captions` 58 + gap 12 + 2 +
+  padding 20; with `w-max` it is 223px and each button hit-tests as itself.
+  Nothing in the DOM said it was broken — `innerText` read back
+  `CAPTIONS ARIB Text Off QUALITY …` the whole time, and every button reported
+  `disabled: false` — so a control this page draws is not verified until its
+  *geometry* has been read in a browser.
 - **In ARIB mode the text track is `hidden`, not `disabled`, and
   `hls.subtitleDisplay` is what keeps it that way.** Hidden means hls.js still
   treats the rendition as selected and keeps loading it
