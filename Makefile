@@ -1,5 +1,5 @@
 .PHONY: all deps build run clean web rust go \
-        install-service uninstall-service restart status logs
+        install install-service uninstall-service restart status logs
 
 # What /api/status reports, and what the TUI prints under its wordmark.
 # `cmd/isdbd` declares `var version = "dev"` for -ldflags to overwrite, and
@@ -61,39 +61,42 @@ go:
 	@export PATH="$${GOROOT:-/usr/local/go}/bin:$$PATH" && go build -o ferrite-tui ./cmd/ferrite-tui/
 	@test -x ferrite-tui || (echo "ERROR: tui build failed" && exit 1)
 
-# ── run it as a service ───────────────────────────────────────────
+# ── install it ────────────────────────────────────────────────────
 #
 # A systemd *user* service, because the tuner and the B-CAS reader are
 # reached with this user's permissions. `loginctl enable-linger $(USER)`
 # (already on here) is what makes it start at boot instead of at login.
 #
-# ferrite-tui is symlinked rather than copied, so `make go` is enough to
-# update it.
+# The binaries are *copied* out of the build trees into ~/.local/lib/ferrite
+# and the service runs from there. It used to run from the checkout, with
+# `./target/release/dvb-rs` in its config and the checkout as its working
+# directory — which made `cargo clean` (below, in this same Makefile) the
+# command that stops the box tuning. It did, and nobody noticed for three
+# days. scripts/install.sh has the layout and the reasoning.
 
-# Depends on `go`, not `build`: installing a service should not rebuild the
-# web UI or reach for cargo. The Rust binaries the daemon spawns must
-# already be there, so check rather than build them.
-install-service: go
-	@test -x target/release/dvb-rs || (echo "ERROR: target/release/dvb-rs missing — run 'make rust'" && exit 1)
-	@test -x libaribb25-rs/target/release/b25-rs || (echo "ERROR: b25-rs missing — run 'make rust'" && exit 1)
-	@test -x target/release/arib-caption || (echo "ERROR: arib-caption missing — run 'make rust'" && exit 1)
-	@mkdir -p $(HOME)/.config/systemd/user $(HOME)/.local/bin
-	sed 's|@DIR@|$(CURDIR)|g' scripts/ferrite.service \
-		> $(HOME)/.config/systemd/user/ferrite.service
-	ln -sf $(CURDIR)/ferrite-tui $(HOME)/.local/bin/ferrite-tui
-	systemctl --user daemon-reload
-	systemctl --user enable --now ferrite.service
-	@sleep 2
-	@systemctl --user --no-pager --lines=0 status ferrite.service | head -4
-	@echo '=== ferrite is up; run `ferrite-tui` from anywhere ==='
+install: build
+	./scripts/install.sh
+
+# Kept as the old name for muscle memory; the shape it installed is gone.
+install-service: install
 
 uninstall-service:
 	-systemctl --user disable --now ferrite.service
 	rm -f $(HOME)/.config/systemd/user/ferrite.service $(HOME)/.local/bin/ferrite-tui
+	rm -rf $(HOME)/.local/lib/ferrite
 	systemctl --user daemon-reload
+	@echo "=== config and recordings kept: $(HOME)/.config/ferrite, $(HOME)/.local/share/ferrite ==="
 
-# After `make go`: pick up the new binary without a full reinstall.
+# The day-to-day handle: rebuild the Go daemon, put it where the service
+# runs from, restart. Depends on `go` and not `build` because this is the
+# edit-compile-look loop and the Rust side rarely moves — but it does have
+# to *install*, or the restart picks up the old binary and the change you
+# just made appears not to work.
 restart: go
+	@install -m 0755 isdbd $(HOME)/.local/lib/ferrite/isdbd.new
+	@mv -f $(HOME)/.local/lib/ferrite/isdbd.new $(HOME)/.local/lib/ferrite/isdbd
+	@install -m 0755 ferrite-tui $(HOME)/.local/lib/ferrite/ferrite-tui.new
+	@mv -f $(HOME)/.local/lib/ferrite/ferrite-tui.new $(HOME)/.local/lib/ferrite/ferrite-tui
 	systemctl --user restart ferrite.service
 	@sleep 2
 	@systemctl --user --no-pager --lines=0 status ferrite.service | head -4
@@ -107,8 +110,12 @@ logs:
 
 # ── clean ─────────────────────────────────────────────────────────
 
+# Safe to run now, which it was not before: the service runs from
+# ~/.local/lib/ferrite and nothing it needs is under this directory. Before
+# the install layout existed, this target removed the daemon's tuner.
 clean:
-	rm -rf isdbd internal/web/dist
+	rm -rf isdbd ferrite-tui internal/web/dist
 	cargo clean
+	cd libaribb25-rs && cargo clean
 	cd web && rm -rf out .next
-	@echo "=== clean done ==="
+	@echo "=== clean done (the installed service is untouched) ==="

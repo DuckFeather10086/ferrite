@@ -701,6 +701,21 @@ mid-recording finalizing as 'done'.
   the `.ts` already gets, and nothing can name a file the recording could not.
   It also means DELETE has to take them with it (`derivedExts`) — the `.mp4`
   is the biggest file of the set and orphaning it is expensive.
+- **With `transcode.delete_source` on, the `.ts` is not there and the MP4 *is*
+  the recording.** This box sets it: the `.ts` is ~3x the MP4 (888 MB against
+  288 MB for 7 minutes of NHK), so keeping both fills the disk three times as
+  fast for a copy nothing opens. What that costs is the one file of the set
+  that cannot be made again, so the order in `postprocess.process` is
+  load-bearing — sidecars are decoded *from* the `.ts`, and the delete happens
+  after the rename, never after a failed transcode. Everything downstream has
+  to read "the recording" as whichever of the two files is on disk:
+  `hls.vodSource` already prefers the `.ts` and falls back to the MP4 (without
+  applying the A/V correction a second time, that one having it baked in), and
+  `GET /api/recordings/{id}/file` does the same — it is what the Download
+  button and the TUI's mpv both open, so answering 410 for a programme the box
+  can still play in a browser would be a lie. What does *not* follow the file
+  is the `size_bytes` column: it is what was written off the air, and stays
+  that, so the listed size overstates the disk after the source is gone.
 - **What the browser plays is the post-pass's MP4 (or a tier transcoded from
   the recording on demand — see the VOD invariants below), and its captions are
   a DOM overlay.** The `.ts` is MPEG-2 video with ARIB audio and no browser will open
@@ -1022,21 +1037,55 @@ mid-recording finalizing as 'done'.
 
 ## Running it on this box
 
-`make install-service` installs `scripts/ferrite.service` as a systemd
-**user** unit (`@DIR@` substituted for the checkout) and symlinks
-`ferrite-tui` into `~/.local/bin`. `make status` / `logs` / `restart` are
-the day-to-day handles; `restart` rebuilds the Go binaries first.
+**The service does not run from the checkout, and this is the one thing not
+to undo.** `make install` (→ `scripts/install.sh`) copies the five programs
+into `~/.local/lib/ferrite`, and the unit runs them from there with the
+config at `~/.config/ferrite/isdbd.toml` and the data at
+`~/.local/share/ferrite`. Nothing the running television needs is inside a
+build tree.
 
-Two things the unit must keep: `WorkingDirectory` at the checkout — the
-config addresses `./target/release/dvb-rs`, `channels.json` and `./var`
-relatively — and `TimeoutStopSec` well above the shutdown path's own
+It used to be the other way: `WorkingDirectory` at the checkout, `ExecStart`
+at `@DIR@/isdbd`, and `dvbr_bin = "./target/release/dvb-rs"` in the config.
+Which made `make clean` — `cargo clean`, in this same Makefile, a documented
+and ordinary thing to run — the command that stops the box being able to
+tune. On 2026-08-31 it did. The daemon kept serving: the web UI drew, the
+API answered, `/api/status` looked healthy, and the only symptom was that
+the guide stopped getting newer, six hours at a time, in a warning line
+addressed to the EPG refresher. Three days.
+
+Two things came out of that and both have to stay. The layout above, so a
+build tree cannot disarm the service. And `Daemon.CheckBinaries` — a
+preflight at startup that stats every program the daemon spawns, logs an
+ERROR per missing one, and carries them on `/api/status` as `problems[]`,
+because a box that cannot tune is not a box with a stale guide and nothing
+else on that response can tell them apart.
+
+`make status` / `logs` / `restart` are still the day-to-day handles.
+`restart` rebuilds the Go binaries **and installs them** before restarting —
+it has to, or the service comes back on the previous binary and the change
+you just made appears not to work.
+
+The unit must also keep `TimeoutStopSec` well above the shutdown path's own
 budget (`StopAllAndWait` 5s + HTTP 5s), or SIGTERM cuts off recording
 finalization and a row stays stuck in state 'recording'.
 
 A user unit is correct here rather than a system one: the DVB device and
 the B-CAS reader are reached through the invoking user's permissions
-(pcscd's polkit rule is per-user). `scripts/isdbd.service` remains for a
-real deployment with binaries in `/usr/local/bin` and config in `/etc`.
+(pcscd's polkit rule is per-user). `scripts/install.sh --system` installs
+the same shape under `/usr/local/lib/ferrite`, `/etc/ferrite` and
+`/var/lib/ferrite` with `scripts/isdbd.service`, for a box where the daemon
+is not run by whoever is sitting at it.
+
+**A release is a tag.** `.github/workflows/release.yml` builds amd64 and
+arm64 on `v*`, assembles a tarball of the five programs + the installer +
+both units + `isdbd.example.toml`, and publishes it. Two rules it enforces
+rather than documents: only the *example* config ships (it shipped
+`configs/isdbd.toml`, this box's own, into a public tarball), and the build
+fails if that example still names a build tree or a home directory — which
+it did, `/home/duckfeather/code/isdb-workspace/target/release/dvb-rs`, in a
+repo retired months earlier, so every install from a release reproduced the
+outage above on the first start. This box installs the tarball like anyone
+else would; running the artifact is the only thing that checks it.
 
 ## External dependencies
 

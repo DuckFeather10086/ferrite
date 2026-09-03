@@ -1,5 +1,28 @@
+# The example config, and the one scripts/install.sh writes on a fresh box.
+#
+# Every path here is absolute and points at the install prefix, never at a
+# build tree. That is not a style preference: this file used to name
+# `/home/duckfeather/code/isdb-workspace/target/release/dvb-rs` — one
+# person's home directory, in a repo that has since been retired — so anyone
+# who installed a release got a daemon that could not tune, and the same
+# mistake on the author's own box took the television down for three days
+# when `cargo clean` removed target/. If you build from a checkout instead
+# of installing, point these at your checkout; do not point a service at
+# one.
+#
+# The user install (scripts/install.sh, the default) uses:
+#   ~/.local/lib/ferrite/   the programs
+#   ~/.config/ferrite/      this file and channels.json
+#   ~/.local/share/ferrite/ the database and the recordings
+# and --system uses /usr/local/lib/ferrite, /etc/ferrite and /var/lib/ferrite.
+#
+# The paths below are written in the --system form, because TOML has no ~ and
+# no $HOME to write the other one with. install.sh rewrites exactly these four
+# to the user prefix when it installs this file for a user — and only when it
+# is writing a fresh one; a config you already have is never touched.
+
 http_port = 8010
-storage_root = "/var/lib/isdbd"
+storage_root = "/var/lib/ferrite"
 
 # The adapters this daemon owns. One terrestrial frontend:
 adapters = [0]
@@ -40,13 +63,24 @@ adapters = [0]
 # only once that exists, or a BS channel dispatches to a tuner that will
 # refuse it.
 
-# dvbr is built into the parent virtual workspace's target/, not dvbr/target/.
-dvbr_bin     = "/home/duckfeather/code/isdb-workspace/target/release/dvb-rs"
-b25_bin      = "/home/duckfeather/code/isdb-workspace/libaribb25-rs/target/release/b25-rs"
-ffmpeg_bin   = "ffmpeg"
-ffprobe_bin  = "ffprobe"
+# The three programs the daemon spawns, installed beside it. They are
+# checked at startup and anything missing is reported as an ERROR in the log
+# and on /api/status — a box that cannot spawn dvb-rs is not a box with a
+# stale guide, and it should not take three days to tell the difference.
+#
+# b25_bin empty disables descrambling (free-to-air only, or no B-CAS card);
+# arib_caption_bin empty disables subtitles. Both are configurations, not
+# faults, and the preflight stays quiet about them.
+dvbr_bin         = "/usr/local/lib/ferrite/dvb-rs"
+b25_bin          = "/usr/local/lib/ferrite/b25-rs"
+arib_caption_bin = "/usr/local/lib/ferrite/arib-caption"
+ffmpeg_bin       = "ffmpeg"
+ffprobe_bin      = "ffprobe"
 
-channels_file = "channels.json"
+# Written by the scanner (`POST /api/scan`, and the sweep at first start),
+# so it lives with the config rather than with the programs: it is this
+# box's own and an upgrade must never replace it.
+channels_file = "/etc/ferrite/channels.json"
 
 # Where live HLS writes its segments and playlists. Unset keeps them under
 # storage_root/hls.

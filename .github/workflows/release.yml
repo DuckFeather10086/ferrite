@@ -61,12 +61,20 @@ jobs:
       - name: Build b25-rs (inner workspace)
         run: cargo build --release --manifest-path libaribb25-rs/Cargo.toml
 
-      - name: Build ferrite (Go daemon)
+      # Named isdbd, which is what the unit's ExecStart, scripts/install.sh
+      # and the Makefile all call it. This step used to write `ferrite`
+      # while shipping a unit that ran `isdbd`, so the tarball could not
+      # start what it contained.
+      - name: Build isdbd (Go daemon) and ferrite-tui
         run: |
           go build \
             -ldflags "-s -w -X main.version=${{ github.ref_name }}" \
-            -o ferrite \
+            -o isdbd \
             ./cmd/isdbd
+          go build \
+            -ldflags "-s -w" \
+            -o ferrite-tui \
+            ./cmd/ferrite-tui
 
       - name: Assemble release directory
         run: |
@@ -77,18 +85,42 @@ jobs:
           cp target/release/dvb-rs                 "$RELEASE_DIR/dvb-rs"
           cp target/release/arib-caption            "$RELEASE_DIR/arib-caption"
           cp libaribb25-rs/target/release/b25-rs    "$RELEASE_DIR/b25-rs"
-          cp ferrite                                "$RELEASE_DIR/ferrite"
-          cp -r configs                             "$RELEASE_DIR/"
-          cp scripts/isdbd.service                  "$RELEASE_DIR/"
+          cp isdbd                                  "$RELEASE_DIR/isdbd"
+          cp ferrite-tui                            "$RELEASE_DIR/ferrite-tui"
+
+          # The installer, and both unit files it can install.
+          mkdir -p "$RELEASE_DIR/scripts"
+          cp scripts/install.sh                     "$RELEASE_DIR/scripts/"
+          cp scripts/ferrite.service                "$RELEASE_DIR/scripts/"
+          cp scripts/isdbd.service                  "$RELEASE_DIR/scripts/"
+
+          # ONLY the example. `cp -r configs` shipped configs/isdbd.toml —
+          # the author's own box: its adapter, its VAAPI render node, its
+          # storage paths — into a public tarball, where it would either
+          # confuse whoever unpacked it or, worse, be the file they started
+          # from.
+          mkdir -p "$RELEASE_DIR/configs"
+          cp configs/isdbd.example.toml             "$RELEASE_DIR/configs/"
           cp README.md                              "$RELEASE_DIR/"
 
           chmod +x "$RELEASE_DIR/dvb-rs" "$RELEASE_DIR/arib-caption" \
-                   "$RELEASE_DIR/b25-rs" "$RELEASE_DIR/ferrite"
+                   "$RELEASE_DIR/b25-rs" "$RELEASE_DIR/isdbd" \
+                   "$RELEASE_DIR/ferrite-tui" "$RELEASE_DIR/scripts/install.sh"
 
-          echo "ferrite ${TAG} — linux/${{ matrix.arch }}" > "$RELEASE_DIR/VERSION"
-          "$RELEASE_DIR/dvb-rs" --version 2>&1 | head -1 >> "$RELEASE_DIR/VERSION" || true
-          "$RELEASE_DIR/b25-rs" 2>&1 | head -1 >> "$RELEASE_DIR/VERSION" || true
-          echo "ferrite ${TAG}" >> "$RELEASE_DIR/VERSION"
+          # Refuse to ship a tarball that names a config nobody can use:
+          # the example pointing back into a build tree is exactly how a
+          # release goes out broken, and it went out that way once.
+          if grep -qE '(target/release|/home/)' "$RELEASE_DIR/configs/isdbd.example.toml"; then
+            echo "ERROR: the example config still names a build tree or a home directory" >&2
+            grep -nE '(target/release|/home/)' "$RELEASE_DIR/configs/isdbd.example.toml" >&2
+            exit 1
+          fi
+
+          {
+            echo "ferrite ${TAG} — linux/${{ matrix.arch }}"
+            "$RELEASE_DIR/isdbd" --version 2>&1 | head -1
+            "$RELEASE_DIR/dvb-rs" --version 2>&1 | head -1
+          } > "$RELEASE_DIR/VERSION"
           cat "$RELEASE_DIR/VERSION"
 
       - name: Package
@@ -131,7 +163,10 @@ jobs:
             **ISDB-T self-hosted TV stack** — tuner (dvb-rs) + descrambler (b25-rs) + orchestrator + web UI (ferrite).
 
             ### per-arch tarballs
-            Each contains `ferrite`, `dvb-rs`, `b25-rs`, example configs, and a systemd unit.
+            Each contains `isdbd` (the daemon), `ferrite-tui` (the remote
+            control), the three programs the daemon spawns — `dvb-rs`,
+            `b25-rs`, `arib-caption` — an example config, both systemd units
+            and `scripts/install.sh`.
 
             | File | Arch |
             |------|------|
@@ -142,10 +177,24 @@ jobs:
             ```bash
             curl -L "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ferrite-${{ github.ref_name }}-linux-amd64.tar.gz" | tar xz
             cd ferrite-${{ github.ref_name }}-linux-amd64
-            sudo cp ferrite dvb-rs b25-rs /usr/local/bin/
-            sudo mkdir -p /etc/ferrite && sudo cp configs/* /etc/ferrite/
-            sudo cp isdbd.service /etc/systemd/system/
+            ./scripts/install.sh          # a systemd *user* service; --system for the other shape
             ```
+
+            Installs into `~/.local/lib/ferrite` (the programs),
+            `~/.config/ferrite` (your `isdbd.toml` and `channels.json`) and
+            `~/.local/share/ferrite` (database and recordings). Your config
+            and your recordings are never overwritten by an upgrade — run
+            the same command again to upgrade.
+
+            A user unit is deliberate: the DVB adapter and the B-CAS reader
+            are reached through the invoking user's permissions, and pcscd's
+            polkit rule is per-user.
+
+            Edit `~/.config/ferrite/isdbd.toml` before the first start — at
+            minimum the adapter and, if your box has a hardware encoder, the
+            `[transcode]` and `[live]` argument lists. The daemon checks
+            every program it spawns at startup and reports what it cannot
+            find both in the log and on `/api/status`.
 
             ### requirements
             - Linux DVB adapter at `/dev/dvb/adapter*/`

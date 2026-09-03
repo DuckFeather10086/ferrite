@@ -112,6 +112,12 @@ type Deps struct {
 	// re-read from afterwards. Empty means a scan's results only reach
 	// the daemon on the next restart.
 	ChannelsFile string
+	// Preflight is what the daemon found at startup when it looked for the
+	// programs it spawns. Carried onto /api/status so a client can say "this
+	// box cannot tune" instead of showing a guide that quietly stops
+	// updating; the zero value reports nothing, which is what a healthy box
+	// and a test both want.
+	Preflight config.Preflight
 }
 
 // NewRouter returns an http.Handler with all endpoints wired.
@@ -301,6 +307,14 @@ func (d Deps) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if d.Recorder != nil {
 		// Ad-hoc recordings only; scheduled ones are in /api/recordings.
 		resp["recording"] = d.Recorder.Active()
+	}
+	// What the daemon could not find at startup. Reported here, and omitted
+	// when there is nothing to report, so a client can put a banner up
+	// without polling a second endpoint: a box whose dvb-rs has gone missing
+	// looks completely normal from every other field on this response, which
+	// is how it once stayed broken for three days.
+	if len(d.Preflight.Problems) > 0 {
+		resp["problems"] = d.Preflight.Problems
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

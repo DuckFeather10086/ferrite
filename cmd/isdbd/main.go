@@ -49,8 +49,19 @@ func main() {
 	var (
 		cfgPath  = flag.String("config", "configs/isdbd.toml", "path to daemon config")
 		logLevel = flag.String("log-level", "info", "debug|info|warn|error")
+		// What is actually installed, without starting anything. An
+		// installed daemon is a file somewhere on the disk that nothing
+		// else identifies: the checkout it was built from may have moved
+		// on, or be gone. `git describe` is baked in at build time and
+		// this is how you read it back.
+		showVersion = flag.Bool("version", false, "print the version and exit")
 	)
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("isdbd", version)
+		return
+	}
 
 	if err := run(*cfgPath, *logLevel); err != nil {
 		slog.Error("isdbd failed", "err", err)
@@ -65,6 +76,26 @@ func run(cfgPath, logLevel string) error {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return err
+	}
+
+	// Look for the programs this daemon spawns before anything asks for
+	// one. Not fatal even when dvb-rs itself is missing: a daemon that
+	// refuses to start cannot serve the page that says why, and under
+	// `Restart=on-failure` it would sit in a crash loop where the reason
+	// scrolls past. So it is said once, loudly, here — and carried on
+	// /api/status, which is the part a client can act on.
+	preflight := cfg.CheckBinaries()
+	for _, p := range preflight.Problems {
+		slog.Error("preflight: cannot spawn a program this daemon needs",
+			"setting", p.Setting, "path", p.Path, "err", p.Err, "breaks", p.Breaks)
+	}
+	switch {
+	case preflight.Fatal():
+		slog.Error("preflight: this box cannot tune — fix the paths above and restart")
+	case !preflight.OK():
+		slog.Warn("preflight: starting with reduced function", "problems", len(preflight.Problems))
+	default:
+		slog.Info("preflight: every external program is where the config says")
 	}
 
 	// The adapter inventory in one shape (either `adapters` or
@@ -239,6 +270,7 @@ func run(cfgPath, logLevel string) error {
 		HTTPPort:  cfg.HTTPPort,
 		StartedAt: time.Now(),
 		Version:   version,
+		Preflight: preflight,
 		Web:       web.FS(),
 	})
 

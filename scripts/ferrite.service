@@ -1,7 +1,8 @@
 [Unit]
-# systemd *user* unit — install with `make install-service`, which
-# substitutes @DIR@ for the checkout path. The system-wide variant for a
-# real deployment is scripts/isdbd.service.
+# systemd *user* unit — installed verbatim by scripts/install.sh (`make
+# install`). No substitution: %h is systemd's own expansion for the user's
+# home directory, so the same file works for any user on any box. The
+# system-wide variant for a real deployment is scripts/isdbd.service.
 #
 # A user unit is the right shape here: the tuner and the B-CAS reader are
 # reached through the invoking user's permissions (pcscd's polkit rule is
@@ -9,15 +10,23 @@
 # gain. `loginctl enable-linger <user>` makes it start at boot rather than
 # at login.
 Description=ferrite ISDB-T TV daemon
-Documentation=file://@DIR@/README.md
+Documentation=https://github.com/DuckFeather10086/ferrite
 After=network-online.target
 
 [Service]
 Type=simple
-# Required: isdbd.toml addresses dvb-rs, b25-rs, channels.json and
-# storage_root relatively, so the daemon has to start from the checkout.
-WorkingDirectory=@DIR@
-ExecStart=@DIR@/isdbd -config configs/isdbd.toml
+# Nothing here points into a build tree, and that is the point. The daemon,
+# the three programs it spawns and its config all live under the install
+# prefix; the checkout can be cleaned, moved or deleted without the
+# television noticing. It used to run as `@DIR@/isdbd` out of the checkout
+# with `./target/release/dvb-rs` in its config, which made `cargo clean` the
+# command that stops the box tuning — and it did, for three days.
+#
+# WorkingDirectory is the data root purely as a backstop: every path the
+# daemon uses is absolute in the config, so nothing depends on this — but a
+# relative one that slipped in would land on the data, not on /.
+WorkingDirectory=%h/.local/share/ferrite
+ExecStart=%h/.local/lib/ferrite/isdbd -config %h/.config/ferrite/isdbd.toml
 Restart=on-failure
 RestartSec=5
 # Shutdown finalizes in-flight recordings before the store closes
