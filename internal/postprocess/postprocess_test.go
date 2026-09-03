@@ -103,6 +103,46 @@ func TestProducesTheMp4AndBothSidecars(t *testing.T) {
 	}
 }
 
+// With DeleteSource the .ts goes once the MP4 is there — and only then, and
+// only if it is: the sidecars are decoded from the .ts, so a run that deletes
+// it before writing them has thrown away the captions.
+func TestDeleteSourceRemovesTheTsAndNothingElse(t *testing.T) {
+	st, r, dir := setup(t)
+	r.DeleteSource = true
+	id, src := finished(t, st, dir, "x.ts")
+
+	r.runOne(context.Background(), id)
+
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Errorf("the .ts survived the post-pass: %v", err)
+	}
+	for _, ext := range []string{".mp4", ".ass", ".vtt"} {
+		if _, err := os.Stat(strings.TrimSuffix(src, ".ts") + ext); err != nil {
+			t.Errorf("no %s beside the recording: %v", ext, err)
+		}
+	}
+	rec, _ := st.GetRecording(context.Background(), id)
+	if rec.PostState != store.PostStateDone {
+		t.Fatalf("state %q err %q", rec.PostState, rec.PostError)
+	}
+}
+
+// A transcode that failed keeps the source: it is the only file of the set
+// that cannot be made again, and the run that would replace it produced
+// nothing.
+func TestDeleteSourceKeepsTheTsWhenTheTranscodeFails(t *testing.T) {
+	st, r, dir := setup(t)
+	r.DeleteSource = true
+	r.FFmpegBin = script(t, t.TempDir(), "ffmpeg", "exit 1\n")
+	id, src := finished(t, st, dir, "x.ts")
+
+	r.runOne(context.Background(), id)
+
+	if _, err := os.Stat(src); err != nil {
+		t.Fatalf("the .ts went with a failed transcode: %v", err)
+	}
+}
+
 // The caption PID must never reach the muxer: ffmpeg has no ARIB decoder and
 // refuses the whole output rather than skipping the stream.
 func TestTheTranscodeDropsEverythingButOneVideoAndOneAudio(t *testing.T) {

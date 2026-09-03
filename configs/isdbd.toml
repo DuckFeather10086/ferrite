@@ -153,3 +153,12 @@ input_args  = ["-hwaccel", "vaapi",
 output_args = ["-vf", "deinterlace_vaapi,scale_vaapi=w=trunc(iw*sar/2)*2:h=ih,setsar=1",
                "-c:v", "h264_vaapi", "-b:v", "6M",
                "-c:a", "aac", "-b:a", "192k"]
+
+# Throw the .ts away once the MP4 is written. The .ts is what came off the air
+# and the only file here that cannot be made again — but it is also ~3x the
+# size of the MP4 (888 MB against 288 MB for a 7-minute NHK recording), and a
+# box that keeps both fills its disk three times as fast for a copy nothing
+# opens: the browser plays the MP4, a live tier encodes from whichever of the
+# two is present (internal/hls.vodSource), and the .ass/.vtt sidecars are
+# already written by the time this runs.
+delete_source = true

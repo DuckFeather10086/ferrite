@@ -185,9 +185,11 @@ export default function RecordingsPage() {
                                 Convert
                               </button>
                             ) : null}
-                            {/* The recording as it came off the air. Not
-                                playable here, but it is what mpv, VLC and an
-                                archive want (the endpoint honours Range). */}
+                            {/* The recording's own file — the .ts as it came
+                                off the air, or the MP4 that replaced it where
+                                the box deletes the source after transcoding.
+                                Either way it is what mpv, VLC and an archive
+                                want (the endpoint honours Range). */}
                             <a href={recordingFileUrl(r.id)} download className="btn">
                               Download
                             </a>

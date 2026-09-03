@@ -151,6 +151,36 @@ func TestRecordingFile_InProgressIsServedUncached(t *testing.T) {
 	}
 }
 
+// With transcode.delete_source on, a finished recording has no .ts — the
+// post-pass's MP4 is all that is left of it. The download endpoint is what the
+// UI's Download button and the TUI's mpv open, so it serves that rather than
+// reporting a programme the browser can play as no longer on disk.
+func TestRecordingFile_FallsBackToTheMP4(t *testing.T) {
+	f := newFileRouter(t)
+	id := f.addRecording(t, "mx_2130.ts", "transport stream", store.RecordingStateDone)
+	ts := filepath.Join(f.root, "recordings", "2026-07-30", "mx_2130.ts")
+	if err := os.WriteFile(strings.TrimSuffix(ts, ".ts")+".mp4", []byte("an-mp4"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(ts); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := get(t, f.h, idPath("/api/recordings/", id, "/file"))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("%d %s", rr.Code, rr.Body.String())
+	}
+	if rr.Body.String() != "an-mp4" {
+		t.Fatalf("body = %q", rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "video/mp4" {
+		t.Fatalf("content-type = %q, want video/mp4", ct)
+	}
+	if cd := rr.Header().Get("Content-Disposition"); !strings.Contains(cd, "mx_2130.mp4") {
+		t.Fatalf("content-disposition = %q, want the .mp4's name", cd)
+	}
+}
+
 func TestRecordingFile_MissingFileIsGone(t *testing.T) {
 	f := newFileRouter(t)
 	id := f.addRow(t, filepath.Join(f.root, "recordings", "2026-07-30", "vanished.ts"),

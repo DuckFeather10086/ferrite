@@ -17,7 +17,8 @@ import (
 	"github.com/DuckFeather10086/ferrite/internal/store"
 )
 
-// handleRecordingFile serves a recording's raw MPEG-TS.
+// handleRecordingFile serves a recording's own file: the raw MPEG-TS, or the
+// post-pass's MP4 once `transcode.delete_source` has taken the .ts away.
 //
 // http.ServeContent does the work, which is what makes this usable: it
 // answers Range requests, so mpv and VLC can seek instead of streaming
@@ -38,7 +39,7 @@ func (d Deps) handleRecordingFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, err := os.Open(path)
+	f, served, contentType, err := openRecording(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			// The row outlived its file. 410 rather than 404: the recording
@@ -59,13 +60,42 @@ func (d Deps) handleRecordingFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "video/mp2t")
-	w.Header().Set("Content-Disposition", contentDisposition(filepath.Base(path)))
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", contentDisposition(filepath.Base(served)))
 	if rec.State == store.RecordingStateRecording {
 		// Still growing: a cached copy would be a truncated recording.
 		w.Header().Set("Cache-Control", "no-store")
 	}
-	http.ServeContent(w, r, filepath.Base(path), fi.ModTime(), f)
+	http.ServeContent(w, r, filepath.Base(served), fi.ModTime(), f)
+}
+
+// openRecording opens whichever of a recording's two whole-programme files the
+// box still has, and says what it is.
+//
+// The .ts is preferred — it is the recording, and while it exists it is what
+// this endpoint has always served. But `transcode.delete_source` deletes it as
+// soon as the post-pass has an MP4 that stands in for it, and this endpoint is
+// what the web UI's Download button and the TUI's mpv both open: from a
+// viewer's side "the recording" is whatever file is still there, so answering
+// 410 for a programme the box can play in a browser would be a lie. Same rule,
+// and the same order, as [hls.vodSource] picks a source by.
+//
+// A miss on the .ts with no MP4 beside it reports the .ts's own error, so the
+// caller's 410 still names the file the row points at.
+func openRecording(path string) (f *os.File, served, contentType string, err error) {
+	f, err = os.Open(path)
+	if err == nil {
+		return f, path, "video/mp2t", nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return nil, "", "", err
+	}
+	mp4 := strings.TrimSuffix(path, filepath.Ext(path)) + ".mp4"
+	g, mp4Err := os.Open(mp4)
+	if mp4Err != nil {
+		return nil, "", "", err
+	}
+	return g, mp4, "video/mp4", nil
 }
 
 // derivedExts are the files internal/postprocess writes beside a recording.
