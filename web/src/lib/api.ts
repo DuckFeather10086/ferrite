@@ -89,6 +89,18 @@ export type Address = {
   iface?: string;
 };
 
+// One program the daemon could not spawn, found at startup rather than by
+// whatever needed it first. `fatal` means nothing works at all without it —
+// dvb-rs or ffmpeg — as against a missing descrambler or caption decoder,
+// which cost a feature.
+export type Problem = {
+  setting: string;
+  path: string;
+  error: string;
+  breaks: string;
+  fatal: boolean;
+};
+
 export type StatusResp = {
   // The live quality tiers this daemon offers, first one the default.
   // Absent on a daemon that predates them, which the player reads as
@@ -103,6 +115,11 @@ export type StatusResp = {
   adapters?: AdapterStatus[];
   // Row ids of recordings in progress.
   recording?: number[];
+  // Programs the daemon cannot spawn. Absent on a healthy box, and absent
+  // on a daemon older than the preflight — both of which read as "nothing
+  // to say", which is the right default for a field whose whole purpose is
+  // to be empty.
+  problems?: Problem[];
 };
 
 // ── hooks ────────────────────────────────────────────────────────
