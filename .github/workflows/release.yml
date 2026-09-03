@@ -110,9 +110,16 @@ jobs:
           # Refuse to ship a tarball that names a config nobody can use:
           # the example pointing back into a build tree is exactly how a
           # release goes out broken, and it went out that way once.
-          if grep -qE '(target/release|/home/)' "$RELEASE_DIR/configs/isdbd.example.toml"; then
+          #
+          # Settings only — comments are stripped first. The file *documents*
+          # the path this guard exists to catch, so checking the whole file
+          # fails on the explanation of the bug rather than on the bug, which
+          # is what it did the first time it ran.
+          if sed 's/#.*//' "$RELEASE_DIR/configs/isdbd.example.toml" \
+               | grep -qE '(target/release|/home/)'; then
             echo "ERROR: the example config still names a build tree or a home directory" >&2
-            grep -nE '(target/release|/home/)' "$RELEASE_DIR/configs/isdbd.example.toml" >&2
+            sed 's/#.*//' "$RELEASE_DIR/configs/isdbd.example.toml" \
+              | grep -nE '(target/release|/home/)' >&2
             exit 1
           fi
 

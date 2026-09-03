@@ -1,27 +1,42 @@
-# Default dev config for running isdbd from the workspace.
-# For production, copy to /etc/isdbd/isdbd.toml and adjust paths.
+# This box's config — the tracked reference copy.
+#
+# The live one is ~/.config/ferrite/isdbd.toml, which is what the service
+# reads; scripts/install.sh writes it from isdbd.example.toml on a fresh box
+# and never touches it again. This file is here so the machine can be rebuilt
+# from the checkout: it is the N100's own settings (one Siano stick, VAAPI on
+# the iGPU, this aerial's muxes). Keep the two in step by hand — nothing
+# copies between them.
+#
+# Every path is absolute and points at the install prefix. They used to be
+# relative to the checkout, which is what let `cargo clean` stop the box
+# tuning for three days; see CLAUDE.md, "Running it on this box".
 
 http_port = 8010
-storage_root = "./var"
+storage_root = "/home/duckfeather/.local/share/ferrite"
 # One Siano USB stick, terrestrial only. The `[[adapter]]` form names each
 # frontend's delivery systems and is what a mixed card wants — see
 # isdbd.example.toml; this list is read as ["ISDBT"].
 adapters = [0]
 
-# Sibling repos under ~/code/isdb-workspace/. Adjust if you cloned
-# elsewhere.
+# Installed beside the daemon by scripts/install.sh, and checked at startup —
+# anything missing here is an ERROR in the log and an entry in
+# /api/status.problems, rather than a warning six hours later addressed to
+# whichever subsystem happened to need it first.
+#
 # The binary is named after its crate, which dvb-rs renamed `dvbr` → `dvb-rs`
 # when the repo was renamed. The config *key* keeps its old name so an
 # existing isdbd.toml still parses.
-dvbr_bin    = "./target/release/dvb-rs"
-b25_bin     = "./libaribb25-rs/target/release/b25-rs"
+dvbr_bin    = "/home/duckfeather/.local/lib/ferrite/dvb-rs"
+b25_bin     = "/home/duckfeather/.local/lib/ferrite/b25-rs"
 ffmpeg_bin  = "ffmpeg"
 ffprobe_bin = "ffprobe"
 # ARIB caption decoder: live HLS gets a WebVTT subtitle rendition when this
 # and ffprobe_bin are both set. Empty disables captions.
-arib_caption_bin = "./target/release/arib-caption"
+arib_caption_bin = "/home/duckfeather/.local/lib/ferrite/arib-caption"
 
-channels_file = "channels.json"
+# Curated by hand and written by the scanner, so it lives with the config and
+# not with the programs: an upgrade must never replace it.
+channels_file = "/home/duckfeather/.config/ferrite/channels.json"
 
 # Live segments on the tmpfs the unit creates (RuntimeDirectory=ferrite in
 # scripts/ferrite.service, which also exports this variable). Keeps ~65 GB a
