@@ -314,19 +314,45 @@ export function displayName(c: Channel): string {
 
 // ── actions ──────────────────────────────────────────────────────
 
-async function post<T>(path: string, body?: unknown): Promise<T | null> {
+async function post<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T | null> {
   const r = await fetch(BASE + path, {
     method: "POST",
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal,
   });
   if (!r.ok) {
     const e = await r.json().catch(() => ({ error: r.statusText }));
+    if (e.superseded) throw new SupersededError(e.error ?? r.statusText);
     throw new Error(e.error ?? r.statusText);
   }
   // 204 on the stop endpoints.
   if (r.status === 204) return null;
   return r.json() as Promise<T>;
+}
+
+// A request the daemon dropped because a later one for the same resource
+// overtook it — pressing the next channel while the last one is still tuning.
+//
+// Its own type because it is not a failure to report: the channel the viewer
+// ended on is the one that is playing, and putting "superseded" on screen
+// would be an error message about something working. Callers ignore it.
+export class SupersededError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SupersededError";
+  }
+}
+
+// True for both ways a channel change can be overtaken: the daemon answering
+// `superseded`, and this browser aborting the request when the viewer pressed
+// the next channel.
+export function isSuperseded(e: unknown) {
+  return (
+    e instanceof SupersededError ||
+    (e instanceof DOMException && e.name === "AbortError") ||
+    (e instanceof Error && e.name === "AbortError")
+  );
 }
 
 // ── channel scan ─────────────────────────────────────────────────
@@ -425,9 +451,11 @@ export async function cancelSchedule(id: number) {
 // have equal priority and will not evict each other, so with a single
 // adapter the wrong order deadlocks on ErrNoAdapter. The endpoint exists
 // to own that order — see api.handleLiveSwitch.
-export async function switchLive(channel: string, quality?: string) {
+export async function switchLive(channel: string, quality?: string, signal?: AbortSignal) {
   const out = await post<{ channel: string; quality: string; playlist: string; closed: string[] }>(
     "/api/live/" + encodeURIComponent(channel) + "/switch" + qualityQuery(quality),
+    undefined,
+    signal,
   );
   await mutate("/api/status");
   return out!;

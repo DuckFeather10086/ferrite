@@ -164,6 +164,10 @@ Implemented and tested (race-clean):
   store closes, or the row stays stuck in state 'recording'. Its `Base`
   context must not be the daemon's signal context — cancellation would
   beat the graceful stop and mark shutdown recordings 'failed'.
+- `tuner.PresenceWatcher` — stats each configured adapter's device node every
+  2s and keeps `Pool` presence in step, so a stick pulled out stops being
+  offered and one pushed back in starts being offered again, without a restart.
+  Reported as `present` on `/api/status` and, when absent, in `problems[]`.
 - `scheduler.Scheduler` — tick → DueSchedules → reserve row →
   dispatch → finalize state.
 - `hls.Manager` + `Session` — refcounted ffmpeg-per-channel, idle
@@ -295,6 +299,29 @@ ASS overlay scaled to it; the player's own button takes the video alone and the
 assjs 0.1.9 — its `seeking` handler re-frames at the new position, so seeking
 while paused keeps the caption (checked at three positions).
 
+**Hardware-verified (2026-09-04, channel-change latency):** the whole budget
+measured on this box, one Siano stick, 720p VAAPI, A/V offset already cached.
+It **was** 6.0s to the first segment: teardown of the old session 0.04s, then
+`DTV_TUNE` → first TS byte **1.73s**, PAT + PMT + 17 PID taps 0.21s, b25-rs
+0.17s, ffmpeg `find_stream_info` **1.50s**, ffmpeg's first 2s segment 2.40s.
+Two of those were avoidable and both now are. It is **4.7s** cross-mux (the
+probe window) and **2.9s** same-mux (that, plus skipping a re-acquisition the
+frontend did not need), against 6.0s for both before; at the dvb-rs boundary
+alone a same-mux change went 1.9s → 0.15s, cross-mux staying at 1.88–2.02s
+because that is the hardware. Decomposed with strace and a bare demux tap
+(`FE_GET_PROPERTY` readback, `DMX_SET_PES_FILTER`, time to the first byte on
+dvr0), which is also what turned up the two things nothing in the daemon could
+have told us: that `wait_lock` never waits on this driver, and that a
+same-frequency re-tune costs the same 1.8s as a real one. What is *not*
+included is the first tune of a channel with no cached A/V offset, still
++5.15s of ffprobe; the measurement itself was left alone. Rapid switching
+checked at the same time: four presses 0.8s apart, one 200 at 4.51s and three
+409s answering at 0.80s each, where before it was one 200 and three 504s at
+45s. Picture and both caption renditions re-checked after the probe change —
+h264 1280x720 + aac 48000 stereo, `subs.m3u8` announced in the master, the
+`.vtt` carrying `line:94%` and its `X-TIMESTAMP-MAP`, and `sub{N}.json`
+carrying the ARIB regions with per-character geometry.
+
 **Hardware-verified (2026-08-05, the recording post-pass):** a 7m04s NHK 総合
 recording (888 MB) → 288 MB MP4 (H.264 1920x1080 SAR 1:1 + AAC), 1m50s wall on
 the N100's iGPU, ~3.9× realtime end to end. `.ass` 46 KB and `.vtt` 8 KB
@@ -326,6 +353,37 @@ mid-recording finalizing as 'done'.
   `adapter N` names `/dev/dvb/adapter{N}` on the DVB backend and
   `/dev/px4video{N}` on the px4 one, so the lock contract is identical
   and needs no per-backend path.
+- **Re-acquiring the frontend is the expensive part of a channel change, and
+  a channel change within one mux does not need it.** Measured on this box's
+  Siano stick: 1.81s from `DTV_TUNE` to the first TS packet, against **0.095s**
+  for tapping a PID on a demodulator that is already locked — and the 1.81s is
+  paid even when the tune names the frequency the frontend is *already* on,
+  because `DTV_CLEAR` + `DTV_TUNE` re-acquires unconditionally. A demodulator
+  keeps its lock after the process that set it exits (`FE_GET_PROPERTY` reads
+  the frequency back across processes), so this is available to a fresh
+  `dvb-rs` and not only to a long-lived one. `tuner::already_tuned` asks the
+  question and `Cmd::Tune` skips the re-tune when the answer is yes: TBS1 →
+  TBS2 and NHK総合 → NHK総合2 now cost 0.15s at the dvb-rs boundary instead of
+  1.9s, and a cross-mux change is unchanged because there the 1.7s is the
+  hardware acquiring a signal.
+- **That shortcut is a hint the SI has to confirm, never a decision.**
+  `FE_READ_STATUS` cannot be trusted to say the frontend is settled — see the
+  invariant below — and a frontend left mid-acquisition by a killed process
+  reads exactly like a locked one. So the fast path is taken on a **short** SI
+  budget (`FAST_PATH_SI_TIMEOUT`, 1.2s) and anything short of a PAT naming this
+  service falls through to a real tune. The wrong guess costs 1.2s on top of
+  the normal tune; it is only ever reached when the frequency already matched,
+  which is the case where it is right.
+- **`wait_lock` is a no-op on smsusb, and `--lock-timeout-ms` therefore bounds
+  nothing there.** strace of a real tune shows exactly **one** `FE_READ_STATUS`,
+  45µs after `DTV_TUNE`, returning `0x1f` with `FE_HAS_LOCK` set — the driver
+  never clears the previous tune's flag. The 1.7s wait is really absorbed by
+  the PAT section read that follows, whose budget is `SI_PID_READ_TIMEOUT` (5s).
+  Two things follow. Nothing may infer "the frontend is settled" from
+  `FE_HAS_LOCK` alone. And every genuinely dead aerial arrives at the SI read
+  rather than at `Error::LockTimeout`, so `no_si_after_tune` spells out what a
+  bare "PAT not found" does not: no signal, wrong frequency, or the coax is
+  out — and that a lock report does not rule it out.
 - **`tuner.Pool` is the *only* in-process arbiter of an adapter.**
   Everything that touches the hardware goes through it — including work
   that drives dvb-rs out-of-process. `epg.Refresher` used to spawn
@@ -573,6 +631,36 @@ mid-recording finalizing as 'done'.
   not. Changing channel then goes through `POST /api/live/{ch}/switch`, not
   a hand-rolled stop-then-open: equal priorities do not evict each other,
   so the wrong order deadlocks on `ErrNoAdapter`.
+- **A channel change that a later one overtakes must answer at once, and say
+  which kind of answer it is.** Pressing the next channel while the last is
+  still tuning is ordinary television, and the daemon used to handle it by
+  leaving every superseded request in `waitForPlaylist` for its full 45s,
+  polling for a file whose ffmpeg the newer switch had already killed, and then
+  reporting a 504. Measured: four presses 0.8s apart produced one working
+  picture and three "stream did not start" errors arriving three quarters of a
+  minute later, which the Live page then drew *over* the channel that was
+  playing. So `hls.Session.Done()` is closed by `tearDown` and the wait watches
+  it; the answer is a 409 carrying `superseded: true`, which is the flag rather
+  than the prose because "tuner busy" is also a 409 and a client has to tell
+  them apart to stay quiet about one of them. Now they answer at the instant
+  they are overtaken (measured 0.80s for presses 0.8s apart).
+- **An open holds the adapter from its `Acquire`, not from its ffmpeg, and
+  `CloseOthers` has to reach into that gap.** A session is registered in
+  `m.sessions` only once ffmpeg is spawned — which on a channel with no cached
+  A/V offset is five seconds of ffprobe after it took the adapter — so for those
+  five seconds a channel change walked `m.sessions`, found nothing to close, and
+  got `ErrNoAdapter` for the channel the viewer had just asked for. The detached
+  open context is therefore *cancellable* (`openCall.cancel`), `CloseOthers`
+  cancels every in-flight open for another channel, and — as in `Pool.evict`,
+  and for the same reason — it waits for each to let go before the caller
+  claims the adapter. `openSession` checks `ctx.Err()` after the acquire and
+  again after the probe, releasing the tune and returning `ErrSuperseded`.
+- **The client has to be able to ignore its own superseded presses.** Two
+  mechanisms, covering different things: the fetch is aborted, so the browser
+  drops a request nobody is waiting for; and every `watch()` carries a sequence
+  number, because an abort races a response already on the wire and only the
+  newest press may write state. Without the second one the daemon's reply to a
+  press the viewer had already moved past lands afterwards and sets `fatal`.
 - **A `GET` on a channel playlist tunes that channel, so a player left polling
   one can take the adapter back.** `GET /api/live/{ch}.m3u8` opens a session,
   and live never evicts live — so between `CloseOthers` and `Acquire` inside a
@@ -950,6 +1038,16 @@ mid-recording finalizing as 'done'.
   ARM board wants its own encoder in that shape: `h264_v4l2m2m` on a Pi 4,
   `h264_rkmpp` on Rockchip — and nothing on a Pi 5, which has no hardware H.264
   encoder at all.
+- **`probesize` and `analyzeduration` bound `find_stream_info` together, so
+  they come down together.** ffmpeg stops probing when *either* is exhausted,
+  which is why 1M/5M still cost 1.5s of every channel change: 5 MB of a
+  17 Mbit/s service tap is 2.4s of stream, and the byte budget was what actually
+  bound. The tap carries one program of a shape this daemon already knows —
+  mpeg2video + AAC, caption and data PIDs dropped with `-sn -dn` — so 200k/1M
+  identifies it with room to spare. Measured: first segment on disk at 4.54s
+  against 6.06s, the segment ffprobing as h264 1280x720 30000/1001 + aac 48000
+  stereo either way. (The history is worth keeping: it was 10M/5M once, which
+  spent up to 10 *seconds* here — ~9.7s of a ~14s channel change.)
 - **Segment length, GOP and playlist window move together.** `hls_time 2`,
   `-g 60` (2s × 30p after yadif), `hls_list_size 6`. The GOP has to divide the
   segment exactly, or ffmpeg cuts at the next keyframe and segment durations
@@ -998,6 +1096,32 @@ mid-recording finalizing as 'done'.
   (PT3 = 2×T + 2×S) dispatching to the wrong half does not fail, it waits out
   the frontend lock timeout and reports a weak signal, which sends you up a
   ladder to look at the aerial.
+- **An adapter can go away, so presence is state the Pool keeps rather than an
+  assumption it makes.** The inventory is still the config's — `[[adapter]]`
+  says which numbers exist and what they can tune — but whether the hardware is
+  attached is checked at runtime by `tuner.PresenceWatcher`, which stats one
+  node per adapter every 2s (`/dev/dvb/adapter{N}/frontend0`, or
+  `/dev/px4video{N}` on px4). An absent adapter keeps its slot and its place on
+  `/api/status` (`present: false`) rather than vanishing from a list the config
+  says should have it, and it is invisible to idle selection, to preemption and
+  to the capability check. Going absent tears its holder down the same way a
+  preemption does — tell it, then wait — because it *would* find out on its own
+  (dvb-rs dies when its reads fail) but not promptly, and until then the slot
+  still reads as tuned and a recording that has already lost the hardware still
+  reads as recording. Polling and not udev: this only has to answer "is adapter
+  N there?" for a handful of known numbers, it reports state rather than
+  transitions so a missed event costs nothing, and the px4 backend does not use
+  `/dev/dvb` at all so a uevent path would have to be written twice.
+- **"Unplugged" is its own error, because its repair is its own.**
+  `ErrNoCapableAdapter` (501) says buy a tuner, `ErrNoAdapter` (409) says wait
+  for the one you have, and `ErrAdapterUnplugged` (**503**) says the one you
+  have is not in the socket. Folding the third into either of the others is how
+  a pulled USB stick reads as "no adapter supports ISDBT" on a box whose config
+  plainly lists an ISDBT adapter. An absent adapter also joins
+  `/api/status.problems[]`, beside the missing binaries and for the same
+  reason: it is the same news to whoever is looking at the page, and the
+  startup preflight cannot speak for it — a tuner is the one dependency on that
+  list that walks away while the daemon is running.
 - **A channel scan goes through the Pool like everything else, one
   reservation per transport.** A sweep owns the frontend for ten minutes or
   more; live playback and recordings have to be able to take it back, and

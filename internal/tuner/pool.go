@@ -28,6 +28,16 @@ var ErrNoAdapter = errors.New("tuner: no adapter available")
 // signal.
 var ErrNoCapableAdapter = errors.New("tuner: no adapter supports this delivery system")
 
+// ErrAdapterUnplugged means an adapter that *is* configured for this channel's
+// delivery system is not currently attached.
+//
+// Its own error because the repair is its own: ErrNoCapableAdapter says buy a
+// tuner, ErrNoAdapter says wait for the one you have, and this says the one
+// you have is not plugged in. Folding it into either of those is how a pulled
+// USB stick reads as "no adapter supports ISDBT" on a box whose config plainly
+// lists an ISDBT adapter.
+var ErrAdapterUnplugged = errors.New("tuner: the adapter is not attached")
+
 // preemptTimeout bounds how long a preemptor waits for the evicted
 // holder to actually let go. A killed `dvbr` child is reaped in well
 // under a second; anything near this bound means a wedged subprocess.
@@ -112,7 +122,7 @@ func NewPool(cli Tuner, channels *config.Channels, adapters []config.Adapter, bu
 		if _, dup := slots[a.N]; dup {
 			continue
 		}
-		slots[a.N] = &adapterSlot{adapter: a.N, systems: a.Systems}
+		slots[a.N] = &adapterSlot{adapter: a.N, systems: a.Systems, present: true}
 		order = append(order, a.N)
 	}
 	sort.Ints(order)
@@ -138,7 +148,13 @@ type adapterSlot struct {
 	// systems is what this frontend can tune, upper-cased. Empty means
 	// unknown, which is read as "anything" — a pool built without
 	// capability information has to keep behaving as it did.
-	systems  []string
+	systems []string
+	// present is whether the device node is there right now. The inventory
+	// is the config's and does not change; what changes is whether the
+	// hardware is plugged in, so an unplugged adapter keeps its slot — and
+	// its place on /api/status — rather than vanishing from a list the
+	// config says should have it.
+	present  bool
 	session  *tuneSession
 	reserved *Reservation
 	claimed  bool
@@ -330,7 +346,7 @@ func (p *Pool) AcquireAt(ctx context.Context, channel string, prio Priority) (*L
 	//    including one still mid-tune.
 	for _, adapter := range p.order {
 		slot := p.adapters[adapter]
-		if slot.session != nil && slot.session.canonical == canonical {
+		if slot.present && slot.session != nil && slot.session.canonical == canonical {
 			sess := slot.session
 			sub := sess.broadcaster.Subscribe(p.bufChunks)
 			sess.refs++
@@ -497,7 +513,7 @@ func (p *Pool) Reserve(ctx context.Context, prio Priority, system string) (*Rese
 // that can receive system. Caller must hold p.mu.
 func (p *Pool) idleSlotLocked(system string) *adapterSlot {
 	for _, adapter := range p.order {
-		if slot := p.adapters[adapter]; slot.free() && !slot.claimed && slot.supports(system) {
+		if slot := p.adapters[adapter]; slot.present && slot.free() && !slot.claimed && slot.supports(system) {
 			return slot
 		}
 	}
@@ -516,7 +532,7 @@ func (p *Pool) victimLocked(prio Priority, system string) *adapterSlot {
 	var best *adapterSlot
 	for _, adapter := range p.order {
 		slot := p.adapters[adapter]
-		if slot.claimed || slot.free() || !slot.supports(system) {
+		if !slot.present || slot.claimed || slot.free() || !slot.supports(system) {
 			continue
 		}
 		if slot.prio() >= prio {
@@ -533,6 +549,19 @@ func (p *Pool) victimLocked(prio Priority, system string) *adapterSlot {
 // busy or not. Caller must hold p.mu.
 func (p *Pool) capableLocked(system string) bool {
 	for _, adapter := range p.order {
+		slot := p.adapters[adapter]
+		if slot.present && slot.supports(system) {
+			return true
+		}
+	}
+	return false
+}
+
+// configuredCapableLocked is capableLocked ignoring presence: whether this box
+// is *meant* to be able to receive system. The gap between the two is exactly
+// "the tuner is unplugged". Caller must hold p.mu.
+func (p *Pool) configuredCapableLocked(system string) bool {
+	for _, adapter := range p.order {
 		if p.adapters[adapter].supports(system) {
 			return true
 		}
@@ -546,14 +575,113 @@ func (p *Pool) capableLocked(system string) bool {
 // than to check the aerial.
 func (p *Pool) noCapableAdapter(what, system string) error {
 	p.mu.Lock()
+	unplugged := p.configuredCapableLocked(system)
 	have := make([]string, 0, len(p.order))
+	absent := make([]string, 0, len(p.order))
 	for _, adapter := range p.order {
 		slot := p.adapters[adapter]
 		have = append(have, fmt.Sprintf("%d:%s", adapter, strings.Join(slot.systems, "+")))
+		if !slot.present {
+			absent = append(absent, strconv.Itoa(adapter))
+		}
 	}
 	p.mu.Unlock()
+
+	if unplugged {
+		return fmt.Errorf("%w: %s needs %s and adapter %s is configured for it but not attached",
+			ErrAdapterUnplugged, what, system, strings.Join(absent, ", "))
+	}
 	return fmt.Errorf("%w: %s needs %s, adapters are [%s]",
 		ErrNoCapableAdapter, what, system, strings.Join(have, " "))
+}
+
+// SetPresent records whether adapter's device node is attached, and reports
+// whether that is a change. Unknown adapter numbers are ignored: the inventory
+// is the config's, and a stick appearing at a number nobody configured is not
+// this pool's to adopt.
+//
+// Going absent tears down whatever was holding the adapter rather than letting
+// it discover the loss on its own. It would discover it — dvb-rs dies when its
+// reads start failing, and the pump goroutine clears the slot — but not
+// promptly and not tidily: until then the slot still reads as tuned to a
+// channel, /api/status still shows a viewer on it, and a recording that has
+// already lost the hardware still reads as recording. Same ordering as evict:
+// tell the holder, then wait for it to actually let go.
+func (p *Pool) SetPresent(adapter int, present bool) bool {
+	return p.setPresent(adapter, present, true)
+}
+
+// setPresent is SetPresent with the arrival/departure log made optional.
+//
+// The first sweep after startup passes announce=false: the pool assumes its
+// configured adapters are there until told otherwise, so a box that boots with
+// nothing plugged in would otherwise report a detachment that never happened.
+// Startup says its own piece — an ERROR naming the path it looked at — and
+// that is the accurate one.
+func (p *Pool) setPresent(adapter int, present, announce bool) bool {
+	p.mu.Lock()
+	slot, ok := p.adapters[adapter]
+	if !ok || slot.present == present {
+		p.mu.Unlock()
+		return false
+	}
+	slot.present = present
+	sess, res := slot.session, slot.reserved
+	p.mu.Unlock()
+
+	if present {
+		if announce {
+			slog.Info("tuner: adapter attached", "adapter", adapter)
+		}
+		return true
+	}
+	if announce {
+		slog.Warn("tuner: adapter detached", "adapter", adapter,
+			"was_holding", holderName(sess, res))
+	}
+
+	var wait chan struct{}
+	switch {
+	case res != nil:
+		res.markPreempted()
+		wait = res.done
+	case sess != nil:
+		sess.markPreempted()
+		sess.cancel()
+		wait = sess.done
+	default:
+		return true
+	}
+
+	timer := time.NewTimer(preemptTimeout)
+	defer timer.Stop()
+	select {
+	case <-wait:
+	case <-timer.C:
+		slog.Warn("tuner: the holder of a detached adapter did not let go",
+			"adapter", adapter, "waited", preemptTimeout)
+	}
+
+	p.mu.Lock()
+	if slot.session == sess {
+		slot.session = nil
+	}
+	if slot.reserved == res {
+		slot.reserved = nil
+	}
+	p.mu.Unlock()
+	return true
+}
+
+func holderName(sess *tuneSession, res *Reservation) string {
+	switch {
+	case sess != nil:
+		return sess.canonical
+	case res != nil:
+		return "a reservation"
+	default:
+		return "nothing"
+	}
 }
 
 // evict tears down slot's current holder and waits for it to let go.
@@ -645,6 +773,10 @@ type AdapterStatus struct {
 	// Reserved is true when an out-of-process consumer (EPG) holds the
 	// adapter rather than a tune session.
 	Reserved bool `json:"reserved,omitempty"`
+	// Present is whether the device node is there right now. Always emitted,
+	// including when true: a client that cannot see the field cannot tell an
+	// unplugged adapter from an old daemon that never reported one.
+	Present bool `json:"present"`
 }
 
 func (p *Pool) Status() []AdapterStatus {
@@ -653,7 +785,7 @@ func (p *Pool) Status() []AdapterStatus {
 	out := make([]AdapterStatus, 0, len(p.order))
 	for _, adapter := range p.order {
 		slot := p.adapters[adapter]
-		st := AdapterStatus{Adapter: adapter, Systems: slot.systems}
+		st := AdapterStatus{Adapter: adapter, Systems: slot.systems, Present: slot.present}
 		switch {
 		case slot.reserved != nil:
 			st.Reserved = true
@@ -685,7 +817,7 @@ func (p *Pool) CanServe(channel string, prio Priority) bool {
 	defer p.mu.Unlock()
 	for _, adapter := range p.order {
 		slot := p.adapters[adapter]
-		if slot.session != nil && slot.session.canonical == canonical {
+		if slot.present && slot.session != nil && slot.session.canonical == canonical {
 			return true
 		}
 	}

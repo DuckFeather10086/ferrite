@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChannelList } from "@/components/ChannelList";
 import { NowPlaying } from "@/components/NowPlaying";
 import { VideoPlayer } from "@/components/VideoPlayer";
@@ -8,6 +8,7 @@ import { WatchAddresses } from "@/components/WatchAddresses";
 import {
   CHANNEL_GROUP_ORDER,
   channelGroup,
+  isSuperseded,
   qualityQuery,
   stopLive,
   switchLive,
@@ -34,6 +35,16 @@ export default function LivePage() {
   const [quality, setQuality] = useState<string | null>(null);
 
   const qualities = useMemo(() => status?.live_qualities ?? [], [status]);
+
+  // Channel surfing is several channel changes in flight at once, and only the
+  // last one is the viewer's answer. Two things keep the others from being
+  // heard: the request is aborted, and — because an abort races a response
+  // already on the wire — every one carries a sequence number and only the
+  // current one may touch state. Without the guard the daemon's reply to a
+  // press the viewer had already moved past would land afterwards and set
+  // `fatal`, putting an error over a channel that was playing.
+  const switchSeq = useRef(0);
+  const switchAbort = useRef<AbortController | null>(null);
 
   // Adopt the remembered choice once, and only if the daemon still offers
   // it — the tier list is config, and a name that has been renamed or
@@ -81,6 +92,11 @@ export default function LivePage() {
   const watch = useCallback(
     async (name: string, tier?: string | null) => {
     const q = tier === undefined ? quality : tier;
+    switchAbort.current?.abort();
+    const ac = new AbortController();
+    switchAbort.current = ac;
+    const seq = ++switchSeq.current;
+    const current = () => seq === switchSeq.current;
     setActive(name);
     setFatal(null);
     setPlayUrl(null);
@@ -94,18 +110,22 @@ export default function LivePage() {
     // instance, but only once React has run the effect: one frame.
     await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
     try {
-      const out = await switchLive(name, q ?? undefined);
+      const out = await switchLive(name, q ?? undefined, ac.signal);
+      if (!current()) return;
       // The daemon says which tier it actually started — an unknown name
       // gets the default rather than an error, and the control should show
       // what is playing rather than what was asked for.
       setQuality(out.quality ?? q ?? null);
       setPlayUrl(playlistFor(name, out.quality ?? q));
     } catch (e) {
+      // Overtaken by a later press, here or at the daemon: not this viewer's
+      // problem, and the press that overtook it owns the screen now.
+      if (isSuperseded(e) || !current()) return;
       // A recording holds the adapter, or the frontend never locked. The
       // reason is on the response, and hls.js would never see it.
       setFatal(e instanceof Error ? e.message : String(e));
     } finally {
-      setTuning(false);
+      if (current()) setTuning(false);
     }
     },
     [quality],

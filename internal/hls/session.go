@@ -51,6 +51,13 @@ const minAudioOffset = 0.01
 // /api/live/{channel}.m3u8 touch before the janitor closes it.
 const DefaultIdleTimeout = 60 * time.Second
 
+// openCancelTimeout bounds how long a channel change waits for the open it
+// just cancelled to let go of the adapter. Generous against what it actually
+// takes — the ffprobe is killed by its context and the tune released on the
+// way out — and it is a backstop, not a budget: expiring it means claiming an
+// adapter that something else may still be holding, so it is logged.
+const openCancelTimeout = 10 * time.Second
+
 // The segmentation of the live stream. These three go together and are
 // the whole of the latency budget on this side of the wire:
 //
@@ -175,12 +182,26 @@ type sessionKey struct {
 
 func (k sessionKey) String() string { return k.channel + "/" + k.quality }
 
+// ErrSuperseded is what an Open returns when a later channel change took the
+// adapter out from under it.
+//
+// It is not a failure the viewer should be shown: the channel they actually
+// asked for is the one that is playing. It exists because the alternative was
+// measured and is worse — a superseded switch used to sit in the API's
+// wait-for-playlist loop for the full 45s and then answer 504, so surfing four
+// channels produced one working picture and three "stream did not start"
+// errors arriving three quarters of a minute later, on top of it.
+var ErrSuperseded = errors.New("hls: superseded by a later channel change")
+
 // openCall is one in-flight session open; done is closed once s/err
-// are set.
+// are set. cancel aborts the open — a cold one spends several seconds in
+// the A/V probe before the session is registered anywhere, and for all of
+// that time a channel change has nothing to close and no way in.
 type openCall struct {
-	done chan struct{}
-	s    *Session
-	err  error
+	done   chan struct{}
+	cancel context.CancelFunc
+	s      *Session
+	err    error
 }
 
 // channelTune is what every quality of one channel shares: the tuner
@@ -315,6 +336,11 @@ type Session struct {
 	// since rather than the running total. Guarded by the Manager's mu.
 	dropsSeen uint64
 	closed    bool
+	// done is closed by tearDown. Anything waiting on this session — the API
+	// holding a request open until the playlist exists — has to stop waiting
+	// when the session goes, or it waits out its whole timeout for a file
+	// whose ffmpeg is already dead.
+	done chan struct{}
 
 	// This session's slice of the channel's caption decode, when there is
 	// one: its own subs.m3u8, mirroring its own segments.
@@ -355,20 +381,31 @@ func (m *Manager) Open(ctx context.Context, channel, quality string) (*Session, 
 			return nil, ctx.Err()
 		}
 	}
-	call := &openCall{done: make(chan struct{})}
-	if m.opening == nil {
-		m.opening = make(map[sessionKey]*openCall)
-	}
-	m.opening[key] = call
-	m.mu.Unlock()
-
 	// A cold open runs the frontend lock timeout (~25s) plus the A/V
 	// probe — longer than a typical player's manifest timeout. Detach
 	// from the request context so an impatient client aborting its
 	// request doesn't tear down the tune mid-flight; its retry joins
 	// via m.opening, and a fully abandoned session is reaped by the
 	// idle janitor.
-	s, err := m.openSession(context.WithoutCancel(ctx), key.channel, q)
+	//
+	// Detached is not the same as uninterruptible, though, and it used to be:
+	// the only thing that can free the adapter for a channel change is
+	// CloseOthers, which walks m.sessions — and an open does not appear there
+	// until ffmpeg is spawned, which on a channel with no cached A/V offset is
+	// five seconds after it took the adapter. For those five seconds a second
+	// channel change found nothing to close and got ErrNoAdapter. So the
+	// detached context stays cancellable and CloseOthers cancels it.
+	openCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancel()
+
+	call := &openCall{done: make(chan struct{}), cancel: cancel}
+	if m.opening == nil {
+		m.opening = make(map[sessionKey]*openCall)
+	}
+	m.opening[key] = call
+	m.mu.Unlock()
+
+	s, err := m.openSession(openCtx, key.channel, q)
 
 	m.mu.Lock()
 	call.s, call.err = s, err
@@ -376,6 +413,40 @@ func (m *Manager) Open(ctx context.Context, channel, quality string) (*Session, 
 	m.mu.Unlock()
 	close(call.done)
 	return s, err
+}
+
+// cancelOpening aborts every in-flight open that is not for keep, and waits
+// for each to unwind. Reports the channels it cancelled.
+//
+// The wait is the point, not a courtesy: an open holds the adapter from its
+// Acquire onwards, so the caller cannot claim it until the cancelled open has
+// actually released. Same ordering as tuner.Pool.evict, for the same reason.
+func (m *Manager) cancelOpening(keep string) []string {
+	m.mu.Lock()
+	var (
+		doomed   []*openCall
+		channels []string
+	)
+	for key, call := range m.opening {
+		if key.channel == keep {
+			continue
+		}
+		doomed = append(doomed, call)
+		channels = append(channels, key.channel)
+	}
+	m.mu.Unlock()
+
+	for i, call := range doomed {
+		call.cancel()
+		select {
+		case <-call.done:
+		case <-time.After(openCancelTimeout):
+			slog.Warn("hls: an in-flight open did not unwind when cancelled",
+				"channel", channels[i], "waited", openCancelTimeout)
+		}
+	}
+	sort.Strings(channels)
+	return dedupe(channels)
 }
 
 // tuneFor returns the channel's shared tune, acquiring the lease if this
@@ -459,7 +530,14 @@ func (m *Manager) openSession(ctx context.Context, channel string, q Quality) (*
 	// the tune the first one is already on.
 	tune, err := m.tuneFor(ctx, channel)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ErrSuperseded
+		}
 		return nil, err
+	}
+	if ctx.Err() != nil {
+		m.releaseTune(tune)
+		return nil, ErrSuperseded
 	}
 	canonical := tune.channel
 
@@ -508,7 +586,7 @@ func (m *Manager) openSession(ctx context.Context, channel string, q Quality) (*
 		// The probe consumes a few seconds of this session's subscription;
 		// the main pump picks up where it leaves off. Failure is
 		// non-fatal — we just start uncorrected.
-		off, perr := probeAudioOffset(context.Background(), m.FFprobeBin, sub, m.probeSeconds())
+		off, perr := probeAudioOffset(ctx, m.FFprobeBin, sub, m.probeSeconds())
 		if perr != nil {
 			slog.Warn("hls: A/V offset probe failed; starting without sync correction",
 				"channel", canonical, "err", perr)
@@ -518,6 +596,17 @@ func (m *Manager) openSession(ctx context.Context, channel string, q Quality) (*
 				"channel", canonical, "offset_s", audioOffset)
 			m.storeOffset(canonical, off)
 		}
+	}
+
+	// The probe is the long pole of a cold open and the last thing that
+	// happens before this session becomes visible to CloseOthers, so it is
+	// also the last chance to notice that a later channel change wants the
+	// adapter. Give it back rather than spawning an encoder for a channel
+	// nobody is on any more.
+	if err := ctx.Err(); err != nil {
+		m.unsubscribe(tune, sub, ownsSub)
+		m.releaseTune(tune)
+		return nil, ErrSuperseded
 	}
 
 	// The playlist is served at /api/live/{channel}.m3u8 but segments are
@@ -534,13 +623,20 @@ func (m *Manager) openSession(ctx context.Context, channel string, q Quality) (*
 		// limited). Keeps a long-running session from flooding the log.
 		"-hide_banner", "-loglevel", "error", "-nostats",
 		"-fflags", "+genpts+discardcorrupt",
-		// analyzeduration is in MICROseconds: the old 10M meant ffmpeg
-		// spent up to 10 *seconds* in find_stream_info before emitting
-		// anything, which measured as ~9.7s of the ~14s channel change
-		// (the tune itself is ~2.3s). The service PID tap carries one
-		// program with a known shape — mpeg2video + AAC (+ caption) —
-		// so a 1s window is plenty to identify it.
-		"-probesize", "5M", "-analyzeduration", "1M",
+		// analyzeduration is in MICROseconds and probesize in bytes, and
+		// find_stream_info runs until *either* is exhausted — so both have to
+		// come down together or the other one is still the wall. The original
+		// 10M/5M spent up to 10 *seconds* here, ~9.7s of a ~14s channel
+		// change; 1M/5M left 1.5s of it, because 5 MB of a 17 Mbit/s service
+		// tap is 2.4s of stream and that is what was actually binding.
+		//
+		// The service PID tap carries one program of a shape this daemon
+		// already knows — mpeg2video + AAC, the caption and data PIDs dropped
+		// below — so 0.2s / 1 MB identifies it with room to spare. Measured
+		// end to end on this box: first segment on disk at 4.54s against
+		// 6.06s, with the segment ffprobing as h264 1280x720 30000/1001 +
+		// aac 48000 stereo either way.
+		"-probesize", "1M", "-analyzeduration", "200k",
 		"-i", "pipe:0",
 		// -sn -dn: ffmpeg has no ARIB caption decoder, so the caption and
 		// data PIDs are dropped here and decoded separately (internal/caption).
@@ -613,6 +709,7 @@ func (m *Manager) openSession(ctx context.Context, channel string, q Quality) (*
 		ownsSub:  ownsSub,
 		ff:       ff,
 		lastSeen: time.Now(),
+		done:     make(chan struct{}),
 	}
 
 	go pumpToFFmpeg(sub, ff.Stdin)
@@ -759,7 +856,16 @@ func (m *Manager) CloseOthers(channel string) []string {
 			"channel", ch, "switching_to", keep)
 		m.Close(ch)
 	}
-	return others
+
+	// An open that has not reached ffmpeg yet is not in m.sessions and so is
+	// invisible above, but it is already holding the adapter. Take it too.
+	for _, ch := range m.cancelOpening(keep) {
+		slog.Info("hls: cancelling an in-flight tune to free the adapter",
+			"channel", ch, "switching_to", keep)
+		others = append(others, ch)
+	}
+	sort.Strings(others)
+	return dedupe(others)
 }
 
 // Close tears down every session on a channel — all of its qualities, and
@@ -911,6 +1017,9 @@ func (s *Session) tearDown() {
 		return
 	}
 	s.closed = true
+	if s.done != nil {
+		close(s.done)
+	}
 	if s.ff != nil {
 		_ = s.ff.Close()
 	}
@@ -925,6 +1034,10 @@ func (s *Session) tearDown() {
 		s.mgr.releaseTune(s.tune)
 	}
 }
+
+// Done is closed when the session is torn down, for whatever reason: a
+// channel change closing it, the idle janitor reaping it, or shutdown.
+func (s *Session) Done() <-chan struct{} { return s.done }
 
 // LastSeen returns the timestamp of the last Open/Touch — for tests.
 func (s *Session) LastSeen() time.Time { return s.lastSeen }

@@ -271,8 +271,22 @@ func run(cfgPath, logLevel string) error {
 		StartedAt: time.Now(),
 		Version:   version,
 		Preflight: preflight,
+		Adapters:  adapters,
 		Web:       web.FS(),
 	})
+
+	// Keep the pool's idea of what is attached in step with the hardware, so
+	// a stick pulled out of the back of the box stops being offered to
+	// claims and a stick pushed back in starts being offered again — without
+	// a restart, and without the failure showing up as the wrong error.
+	presence := &tuner.PresenceWatcher{Pool: tunerPool, Adapters: adapters}
+	go func() {
+		if err := presence.Run(ctx); err != nil && ctx.Err() == nil {
+			slog.Warn("adapter presence watcher exited", "err", err)
+		}
+	}()
+	slog.Info("adapter presence watcher started",
+		"adapters", len(adapters), "every", tuner.DefaultPresenceInterval)
 
 	go func() {
 		if err := sched.Run(ctx); err != nil && ctx.Err() == nil {

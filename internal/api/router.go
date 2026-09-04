@@ -118,6 +118,11 @@ type Deps struct {
 	// updating; the zero value reports nothing, which is what a healthy box
 	// and a test both want.
 	Preflight config.Preflight
+	// Adapters is the configured tuner inventory, so /api/status can report
+	// one that is not plugged in alongside the programs that are missing.
+	// Unlike Preflight this is checked per request rather than at startup:
+	// a USB stick is the one thing on that list that comes and goes.
+	Adapters []config.Adapter
 }
 
 // NewRouter returns an http.Handler with all endpoints wired.
@@ -313,8 +318,22 @@ func (d Deps) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// without polling a second endpoint: a box whose dvb-rs has gone missing
 	// looks completely normal from every other field on this response, which
 	// is how it once stayed broken for three days.
-	if len(d.Preflight.Problems) > 0 {
-		resp["problems"] = d.Preflight.Problems
+	problems := d.Preflight.Problems
+	// And the hardware, which the startup check cannot speak for: a tuner is
+	// the one dependency that can walk away while the daemon is running. Same
+	// list so the same banner shows it, because "the stick is unplugged" and
+	// "dvb-rs is missing" are the same news to whoever is looking at the page.
+	for _, a := range tuner.Missing(d.Adapters) {
+		problems = append(problems, config.Problem{
+			Setting: fmt.Sprintf("adapter %d", a.N),
+			Path:    tuner.DevicePath(a),
+			Err:     "not attached",
+			Breaks:  "everything this adapter would tune — live, recordings, EPG, scan",
+			Fatal:   len(d.Adapters) == 1,
+		})
+	}
+	if len(problems) > 0 {
+		resp["problems"] = problems
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -647,8 +666,8 @@ func (d Deps) handleLivePlaylist(w http.ResponseWriter, r *http.Request) {
 	// request until the playlist exists; an immediate answer would
 	// describe a stream with nothing in it, and most players treat that
 	// as fatal.
-	if err := waitForFile(r.Context(), s.PlaylistPath, 30*time.Second); err != nil {
-		writeErr(w, http.StatusGatewayTimeout, "stream did not start: "+err.Error())
+	if err := waitForPlaylist(r.Context(), s, 30*time.Second); err != nil {
+		writeLiveWaitErr(w, err)
 		return
 	}
 	writePlaylist(w, masterPlaylist(s, d.qualityOf(s), "", subsAnnounced(r.Context(), s)))
@@ -684,9 +703,36 @@ func (d Deps) handleLiveVideoPlaylist(w http.ResponseWriter, r *http.Request) {
 	writePlaylist(w, stripSegmentBase(playlist))
 }
 
+// playlistPoll is how often waitForPlaylist stats the file. It is on the
+// critical path of every channel change — the playlist appearing is what ends
+// the wait — and a stat on the tmpfs the segments live on costs nothing, so it
+// is short enough not to be a term in the answer.
+const playlistPoll = 50 * time.Millisecond
+
+// waitForPlaylist blocks until the session's playlist exists and is non-empty,
+// the session is torn down, the context is canceled, or timeout elapses.
+//
+// Watching the session, and not only the file, is what makes a superseded
+// channel change answer at once. A later switch closes this session and kills
+// its ffmpeg, so the file it is waiting for will never be written; polling on
+// alone meant sitting out the full 45s and then reporting "stream did not
+// start" for a channel the viewer had already moved off. Measured: surfing
+// four channels produced one 200 and three 504s, each arriving 45s later on
+// top of a picture that was playing fine.
+func waitForPlaylist(ctx context.Context, s *hls.Session, timeout time.Duration) error {
+	return waitForFileUntil(ctx, s.PlaylistPath, timeout, s.Done())
+}
+
 // waitForFile polls until path exists and is non-empty, the context is
 // canceled, or timeout elapses.
 func waitForFile(ctx context.Context, path string, timeout time.Duration) error {
+	return waitForFileUntil(ctx, path, timeout, nil)
+}
+
+// waitForFileUntil is waitForFile with one more way to stop: abort fires when
+// whatever was going to write the file has gone away. A nil abort never fires,
+// which is the plain-file case.
+func waitForFileUntil(ctx context.Context, path string, timeout time.Duration, abort <-chan struct{}) error {
 	deadline := time.Now().Add(timeout)
 	for {
 		if fi, err := os.Stat(path); err == nil && fi.Size() > 0 {
@@ -696,9 +742,11 @@ func waitForFile(ctx context.Context, path string, timeout time.Duration) error 
 			return fmt.Errorf("no playlist after %s", timeout)
 		}
 		select {
+		case <-abort:
+			return hls.ErrSuperseded
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(250 * time.Millisecond):
+		case <-time.After(playlistPoll):
 		}
 	}
 }
@@ -790,12 +838,16 @@ func (d Deps) handleLiveSwitch(w http.ResponseWriter, r *http.Request) {
 			s, err = d.HLS.Open(r.Context(), channel, quality)
 		}
 	}
+	if errors.Is(err, hls.ErrSuperseded) {
+		writeSuperseded(w)
+		return
+	}
 	if err != nil {
 		writeTunerErr(w, err)
 		return
 	}
-	if err := waitForFile(r.Context(), s.PlaylistPath, 45*time.Second); err != nil {
-		writeErr(w, http.StatusGatewayTimeout, "stream did not start: "+err.Error())
+	if err := waitForPlaylist(r.Context(), s, 45*time.Second); err != nil {
+		writeLiveWaitErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -934,7 +986,7 @@ const subsWait = 3 * time.Second
 // Captions on its own.
 func subsAnnounced(ctx context.Context, s *hls.Session) bool {
 	if s.Captions && !subsReady(s.Dir) {
-		_ = waitForFile(ctx, filepath.Join(s.Dir, caption.SubsPlaylist), subsWait)
+		_ = waitForFileUntil(ctx, filepath.Join(s.Dir, caption.SubsPlaylist), subsWait, s.Done())
 	}
 	return subsReady(s.Dir)
 }
@@ -1024,6 +1076,30 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
 }
 
+// writeSuperseded answers a channel change that a later one overtook.
+//
+// 409 rather than 5xx because nothing is broken — the adapter went to a newer
+// request, which is exactly what a viewer pressing the next channel wants —
+// and the flag is there so a client can tell this apart from a real failure
+// and say nothing. Without it the newest press works and every press behind
+// it puts an error on screen.
+func writeSuperseded(w http.ResponseWriter) {
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error":      "superseded by a later channel change",
+		"superseded": true,
+	})
+}
+
+// writeLiveWaitErr reports why a request that was holding the connection open
+// for a playlist gave up. A superseded wait is not a fault; a timeout is.
+func writeLiveWaitErr(w http.ResponseWriter, err error) {
+	if errors.Is(err, hls.ErrSuperseded) {
+		writeSuperseded(w)
+		return
+	}
+	writeErr(w, http.StatusGatewayTimeout, "stream did not start: "+err.Error())
+}
+
 // writeTunerErr maps a tune failure onto a status code: a busy tuner is
 // 409 (the caller can stop something and retry), a channel this box has no
 // frontend for is 501, and anything else is a real fault worth surfacing
@@ -1035,6 +1111,11 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 // hardware is missing, which is the actual repair.
 func writeTunerErr(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, tuner.ErrAdapterUnplugged):
+		// 503 rather than the 501 below: the hardware this box is configured
+		// for exists, it is just not plugged in right now, so a retry after
+		// someone pushes the stick back in is exactly the right thing to do.
+		writeErr(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, tuner.ErrNoCapableAdapter):
 		writeErr(w, http.StatusNotImplemented, err.Error())
 	case errors.Is(err, tuner.ErrNoAdapter):
